@@ -1,0 +1,38 @@
+{
+  "name": "@auxinux/api",
+  "version": "0.7.40",
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@auxinux/shared": "*",
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/csrf-protection": "^7.1.0",
+    "@fastify/multipart": "^9.0.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/session": "^11.1.1",
+    "@fastify/static": "^10.1.2",
+    "@types/nodemailer": "^6.4.23",
+    "acme-client": "^5.4.0",
+    "argon2": "^0.43.0",
+    "better-sqlite3": "^11.3.0",
+    "fastify": "^5.0.0",
+    "node-pty": "^1.0.0",
+    "nodemailer": "^9.0.3",
+    "uuid": "^11.1.1",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

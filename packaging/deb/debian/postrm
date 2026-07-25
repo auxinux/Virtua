@@ -1,0 +1,55 @@
+#!/bin/bash
+# =============================================================================
+#  auxinux-virtua postrm
+#  $1 = remove | purge | upgrade | ...
+#  - remove : drop systemd units, leave data intact
+#  - purge  : also remove panel data, .env and the service user
+#  Guest VMs / LXC / Docker containers are NEVER deleted here.
+# =============================================================================
+set -e
+
+remove_units() {
+  rm -f /lib/systemd/system/auxinux-virtua-setup.service 2>/dev/null || true
+  rm -f /etc/systemd/system/auxinuxvirtual-api.service 2>/dev/null || true
+  rm -f /etc/systemd/system/auxinuxvirtual-runner.service 2>/dev/null || true
+  rm -f /etc/systemd/system/auxinuxvirtual-netguard.service 2>/dev/null || true
+  rm -f /usr/local/sbin/auxinuxvirtual-netguard 2>/dev/null || true
+  rm -f /usr/bin/virtua 2>/dev/null || true
+  if [ -L /usr/local/bin/virtua ]; then
+    rm -f /usr/local/bin/virtua 2>/dev/null || true
+  fi
+  rm -f /etc/systemd/system/multi-user.target.wants/auxinux-virtua-setup.service 2>/dev/null || true
+  rm -f /etc/systemd/system/multi-user.target.wants/auxinuxvirtual-netguard.service 2>/dev/null || true
+  rm -f /run/auxinux-virtua-setup.env 2>/dev/null || true
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+}
+
+case "$1" in
+  remove)
+    if [ -d /run/systemd/system ]; then
+      systemctl disable auxinuxvirtual-api.service >/dev/null 2>&1 || true
+      systemctl disable auxinuxvirtual-runner.service >/dev/null 2>&1 || true
+    fi
+    remove_units
+    ;;
+  purge)
+    if [ -d /run/systemd/system ]; then
+      systemctl disable auxinuxvirtual-api.service >/dev/null 2>&1 || true
+      systemctl disable auxinuxvirtual-runner.service >/dev/null 2>&1 || true
+    fi
+    remove_units
+    # Purge panel data + env (VMs/containers on the host are NOT touched).
+    rm -rf /var/lib/auxinuxvirtual 2>/dev/null || true
+    rm -f /opt/auxinux-virtua/apps/api/.env 2>/dev/null || true
+    # Remove the service user if present.
+    if id auxinuxvirtual >/dev/null 2>&1; then
+      userdel auxinuxvirtual 2>/dev/null || true
+    fi
+    ;;
+  upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    ;;
+esac
+
+exit 0

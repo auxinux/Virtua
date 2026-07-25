@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# OCF resource agent for the single movable AuxiNux VDM LXC.
+set -u
+
+: "${OCF_ROOT:=/usr/lib/ocf}"
+. "${OCF_ROOT}/lib/heartbeat/ocf-shellfuncs"
+
+NAME="${OCF_RESKEY_lxc_name:-auxinux-vdm}"
+LXC_PATH="${OCF_RESKEY_lxc_path:-/var/lib/lxc}"
+
+meta_data() {
+  cat <<'XML'
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="vdm-lxc" version="1.0">
+  <version>1.0</version>
+  <longdesc lang="en">Starts exactly one movable AuxiNux VDM LXC.</longdesc>
+  <shortdesc lang="en">AuxiNux VDM LXC</shortdesc>
+  <parameters>
+    <parameter name="lxc_name" unique="1" required="1"><longdesc lang="en">LXC name</longdesc><shortdesc lang="en">LXC name</shortdesc><content type="string" default="auxinux-vdm"/></parameter>
+    <parameter name="lxc_path" unique="1" required="1"><longdesc lang="en">Shared LXC path</longdesc><shortdesc lang="en">LXC path</shortdesc><content type="string"/></parameter>
+  </parameters>
+  <actions>
+    <action name="start" timeout="120s"/>
+    <action name="stop" timeout="120s"/>
+    <action name="monitor" interval="10s" timeout="20s"/>
+    <action name="meta-data" timeout="5s"/>
+    <action name="validate-all" timeout="10s"/>
+  </actions>
+</resource-agent>
+XML
+}
+
+validate() {
+  [[ -n "$NAME" && -d "$LXC_PATH/$NAME" && -f "$LXC_PATH/$NAME/config" ]] || return "$OCF_ERR_CONFIGURED"
+  command -v lxc-start >/dev/null 2>&1 || return "$OCF_ERR_INSTALLED"
+  return "$OCF_SUCCESS"
+}
+
+monitor() {
+  lxc-info -P "$LXC_PATH" -n "$NAME" -sH 2>/dev/null | grep -qx RUNNING || return "$OCF_NOT_RUNNING"
+  lxc-attach -P "$LXC_PATH" -n "$NAME" -- systemctl is-active --quiet auxinux-vdm 2>/dev/null || return "$OCF_ERR_GENERIC"
+  return "$OCF_SUCCESS"
+}
+
+start() {
+  monitor && return "$OCF_SUCCESS"
+  validate || return $?
+  lxc-start -P "$LXC_PATH" -n "$NAME" || return "$OCF_ERR_GENERIC"
+  local i
+  for i in $(seq 1 60); do monitor && return "$OCF_SUCCESS"; sleep 2; done
+  return "$OCF_ERR_GENERIC"
+}
+
+stop() {
+  monitor || return "$OCF_SUCCESS"
+  lxc-stop -P "$LXC_PATH" -n "$NAME" -t 90 || lxc-stop -P "$LXC_PATH" -n "$NAME" -k || return "$OCF_ERR_GENERIC"
+  return "$OCF_SUCCESS"
+}
+
+case "${1:-}" in
+  meta-data) meta_data; exit "$OCF_SUCCESS" ;;
+  validate-all) validate; exit $? ;;
+  monitor|status) monitor; exit $? ;;
+  start) start; exit $? ;;
+  stop) stop; exit $? ;;
+  *) exit "$OCF_ERR_UNIMPLEMENTED" ;;
+esac

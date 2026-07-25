@@ -1,0 +1,44 @@
+{
+  "name": "auxinux-controle-virtua",
+  "version": "0.7.40",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=apps/runner\" \"npm run dev --workspace=apps/api\" \"npm run dev --workspace=apps/ui\"",
+    "dev:ui": "npm run dev --workspace=apps/ui",
+    "dev:api": "npm run dev --workspace=apps/api",
+    "dev:runner": "npm run dev --workspace=apps/runner",
+    "dev:vdm": "concurrently \"AUXINUX_VDM_PORT=3002 npm run dev --workspace=apps/vdm\" \"npm run dev --workspace=apps/vdm-ui\"",
+    "dev:vdm-backend": "AUXINUX_VDM_PORT=3002 npm run dev --workspace=apps/vdm",
+    "dev:vdm-ui": "npm run dev --workspace=apps/vdm-ui",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/runner && npm run build --workspace=apps/api && npm run build --workspace=apps/ui && npm run build --workspace=apps/cli && npm run build --workspace=apps/vdm && npm run build --workspace=apps/vdm-ui",
+    "build:shared": "npm run build --workspace=packages/shared",
+    "build:runner": "npm run build --workspace=apps/runner",
+    "build:api": "npm run build --workspace=apps/api",
+    "build:ui": "npm run build --workspace=apps/ui",
+    "build:cli": "npm run build --workspace=apps/cli",
+    "build:vdm": "npm run build --workspace=apps/vdm && npm run build --workspace=apps/vdm-ui",
+    "test": "npm run test:shared && npm run test:vdm",
+    "test:shared": "npm test --workspace=packages/shared",
+    "test:vdm": "npm test --workspace=apps/vdm",
+    "check": "npm run build && npm test"
+  },
+  "allowScripts": {
+    "argon2@0.43.1": true,
+    "better-sqlite3@11.10.0": true,
+    "esbuild@0.21.5": true,
+    "esbuild@0.27.3": true,
+    "node-pty@1.1.0": true
+  },
+  "overrides": {
+    "form-data": "4.0.6"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "form-data": "4.0.6",
+    "typescript": "^5.5.4"
+  }
+}

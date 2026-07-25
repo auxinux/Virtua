@@ -1,0 +1,28 @@
+Description: Skip the xrdp login window when [Globals] autorun is configured
+ Upstream xrdp only skips its login window when the RDP client sends
+ autologon credentials (INFO_AUTOLOGON). Microsoft clients only send that
+ flag when a password is stored, so a downloaded .rdp file always lands on
+ the xrdp login screen on first use.
+ .
+ Virtua runs one dedicated xrdp instance per VM with a single [vm] session
+ whose values are all fixed (ip/port/username/password), selected by
+ autorun=vm. In that setup the login window serves no purpose: connect
+ directly whenever autorun is set, exactly like the client-autologon path.
+ The module-failure path is unchanged: on connect failure xrdp still falls
+ back to the login window (WMLS_RESET -> login), so no retry loop occurs.
+ .
+ Stock configurations (no autorun in xrdp.ini) are unaffected.
+Author: AuxiNux Virtua
+Forwarded: not-needed
+--- a/xrdp/xrdp_wm.c
++++ b/xrdp/xrdp_wm.c
+@@ -613,7 +613,8 @@
+     xrdp_wm_load_static_pointers(self);
+     self->screen->bg_color = self->xrdp_config->cfg_globals.ls_top_window_bg_color;
+
+-    if (self->session->client_info->rdp_autologin)
++    if (self->session->client_info->rdp_autologin ||
++            (autorun_name[0] != '\0'))
+     {
+         /*
+          * NOTE: this should eventually be accessed from self->xrdp_config

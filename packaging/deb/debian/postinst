@@ -1,0 +1,106 @@
+#!/bin/bash
+# =============================================================================
+#  auxinux-virtua postinst
+#  $1 = configure (fresh install or upgrade)
+#  $2 = <previous-version> when upgrading, empty on first install
+#
+#  We must NOT run apt-get here (the dpkg lock is held by the parent apt). So we
+#  pick the install mode and kick off the provisioning systemd unit non-blocking;
+#  it runs install.sh once the apt transaction releases the lock.
+# =============================================================================
+set -e
+
+INSTALL_DIR="/opt/auxinux-virtua"
+SETUP_UNIT="auxinux-virtua-setup.service"
+
+install_virtua_placeholder() {
+  mkdir -p /usr/bin
+  cat > /usr/bin/virtua <<'EOF'
+#!/bin/sh
+REAL_CLI="/opt/auxinux-virtua/apps/cli/dist/cli.js"
+
+if [ -x "$REAL_CLI" ]; then
+  exec "$REAL_CLI" "$@"
+fi
+
+if command -v virtuaos >/dev/null 2>&1; then
+  case "${1:-}" in
+    setup)
+      shift
+      exec virtuaos setup "$@"
+      ;;
+  esac
+fi
+
+cat >&2 <<'MSG'
+virtua is not ready yet: auxinux-virtua is still provisioning or the last setup failed.
+
+Watch the setup:
+  virtuaos setup
+
+Or inspect logs:
+  journalctl -fu auxinux-virtua-setup
+MSG
+exit 127
+EOF
+  chmod 0755 /usr/bin/virtua
+
+  # /usr/local/bin can be absent or unusual on minimal images. Keep it best-effort
+  # so the package never fails configuration just because this convenience path is
+  # unavailable.
+  if [ -d /usr/local/bin ] || mkdir -p /usr/local/bin 2>/dev/null; then
+    ln -sf /usr/bin/virtua /usr/local/bin/virtua 2>/dev/null || true
+  fi
+}
+
+case "$1" in
+  configure)
+    # Make bundled scripts executable (dpkg preserves modes, but be safe).
+    chmod 0755 "${INSTALL_DIR}/packaging/deb/run-setup.sh" 2>/dev/null || true
+    find "${INSTALL_DIR}/INSTALL" -name "*.sh" -exec chmod 0755 {} \; 2>/dev/null || true
+    install_virtua_placeholder
+
+    # First install (no previous version in $2) → full install; otherwise update.
+    if [ -z "$2" ]; then
+      MODE="install"
+    else
+      MODE="update"
+    fi
+
+    # Pass the mode to the setup unit via a runtime env file.
+    mkdir -p /run
+    echo "AUXINUX_VIRTUA_SETUP_MODE=${MODE}" > /run/auxinux-virtua-setup.env
+
+    # Reload units (the service file ships in /lib/systemd/system) and enable it.
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload || true
+      systemctl enable "${SETUP_UNIT}" >/dev/null 2>&1 || true
+      # --no-block: return immediately so the apt transaction can finish and
+      # release the dpkg lock; the unit waits for the lock then runs install.sh.
+      systemctl start --no-block "${SETUP_UNIT}" || true
+      # Prefer the live progress TUI when the Rust CLI is present; always offer
+      # the journal as a fallback (the install runs MANY apt steps in the
+      # background — this is what holds the apt lock after "apt install" returns).
+      if command -v virtuaos >/dev/null 2>&1; then
+        watch_hint="virtuaos setup            # live progress bar"
+      else
+        watch_hint="journalctl -fu auxinux-virtua-setup"
+      fi
+      echo ""
+      echo "  ┌──────────────────────────────────────────────────────────┐"
+      printf "  │  auxinux-virtua: provisioning (%-7s) running in background │\n" "${MODE}"
+      echo "  │  It installs Node, Docker, KVM/libvirt, LXC… (several min) │"
+      echo "  │                                                            │"
+      printf "  │  Watch it:  %-46s │\n" "${watch_hint}"
+      echo "  └──────────────────────────────────────────────────────────┘"
+      echo ""
+    else
+      echo "auxinux-virtua: systemd not detected — run manually:"
+      echo "  AUXINUX_VIRTUA_SETUP_MODE=${MODE} ${INSTALL_DIR}/packaging/deb/run-setup.sh"
+    fi
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+esac
+
+exit 0

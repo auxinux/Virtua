@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AuxiNux Debian/Ubuntu mirror sync every 6 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

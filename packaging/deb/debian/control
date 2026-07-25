@@ -1,0 +1,25 @@
+Package: auxinux-virtua
+Version: @VERSION@
+Architecture: amd64
+Maintainer: AuxiNux <support@auxinux.ca>
+Provides: virtua
+Section: admin
+Priority: optional
+Homepage: https://auxinux.ca
+Depends: bash, coreutils, curl, ca-certificates, gnupg, sudo, systemd-sysv, lsb-release
+Recommends: virtuaos-cli, qemu-system-x86, libvirt-daemon-system, lxc, bridge-utils, iptables, nftables
+Description: AuxiNux Virtua Control — web hypervisor panel for Debian 13
+ AuxiNux Virtua Control is a self-hosted web panel to manage KVM/QEMU virtual
+ machines, LXC containers and Docker on a Debian 13 host, with per-client
+ resource attribution, networking (OVH/cloud-style bridges with virtual MAC),
+ storage, backups and a datacenter mode (VDM).
+ .
+ This package ships the application sources and provisions the host through the
+ bundled installer (Node.js runtime, Docker, the KVM/libvirt stack, systemd
+ services and the vmbr0 public bridge) right after installation. The heavy
+ provisioning runs in a background systemd unit (auxinux-virtua-setup.service)
+ so the apt transaction returns immediately; follow it with:
+ .
+   journalctl -fu auxinux-virtua-setup
+ .
+ Once finished, the panel is available on https://<host> and http://<host>:8441.

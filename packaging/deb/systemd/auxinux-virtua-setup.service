@@ -1,0 +1,23 @@
+[Unit]
+Description=AuxiNux Virtua — provisioning (runs install.sh after apt)
+Documentation=https://auxinux.ca
+# Run after the network is up; the unit itself waits for the dpkg/apt lock.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+# AUXINUX_VIRTUA_SETUP_MODE is written by the .deb maintainer scripts:
+#   "install" on first install, "update" on upgrade.
+Environment=AUXINUX_VIRTUA_SETUP_MODE=update
+EnvironmentFile=-/run/auxinux-virtua-setup.env
+Environment=DEBIAN_FRONTEND=noninteractive
+ExecStart=/opt/auxinux-virtua/packaging/deb/run-setup.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=auxinux-virtua-setup
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+#!/bin/bash
+# =============================================================================
+#  auxinux-virtua prerm
+#  $1 = remove | upgrade | deconfigure
+#  On remove (not upgrade) we stop the panel services. We deliberately do NOT
+#  delete user data (/var/lib/auxinuxvirtual) here — that is handled on purge.
+# =============================================================================
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    if [ -d /run/systemd/system ]; then
+      systemctl stop auxinuxvirtual-api.service 2>/dev/null || true
+      systemctl stop auxinuxvirtual-runner.service 2>/dev/null || true
+      systemctl disable auxinux-virtua-setup.service >/dev/null 2>&1 || true
+    fi
+    ;;
+  upgrade)
+    # Keep services running across an upgrade; the setup unit will restart them.
+    ;;
+esac
+
+exit 0

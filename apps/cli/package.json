@@ -1,0 +1,21 @@
+{
+  "name": "@auxinux/cli",
+  "version": "0.7.40",
+  "type": "module",
+  "bin": {
+    "virtua": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@auxinux/shared": "*",
+    "cli-table3": "^0.6.5",
+    "ora": "^9.4.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.4"
+  }
+}

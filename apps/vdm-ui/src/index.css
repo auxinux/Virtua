@@ -1,0 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+
+  body {
+    background-color: #0d1117;
+    color: #e6edf3;
+    font-family: "Inter", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #0d1117; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+}
+
+@layer components {
+  .vdm-card {
+    @apply bg-vdm-surface border border-vdm-border rounded-lg;
+  }
+
+  .vdm-btn {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .vdm-btn-primary {
+    @apply vdm-btn bg-vdm-accent hover:bg-vdm-accentHover text-white;
+  }
+
+  .vdm-btn-ghost {
+    @apply vdm-btn text-vdm-textMuted hover:text-vdm-text hover:bg-vdm-surfaceHover;
+  }
+
+  .vdm-btn-danger {
+    @apply vdm-btn bg-vdm-danger/10 text-vdm-danger hover:bg-vdm-danger/20 border border-vdm-danger/30;
+  }
+
+  .vdm-btn-success {
+    @apply vdm-btn bg-vdm-success/10 text-vdm-success hover:bg-vdm-success/20 border border-vdm-success/30;
+  }
+
+  .vdm-btn-warning {
+    @apply vdm-btn bg-vdm-warning/10 text-vdm-warning hover:bg-vdm-warning/20 border border-vdm-warning/30;
+  }
+
+  .vdm-input {
+    @apply w-full bg-vdm-bg border border-vdm-border rounded px-3 py-2 text-sm text-vdm-text placeholder-vdm-textMuted focus:outline-none focus:border-vdm-accent transition-colors;
+  }
+
+  .vdm-label {
+    @apply block text-xs font-medium text-vdm-textMuted mb-1;
+  }
+
+  .vdm-table {
+    @apply w-full text-sm;
+  }
+
+  .vdm-table th {
+    @apply text-left text-xs font-semibold text-vdm-textMuted uppercase tracking-wider px-4 py-2 border-b border-vdm-border bg-vdm-bg/50;
+  }
+
+  .vdm-table td {
+    @apply px-4 py-2.5 border-b border-vdm-border/50;
+  }
+
+  .vdm-table tr:hover td {
+    @apply bg-vdm-surfaceHover;
+  }
+
+  .vdm-table tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full flex-shrink-0;
+  }
+
+  .status-online { @apply bg-vdm-online; }
+  .status-offline { @apply bg-vdm-offline; }
+  .status-running { @apply bg-vdm-success; }
+  .status-stopped { @apply bg-vdm-textMuted; }
+  .status-paused { @apply bg-vdm-warning; }
+  .status-unknown { @apply bg-vdm-unknown; }
+
+  .pill {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .pill-green { @apply pill bg-vdm-success/15 text-vdm-success; }
+  .pill-red { @apply pill bg-vdm-danger/15 text-vdm-danger; }
+  .pill-yellow { @apply pill bg-vdm-warning/15 text-vdm-warning; }
+  .pill-gray { @apply pill bg-vdm-textMuted/15 text-vdm-textMuted; }
+  .pill-blue { @apply pill bg-vdm-accent/15 text-vdm-accentHover; }
+
+  /* Progress bar */
+  .progress-bar { @apply w-full bg-vdm-border rounded-full overflow-hidden h-1.5; }
+  .progress-fill { @apply h-full bg-vdm-accent rounded-full transition-all; }
+  .progress-fill-green { @apply h-full bg-vdm-success rounded-full transition-all; }
+  .progress-fill-warning { @apply h-full bg-vdm-warning rounded-full transition-all; }
+  .progress-fill-danger { @apply h-full bg-vdm-danger rounded-full transition-all; }
+}
