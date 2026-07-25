@@ -1,100 +1,123 @@
 # Virtua
 
-Virtua est le plan de contrôle de virtualisation AuxiNux. Ce monorepo contient
-l'API HTTP/WebSocket, le runner privilégié, les interfaces Web, la CLI, le
-gestionnaire multi-nœuds VDM et les outils de packaging Debian.
+Virtua est une plateforme de virtualisation permettant de gérer des machines virtuelles (QEMU/KVM), des conteneurs LXC et Docker via une interface web et une API REST.
 
-Le client desktop, l'image VirtuaOS et les noyaux sont des projets séparés. Ils
-ne doivent pas être ajoutés à ce dépôt.
+## Architecture
 
-## Composants
+Le projet suit une architecture **séparation des privilèges** :
 
-| Chemin | Rôle |
-|---|---|
-| `apps/api` | API Fastify, authentification, RBAC, tâches et relais de consoles |
-| `apps/runner` | Opérations système privilégiées via un socket Unix |
-| `apps/ui` | Interface d'administration React/Vite |
-| `apps/cli` | Client en ligne de commande `virtua` |
-| `apps/vdm` | Orchestrateur multi-nœuds et haute disponibilité |
-| `apps/vdm-ui` | Interface du VDM |
-| `packages/shared` | Types, schémas Zod et utilitaires partagés |
-| `INSTALL` | Installation et mise à jour sur Debian 13 |
-| `packaging` | Construction des paquets Debian et du dépôt APT |
+```
+┌─────────────────┐
+│  Navigateur/CLI │
+└────────┬────────┘
+         │ HTTP/WebSocket
+         ▼
+┌─────────────────┐     ┌─────────────┐
+│   API Fastify   │────▶│   SQLite    │
+│   (apps/api)    │     │ (users,     │
+└────────┬────────┘     │  RBAC, ...) │
+         │ JSONL socket └─────────────┘
+         ▼
+┌─────────────────┐     ┌─────────────┐
+│ Runner (root)   │────▶│ libvirt/QEMU│
+│ (apps/runner)   │     │ LXC         │
+└─────────────────┘     │ Docker      │
+                        │ Réseau      │
+                        │ Stockage    │
+                        └─────────────┘
+```
 
-Le détail des responsabilités et des flux est décrit dans
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-Les constats de l'audit de transfert sont conservés dans
-[`docs/AUDIT_TRANSFERT.md`](docs/AUDIT_TRANSFERT.md).
+## Structure du projet
 
-## Prérequis de développement
+```
+├── apps/
+│   ├── api/          # API HTTP/WebSocket (Fastify)
+│   ├── runner/       # Exécution privilégiée (KVM, LXC, Docker)
+│   ├── ui/           # Interface web (React/Vite)
+│   ├── cli/          # Client en ligne de commande
+│   ├── vdm/          # Orchestrateur multi-nœuds
+│   └── vdm-ui/       # Interface VDM
+├── packages/
+│   └── shared/       # Types et schémas Zod partagés
+├── INSTALL/          # Documentation d'installation
+├── packaging/        # Paquets Debian
+└── docs/             # Documentation technique
+```
 
-- Node.js 22;
-- npm 10 ou plus récent;
-- macOS ou Linux pour le développement;
-- Debian 13 x86_64 avec KVM pour valider l'installation complète.
+## Fonctionnalités
 
-## Installation locale
+- **Gestion de VMs** : Création, suppression, contrôle (start/stop/reboot), consoles SPICE/VNC
+- **Conteneurs** : Support LXC et Docker
+- **Stockage** : Pools de stockage, volumes, snapshots
+- **Réseau** : Configuration réseau, bridges, NAT
+- **Templates** : Templates de VMs et ISOs
+- **RBAC** : Rôles et permissions utilisateurs
+- **MFA** : Authentification multi-facteurs (email, SMS)
+- **VDM** : Orchestration multi-nœuds avec haute disponibilité
+
+## Développement
+
+### Prérequis
+
+- Node.js 22+
+- npm 10+
+- Linux avec KVM activé (pour tester le runner)
+- SQLite3
+
+### Installation
 
 ```bash
 npm ci
 cp apps/api/.env.example apps/api/.env
-npm run dev
+# Éditer apps/api/.env avec vos paramètres
 ```
 
-Services de développement par défaut :
-
-- interface Web : URL affichée par Vite;
-- API : `http://127.0.0.1:3001`;
-- runner : socket `/run/auxinuxvirtual.sock`.
-
-Le runner effectue des opérations privilégiées. Pour les changements qui
-touchent KVM, LXC, Docker, le réseau ou le stockage, utilisez une machine de
-test dédiée.
-
-## Commandes de qualité
+### Démarrage
 
 ```bash
-npm run build       # compile tous les workspaces
-npm test            # tests partagés et VDM
-npm run check       # build complet puis tests
-bash scripts/git-preflight.sh
+# Mode développement (api + runner + ui)
+npm run dev
+
+# Ou séparément
+npm run dev:api
+npm run dev:runner
+npm run dev:ui
+
+# VDM (multi-nœuds)
+npm run dev:vdm
 ```
 
-La commande `git-preflight.sh` vérifie les fichiers candidats au commit, leur
-taille et les motifs courants de secrets.
+### Build
 
-## Configuration
-
-Les valeurs de développement documentées se trouvent dans :
-
-- [`apps/api/.env.example`](apps/api/.env.example);
-- [`apps/vdm/.env.example`](apps/vdm/.env.example).
-
-Ne commitez jamais les fichiers `.env`, bases SQLite, clés privées, certificats,
-archives de release ou sorties de compilation. L'installateur génère les
-secrets de production et les conserve sur l'hôte cible.
-
-## Installation et publication
-
-- installation d'un nœud : [`INSTALL/README.md`](INSTALL/README.md);
-- installation VDM : [`INSTALL/VDM-README.md`](INSTALL/VDM-README.md);
-- paquet Debian : [`packaging/deb/README.md`](packaging/deb/README.md);
-- transfert vers un Git privé :
-  [`docs/GIT_PRIVATE_SERVER.md`](docs/GIT_PRIVATE_SERVER.md).
-
-## Organisation des dépôts associés
-
-La disposition recommandée utilise des clones frères :
-
-```text
-ProjetWeb/
-├── Virtua/
-├── Client_Desktop/
-├── VirtuaOS/
-└── Kernel/
-    ├── VirtuaOS/
-    └── AuxiNuxOS/
+```bash
+npm run build    # Compile tout
+npm test         # Lance les tests
+npm run check    # Build + tests
 ```
 
-Les scripts de release acceptent les chemins explicitement documentés afin de
-garder chaque historique Git indépendant.
+## Production
+
+### Installation via paquet Debian
+
+Voir [INSTALL/README.md](INSTALL/README.md) pour les instructions détaillées.
+
+### Scripts utilitaires
+
+- `sync-os-mirrors.sh` - Synchronisation des miroirs OS (usage interne)
+
+## Sécurité
+
+- **Séparation des privilèges** : L'API ne tourne pas en root, seul le runner a besoin de privilèges
+- **Validation des entrées** : Toutes les entrées externes sont validées via Zod
+- **Audit** : Journalisation des actions dans SQLite
+- **CSRF** : Protection contre les attaques CSRF
+- **Rate limiting** : Limitation des requêtes par IP/utilisateur
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) - Vue d'ensemble technique
+- [Templates](docs/templates.md) - Gestion des templates VM/ISO
+
+## Licence
+
+MIT - Auxinux
