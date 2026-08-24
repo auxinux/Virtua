@@ -43,6 +43,7 @@ import {
   UsbDeviceAssignmentSchema,
   CreateLxcSchema, UpdateLxcConfigSchema, BackupLxcSchema, LxcNicSchema, GpuDeviceAssignmentSchema, DockerConnectNetworkSchema,
   RunDockerSchema, CreateDockerNetworkSchema, UpdateDockerConfigSchema, ComposeDeploySchema,
+  RecreateDockerSchema, ComposeProjectSchema, DockerVolumeCreateSchema, DockerExecSchema, DockerPruneSchema,
   CreateRaidSchema, CreateStoragePoolSchema, CreateBridgeSchema, FormatDiskSchema,
   FirewallRuleSchema, FirewallSettingsSchema,
   UpdateUserResourceAclSchema,
@@ -5493,12 +5494,28 @@ app.post("/api/internal/docker/containers/:id/console-ticket", async (req, reply
   return { ticket: ticket.id, url: buildWsUrl(req, "/api/ws/term", ticket.id) };
 });
 
+app.post("/api/internal/docker/containers/:id/exec", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { id } = req.params as { id: string };
+  const parsed = DockerExecSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  return callRunner("docker_exec", { id, ...parsed.data });
+});
+
 app.put("/api/internal/docker/containers/:id/config", async (req, reply) => {
   requireInternalNodeToken(req);
   const { id } = req.params as { id: string };
   const parsed = UpdateDockerConfigSchema.safeParse(req.body);
   if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
   return callRunner("docker_update_config", { id, ...parsed.data });
+});
+
+app.put("/api/internal/docker/containers/:id/recreate", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { id } = req.params as { id: string };
+  const parsed = RecreateDockerSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  return callRunner("docker_recreate", { id, ...parsed.data });
 });
 
 app.get("/api/internal/docker/containers/:id/details", async (req, reply) => {
@@ -7694,6 +7711,33 @@ app.put("/api/docker/containers/:id/config", async (req, reply) => {
   });
 });
 
+// Full container edit (ports/volumes/env/image/command/network/resources).
+// The runner recreates the container, preserving its volumes and data.
+app.put("/api/docker/containers/:id/recreate", async (req, reply) => {
+  requireAuth(req, reply);
+  const { id } = req.params as { id: string };
+  requireResourcePermission(req, "docker", id, "modify");
+  const parsed = RecreateDockerSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  const ip = getClientIp(req);
+  const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "docker.recreate", label: `Edit container ${id.slice(0, 12)}`, resourceType: "docker", resourceName: id, message: "Recreating container" });
+  return runInstantTask(task, ip, async () => {
+    const node = await getResourceNodeAsync("docker", id);
+    const result = node && !node.isLocal
+      ? await fetchRemoteNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/recreate`, {
+          method: "PUT",
+          body: JSON.stringify(parsed.data),
+        })
+      : await callRunner("docker_recreate", { id, ...parsed.data });
+    // If the container was renamed, keep the DB metadata in sync.
+    if (parsed.data.name && parsed.data.name !== id) {
+      db.prepare("UPDATE docker_containers SET container_name = ? WHERE container_id = ?").run(parsed.data.name, id);
+    }
+    if (!node || node.isLocal) await syncFirewallState();
+    return result;
+  });
+});
+
 app.delete("/api/docker/containers/:id", async (req, reply) => {
   requireAuth(req, reply);
   const { id } = req.params as { id: string };
@@ -7858,11 +7902,120 @@ app.delete("/api/docker/images/:id", async (req, reply) => {
   return callRunner("docker_image_delete", { id });
 });
 
+// ── Docker Compose (persistent .yml projects) ────────────────────────────────
+app.get("/api/docker/compose", async (req, reply) => {
+  requireAuth(req, reply);
+  return callRunner("docker_compose_list");
+});
+
+app.post("/api/docker/compose", async (req, reply) => {
+  requireAuth(req, reply);
+  const parsed = ComposeProjectSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
+  return callRunner("docker_compose_save", parsed.data, 60_000);
+});
+
+app.get("/api/docker/compose/:name", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_config", { name });
+});
+
+app.put("/api/docker/compose/:name", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  const parsed = ComposeProjectSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
+  return callRunner("docker_compose_save", { name, composeYaml: parsed.data.composeYaml }, 60_000);
+});
+
+app.delete("/api/docker/compose/:name", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_delete", { name }, 120_000);
+});
+
+app.post("/api/docker/compose/:name/up", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_up", { name }, 300_000);
+});
+
+app.post("/api/docker/compose/:name/down", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  const { removeVolumes } = (req.body ?? {}) as { removeVolumes?: boolean };
+  return callRunner("docker_compose_down", { name, removeVolumes }, 300_000);
+});
+
+app.post("/api/docker/compose/:name/restart", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  const { service } = (req.body ?? {}) as { service?: string };
+  return callRunner("docker_compose_restart", { name, service }, 120_000);
+});
+
+app.get("/api/docker/compose/:name/ps", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_ps", { name });
+});
+
+app.get("/api/docker/compose/:name/logs", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  const { tail = 100, service } = req.query as { tail?: number; service?: string };
+  return { logs: await callRunner("docker_compose_logs", { name, tail, service }) };
+});
+
+// Backward-compatible deploy endpoint (persists the file, then `up -d`).
 app.post("/api/docker/compose/deploy", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = ComposeDeploySchema.safeParse(req.body);
   if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
   return callRunner("docker_compose_up", parsed.data, 300_000);
+});
+
+// ── Docker volumes ────────────────────────────────────────────────────────────
+app.get("/api/docker/volumes", async (req, reply) => {
+  requireAuth(req, reply);
+  return callRunner("docker_volumes");
+});
+
+app.post("/api/docker/volumes", async (req, reply) => {
+  requireAuth(req, reply);
+  const parsed = DockerVolumeCreateSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  return callRunner("docker_volume_create", parsed.data);
+});
+
+app.delete("/api/docker/volumes/:name", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_volume_delete", { id: name });
+});
+
+// ── docker exec ────────────────────────────────────────────────────────────────
+app.post("/api/docker/containers/:id/exec", async (req, reply) => {
+  requireAuth(req, reply);
+  const { id } = req.params as { id: string };
+  requireResourcePermission(req, "docker", id, "console");
+  const parsed = DockerExecSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  const node = await getResourceNodeAsync("docker", id);
+  return node && !node.isLocal
+    ? fetchRemoteNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/exec`, { method: "POST", body: JSON.stringify(parsed.data) })
+    : callRunner("docker_exec", { id, ...parsed.data });
+});
+
+// ── docker prune ───────────────────────────────────────────────────────────────
+app.post("/api/docker/prune", async (req, reply) => {
+  requireAuth(req, reply);
+  const parsed = DockerPruneSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  return callRunner("docker_prune", parsed.data, 300_000);
 });
 
 app.get("/api/docker/networks", async (req, reply) => {

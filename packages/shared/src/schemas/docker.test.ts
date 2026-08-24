@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RunDockerSchema } from "./docker";
+import { RunDockerSchema, RecreateDockerSchema, ComposeProjectSchema, DockerVolumeCreateSchema, DockerPruneSchema } from "./docker";
 
 const basePayload = {
   name: "web",
@@ -52,5 +52,49 @@ describe("RunDockerSchema", () => {
       network: "ovh-public",
       macAddress: "not-a-mac",
     }).success).toBe(false);
+  });
+});
+
+describe("RecreateDockerSchema", () => {
+  it("accepts an empty object (no fields = preserve current config)", () => {
+    expect(RecreateDockerSchema.safeParse({}).success).toBe(true);
+  });
+
+  it("accepts a partial edit of ports, volumes, env, image and resources", () => {
+    expect(RecreateDockerSchema.safeParse({
+      image: "nginx:1.27",
+      ports: [{ hostPort: 8080, containerPort: 80, protocol: "tcp" }],
+      volumes: [{ hostPath: "/srv/web", containerPath: "/usr/share/nginx/html", mode: "ro" }],
+      env: ["FOO=bar"],
+      cpuLimit: 1.5,
+      memoryMb: 512,
+      restartPolicy: "always",
+    }).success).toBe(true);
+  });
+
+  it("rejects an invalid port in a partial edit", () => {
+    expect(RecreateDockerSchema.safeParse({ ports: [{ hostPort: 0, containerPort: 80 }] }).success).toBe(false);
+  });
+});
+
+describe("ComposeProjectSchema", () => {
+  it("requires composeYaml for save but not for down/ps", () => {
+    expect(ComposeProjectSchema.safeParse({ name: "web", composeYaml: "services: {}" }).success).toBe(true);
+    expect(ComposeProjectSchema.safeParse({ name: "web" }).success).toBe(true);
+  });
+});
+
+describe("DockerVolumeCreateSchema", () => {
+  it("accepts a name with optional driver", () => {
+    expect(DockerVolumeCreateSchema.safeParse({ name: "data" }).success).toBe(true);
+    expect(DockerVolumeCreateSchema.safeParse({ name: "data", driver: "local" }).success).toBe(true);
+  });
+});
+
+describe("DockerPruneSchema", () => {
+  it("defaults to all and validates the target enum", () => {
+    expect(DockerPruneSchema.safeParse({}).success).toBe(true);
+    expect(DockerPruneSchema.safeParse({ target: "images" }).success).toBe(true);
+    expect(DockerPruneSchema.safeParse({ target: "bogus" }).success).toBe(false);
   });
 });

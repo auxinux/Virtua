@@ -173,6 +173,16 @@ function printHelp() {
       ["virtua <type> autostart <id> [on|off|status]", "Gérer le démarrage automatique"],
       ["virtua <type> console <id>", "Ouvrir la console (hôte seulement)"],
     ]},
+    { title: "DOCKER (avancé)", cmds: [
+      ["virtua docker edit <id> --json '{...}'", "Éditer un conteneur (ports, volumes, env, image, commande, réseau, CPU/RAM)"],
+      ["virtua docker exec <id> <cmd...>", "Exécuter une commande dans un conteneur"],
+      ["virtua docker compose list", "Lister les projets Compose persistants"],
+      ["virtua docker compose create <nom> --yaml @fichier.yml", "Créer/éditer un fichier docker-compose.yml"],
+      ["virtua docker compose up|down|ps|logs|config|restart <nom>", "Gérer un projet Compose"],
+      ["virtua docker compose delete <nom>", "Supprimer un projet Compose"],
+      ["virtua docker volumes list|create|delete", "Gérer les volumes Docker"],
+      ["virtua docker prune [all|containers|images|volumes|networks]", "Nettoyer les ressources inutilisées"],
+    ]},
   ] : [
     { title: "GENERAL", cmds: [
       ["virtua -h", "Show this help"],
@@ -188,6 +198,16 @@ function printHelp() {
       ["virtua <type> stop <id>", "Stop a machine"],
       ["virtua <type> autostart <id> [on|off|status]", "Manage autostart"],
       ["virtua <type> console <id>", "Attach console (host only)"],
+    ]},
+    { title: "DOCKER (advanced)", cmds: [
+      ["virtua docker edit <id> --json '{...}'", "Edit a container (ports, volumes, env, image, command, network, CPU/RAM)"],
+      ["virtua docker exec <id> <cmd...>", "Run a command inside a container"],
+      ["virtua docker compose list", "List persisted Compose projects"],
+      ["virtua docker compose create <name> --yaml @file.yml", "Create/edit a docker-compose.yml"],
+      ["virtua docker compose up|down|ps|logs|config|restart <name>", "Manage a Compose project"],
+      ["virtua docker compose delete <name>", "Delete a Compose project"],
+      ["virtua docker volumes list|create|delete", "Manage Docker volumes"],
+      ["virtua docker prune [all|containers|images|volumes|networks]", "Prune unused resources"],
     ]},
   ];
 
@@ -884,10 +904,179 @@ async function handleGui() {
   }
 }
 
+// ── Docker advanced subcommands (local runner) ───────────────────────────────
+async function handleLocalCompose(args: string[]) {
+  const sub = normalizeSubcommand(args[0]);
+  const name = args[1];
+  switch (sub) {
+    case "list": case "ls":
+      printOutput(await callRunner("docker_compose_list"));
+      break;
+    case "create": case "save": {
+      if (!name) throw new Error("Usage: virtua docker compose create <name> --yaml <file-or-string>");
+      const yaml = getArgValue(args, "--yaml") ?? getArgValue(args, "--file");
+      if (!yaml) throw new Error("Missing --yaml (a path prefixed with @, or an inline YAML string)");
+      const composeYaml = yaml.startsWith("@") ? fs.readFileSync(path.resolve(yaml.slice(1)), "utf8") : yaml;
+      printOutput(await callRunner("docker_compose_save", { name, composeYaml }));
+      break;
+    }
+    case "up":
+      if (!name) throw new Error("Usage: virtua docker compose up <name>");
+      printOutput(await callRunner("docker_compose_up", { name }));
+      break;
+    case "down":
+      if (!name) throw new Error("Usage: virtua docker compose down <name>");
+      printOutput(await callRunner("docker_compose_down", { name, removeVolumes: hasFlag(args, "--volumes") }));
+      break;
+    case "ps":
+      if (!name) throw new Error("Usage: virtua docker compose ps <name>");
+      printOutput(await callRunner("docker_compose_ps", { name }));
+      break;
+    case "logs":
+      if (!name) throw new Error("Usage: virtua docker compose logs <name>");
+      printOutput(await callRunner("docker_compose_logs", { name, tail: Number(getArgValue(args, "--tail") ?? 100) }));
+      break;
+    case "config":
+      if (!name) throw new Error("Usage: virtua docker compose config <name>");
+      printOutput(await callRunner("docker_compose_config", { name }));
+      break;
+    case "restart":
+      if (!name) throw new Error("Usage: virtua docker compose restart <name>");
+      printOutput(await callRunner("docker_compose_restart", { name }));
+      break;
+    case "delete": case "rm":
+      if (!name) throw new Error("Usage: virtua docker compose delete <name>");
+      printOutput(await callRunner("docker_compose_delete", { name }));
+      break;
+    default:
+      throw new Error(`Unknown compose command: ${sub}`);
+  }
+}
+
+async function handleLocalVolumes(args: string[]) {
+  const sub = normalizeSubcommand(args[0]);
+  switch (sub) {
+    case "list": case "ls": case "":
+      printOutput(await callRunner("docker_volumes"));
+      break;
+    case "create": {
+      const name = args[1];
+      if (!name) throw new Error("Usage: virtua docker volumes create <name> [--driver local]");
+      printOutput(await callRunner("docker_volume_create", { name, driver: getArgValue(args, "--driver") }));
+      break;
+    }
+    case "delete": case "rm": {
+      const name = args[1];
+      if (!name) throw new Error("Usage: virtua docker volumes delete <name>");
+      printOutput(await callRunner("docker_volume_delete", { id: name }));
+      break;
+    }
+    default:
+      throw new Error(`Unknown volumes command: ${sub}`);
+  }
+}
+
+// ── Docker advanced subcommands (API) ────────────────────────────────────────
+async function handleApiCompose(session: SessionFile, args: string[]) {
+  const sub = normalizeSubcommand(args[0]);
+  const name = args[1];
+  switch (sub) {
+    case "list": case "ls":
+      printOutput(await request("GET", "/api/docker/compose", undefined, session));
+      break;
+    case "create": case "save": {
+      if (!name) throw new Error("Usage: virtua docker compose create <name> --yaml <file-or-string>");
+      const yaml = getArgValue(args, "--yaml") ?? getArgValue(args, "--file");
+      if (!yaml) throw new Error("Missing --yaml (a path prefixed with @, or an inline YAML string)");
+      const composeYaml = yaml.startsWith("@") ? fs.readFileSync(path.resolve(yaml.slice(1)), "utf8") : yaml;
+      printOutput(await request("POST", "/api/docker/compose", { name, composeYaml }, session));
+      break;
+    }
+    case "up":
+      if (!name) throw new Error("Usage: virtua docker compose up <name>");
+      printOutput(await request("POST", `/api/docker/compose/${encodeURIComponent(name)}/up`, {}, session));
+      break;
+    case "down":
+      if (!name) throw new Error("Usage: virtua docker compose down <name>");
+      printOutput(await request("POST", `/api/docker/compose/${encodeURIComponent(name)}/down`, { removeVolumes: hasFlag(args, "--volumes") }, session));
+      break;
+    case "ps":
+      if (!name) throw new Error("Usage: virtua docker compose ps <name>");
+      printOutput(await request("GET", `/api/docker/compose/${encodeURIComponent(name)}/ps`, undefined, session));
+      break;
+    case "logs":
+      if (!name) throw new Error("Usage: virtua docker compose logs <name>");
+      printOutput(await request("GET", `/api/docker/compose/${encodeURIComponent(name)}/logs?tail=${Number(getArgValue(args, "--tail") ?? 100)}`, undefined, session));
+      break;
+    case "config":
+      if (!name) throw new Error("Usage: virtua docker compose config <name>");
+      printOutput(await request("GET", `/api/docker/compose/${encodeURIComponent(name)}`, undefined, session));
+      break;
+    case "restart":
+      if (!name) throw new Error("Usage: virtua docker compose restart <name>");
+      printOutput(await request("POST", `/api/docker/compose/${encodeURIComponent(name)}/restart`, {}, session));
+      break;
+    case "delete": case "rm":
+      if (!name) throw new Error("Usage: virtua docker compose delete <name>");
+      printOutput(await request("DELETE", `/api/docker/compose/${encodeURIComponent(name)}`, undefined, session));
+      break;
+    default:
+      throw new Error(`Unknown compose command: ${sub}`);
+  }
+}
+
+async function handleApiVolumes(session: SessionFile, args: string[]) {
+  const sub = normalizeSubcommand(args[0]);
+  switch (sub) {
+    case "list": case "ls": case "":
+      printOutput(await request("GET", "/api/docker/volumes", undefined, session));
+      break;
+    case "create": {
+      const name = args[1];
+      if (!name) throw new Error("Usage: virtua docker volumes create <name> [--driver local]");
+      printOutput(await request("POST", "/api/docker/volumes", { name, driver: getArgValue(args, "--driver") }, session));
+      break;
+    }
+    case "delete": case "rm": {
+      const name = args[1];
+      if (!name) throw new Error("Usage: virtua docker volumes delete <name>");
+      printOutput(await request("DELETE", `/api/docker/volumes/${encodeURIComponent(name)}`, undefined, session));
+      break;
+    }
+    default:
+      throw new Error(`Unknown volumes command: ${sub}`);
+  }
+}
+
 async function handleLocalResource(kind: ResourceKind, args: string[]) {
   const subcommand = normalizeSubcommand(args[0]);
   const identifier = args[1];
   const spinner = ora();
+
+  // Docker advanced subcommands (compose / volumes / exec / prune / edit).
+  if (kind === "docker" && subcommand === "compose") {
+    return handleLocalCompose(args.slice(1));
+  }
+  if (kind === "docker" && subcommand === "volumes") {
+    return handleLocalVolumes(args.slice(1));
+  }
+  if (kind === "docker" && subcommand === "exec") {
+    if (!identifier) throw new Error("Usage: virtua docker exec <id> <command...>");
+    const command = args.slice(2).join(" ");
+    if (!command) throw new Error("Usage: virtua docker exec <id> <command...>");
+    printOutput(await callRunner("docker_exec", { id: identifier, command }));
+    return;
+  }
+  if (kind === "docker" && subcommand === "prune") {
+    printOutput(await callRunner("docker_prune", { target: args[1] ?? "all" }));
+    return;
+  }
+  if (kind === "docker" && subcommand === "edit") {
+    if (!identifier) throw new Error("Usage: virtua docker edit <id> --json <payload>");
+    const payload = parseJsonInput(args);
+    printOutput(await callRunner("docker_recreate", { id: identifier, ...(payload as Record<string, unknown>) }));
+    return;
+  }
 
   if (["start", "stop", "restart"].includes(subcommand)) {
     spinner.text = `${subcommand} ${identifier}...`;
@@ -932,6 +1121,32 @@ async function handleLocalResource(kind: ResourceKind, args: string[]) {
 async function handleResource(session: SessionFile, kind: ResourceKind, args: string[]) {
   const subcommand = normalizeSubcommand(args[0]);
   const identifier = args[1];
+
+  // Docker advanced subcommands (compose / volumes / exec / prune / edit).
+  if (kind === "docker" && subcommand === "compose") {
+    return handleApiCompose(session, args.slice(1));
+  }
+  if (kind === "docker" && subcommand === "volumes") {
+    return handleApiVolumes(session, args.slice(1));
+  }
+  if (kind === "docker" && subcommand === "exec") {
+    if (!identifier) throw new Error("Usage: virtua docker exec <id> <command...>");
+    const command = args.slice(2).join(" ");
+    if (!command) throw new Error("Usage: virtua docker exec <id> <command...>");
+    printOutput(await request("POST", `/api/docker/containers/${encodeURIComponent(identifier)}/exec`, { command }, session));
+    return;
+  }
+  if (kind === "docker" && subcommand === "prune") {
+    printOutput(await request("POST", "/api/docker/prune", { target: args[1] ?? "all" }, session));
+    return;
+  }
+  if (kind === "docker" && subcommand === "edit") {
+    if (!identifier) throw new Error("Usage: virtua docker edit <id> --json <payload>");
+    const payload = parseJsonInput(args);
+    printOutput(await request("PUT", `/api/docker/containers/${encodeURIComponent(identifier)}/recreate`, payload, session));
+    return;
+  }
+
   const config = {
     vm: { list: "/api/vms", info: (id: string) => `/api/vms/${id}`, action: (id: string, a: string) => `/api/vms/${id}/${a}` },
     lxc: { list: "/api/lxc", info: (id: string) => `/api/lxc/${id}`, action: (id: string, a: string) => `/api/lxc/${id}/${a}` },

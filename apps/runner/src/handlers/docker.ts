@@ -188,9 +188,23 @@ export async function handleDocker(action: string, params: unknown): Promise<unk
     case "docker_logs": return getLogs(p.id as string, (p.tail as number) ?? 100);
     case "docker_inspect": return inspectContainer(p.id as string);
     case "docker_update_config": return updateConfig(p);
+    case "docker_recreate": return recreateContainer(p);
     case "docker_pull": return pullImage(p.image as string);
     case "docker_build": return buildImage(p);
     case "docker_compose_up": return composeUp(p);
+    case "docker_compose_down": return composeDown(p);
+    case "docker_compose_ps": return composePs(p);
+    case "docker_compose_logs": return composeLogs(p);
+    case "docker_compose_config": return composeConfig(p);
+    case "docker_compose_restart": return composeRestart(p);
+    case "docker_compose_list": return composeList();
+    case "docker_compose_save": return composeSave(p);
+    case "docker_compose_delete": return composeDelete(p);
+    case "docker_volumes": return listVolumes();
+    case "docker_volume_create": return createVolume(p);
+    case "docker_volume_delete": return deleteVolume(p.id as string);
+    case "docker_exec": return execInContainer(p);
+    case "docker_prune": return prune(p);
     case "docker_images": return listImages();
     case "docker_image_delete": return deleteImage(p.id as string);
     case "docker_search": return searchHub(p.query as string, (p.limit as number) ?? 25);
@@ -595,6 +609,119 @@ async function updateConfig(p: Record<string, unknown>) {
   return { ok: true };
 }
 
+// ── Full container editing (recreate) ────────────────────────────────────────
+// Docker cannot mutate ports/volumes/env/image/command on a live container, so
+// "editing" means: capture the current config, merge the requested changes, then
+// stop + remove + re-run the container. Named volumes and bind mounts are
+// preserved (we never `rm -v`), so container data survives the recreate.
+
+interface RecreateInput {
+  id: string;
+  name?: string;
+  image?: string;
+  command?: string;
+  ports?: Array<{ hostPort: number; containerPort: number; protocol: string }>;
+  volumes?: Array<{ hostPath: string; containerPath: string; mode: string }>;
+  env?: string[];
+  network?: string;
+  ipAddress?: string;
+  macAddress?: string;
+  cpuLimit?: number;
+  memoryMb?: number;
+  restartPolicy?: string;
+  privileged?: boolean;
+}
+
+async function recreateContainer(p: Record<string, unknown>) {
+  const id = validateDockerName(p.id as string, "container id");
+  const input = p as unknown as RecreateInput;
+
+  // 1. Capture the current container config so unspecified fields are preserved.
+  const current = await inspectContainer(id);
+
+  // 2. Merge: requested value wins, otherwise keep the current one.
+  const name = input.name !== undefined ? validateDockerName(input.name) : current.name;
+  const image = input.image !== undefined ? validateDockerImage(input.image) : current.image;
+  const command = input.command !== undefined ? input.command : current.command;
+  const restartPolicy = input.restartPolicy !== undefined
+    ? validateRestartPolicy(input.restartPolicy)
+    : (current.restartPolicy ?? "unless-stopped");
+  const privileged = input.privileged !== undefined ? Boolean(input.privileged) : Boolean(current.privileged);
+  const cpuLimit = input.cpuLimit !== undefined ? Number(input.cpuLimit) : undefined;
+  const memoryMb = input.memoryMb !== undefined ? Number(input.memoryMb) : undefined;
+
+  // Ports: if provided, replace the whole set; otherwise keep current.
+  const ports = input.ports !== undefined
+    ? input.ports.map((port) => ({
+        hostPort: validatePortNumber(port.hostPort, "hostPort"),
+        containerPort: validatePortNumber(port.containerPort, "containerPort"),
+        protocol: validateProtocol(port.protocol),
+      }))
+    : (current.ports ?? []).map((port) => ({
+        hostPort: port.hostPort,
+        containerPort: port.containerPort,
+        protocol: port.protocol,
+      }));
+
+  // Volumes: if provided, replace; otherwise keep current bind mounts.
+  const volumes = input.volumes !== undefined
+    ? input.volumes.map((vol) => ({
+        hostPath: validateHostPath(vol.hostPath, "volume hostPath"),
+        containerPath: validateContainerPath(vol.containerPath, "volume containerPath"),
+        mode: validateVolumeMode(vol.mode),
+      }))
+    : (current.mounts ?? [])
+        .filter((m) => m.type === "bind")
+        .map((m) => ({
+          hostPath: m.source,
+          containerPath: m.destination,
+          mode: m.mode ?? "rw",
+        }));
+
+  // Env: if provided, replace; otherwise keep current.
+  const env = input.env !== undefined
+    ? input.env.map((entry) => validateEnvVar(entry))
+    : (current.env ?? []);
+
+  // Network: if provided, use it; otherwise keep the first (primary) network.
+  const network = input.network !== undefined
+    ? (input.network ? validateDockerNetworkName(input.network) : undefined)
+    : (current.networks?.[0] ?? undefined);
+
+  const ipAddress = validateIpv4Address(input.ipAddress, "Docker static IP");
+  const macAddress = validateMacAddress(input.macAddress);
+
+  if (cpuLimit !== undefined && (cpuLimit < 0 || cpuLimit > 1024)) throw new Error("Invalid cpuLimit: must be 0–1024");
+  if (memoryMb !== undefined && (memoryMb < 4 || memoryMb > 1_048_576)) throw new Error("Invalid memoryMb: must be 4–1048576");
+  if (ipAddress && (!network || network === "bridge" || network === "host" || network === "none")) {
+    throw new Error("Docker static IP requires a user-defined Docker network");
+  }
+
+  await ensureDockerNetworkReady(network);
+  await ensureImageAvailable(image);
+
+  // 3. Stop + remove the old container (keep volumes: no `-v`).
+  await docker("stop", id).catch(() => {});
+  await docker("rm", id).catch(() => {});
+
+  // 4. Re-run with the merged config.
+  const args = ["run", "-d", "--name", name, `--restart=${restartPolicy}`];
+  if (privileged) args.push("--privileged");
+  for (const port of ports) args.push("-p", `${port.hostPort}:${port.containerPort}/${port.protocol}`);
+  for (const vol of volumes) args.push("-v", `${vol.hostPath}:${vol.containerPath}:${vol.mode}`);
+  for (const value of env) args.push("-e", value);
+  if (cpuLimit) args.push("--cpus", String(cpuLimit));
+  if (memoryMb) args.push("-m", `${memoryMb}m`);
+  if (network) args.push("--network", network);
+  if (ipAddress) args.push("--ip", ipAddress);
+  if (macAddress) args.push("--mac-address", macAddress);
+  args.push(image);
+  if (command) args.push(...splitCommandArgs(command));
+
+  const newId = (await docker(...args)).trim();
+  return { ok: true, id: newId, name };
+}
+
 async function pullImage(image: string) {
   const normalized = validateDockerImage(image);
   await docker("pull", "--quiet", normalized);
@@ -615,19 +742,212 @@ async function buildImage(p: Record<string, unknown>) {
   return { ok: true };
 }
 
+// ── Docker Compose (persistent .yml projects) ────────────────────────────────
+// Compose files are stored under a stable directory so they can be edited and
+// re-deployed later, instead of being written to a throwaway tmpdir and deleted.
+
+const COMPOSE_DIR = process.env.AUXINUX_COMPOSE_DIR ?? "/var/lib/auxinuxvirtual/compose";
+
+async function ensureComposeDir() {
+  await fs.mkdir(COMPOSE_DIR, { recursive: true });
+}
+
+function composeProjectPath(name: string): string {
+  return `${COMPOSE_DIR}/${name}`;
+}
+
+function composeFilePath(name: string): string {
+  return `${composeProjectPath(name)}/docker-compose.yml`;
+}
+
+async function composeProjectExists(name: string): Promise<boolean> {
+  try {
+    await fs.access(composeFilePath(name));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Write (or overwrite) a project's docker-compose.yml, creating its directory. */
+async function composeSave(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  const composeYaml = p.composeYaml as string;
+  if (!composeYaml || typeof composeYaml !== "string") throw new Error("composeYaml is required");
+  await ensureComposeDir();
+  await fs.mkdir(composeProjectPath(name), { recursive: true });
+  await fs.writeFile(composeFilePath(name), composeYaml);
+  return { ok: true, name, path: composeFilePath(name) };
+}
+
+/** Read a project's compose file, or throw if it does not exist. */
+async function composeRead(name: string): Promise<string> {
+  if (!(await composeProjectExists(name))) {
+    throw new Error(`Compose project '${name}' does not exist`);
+  }
+  return fs.readFile(composeFilePath(name), "utf8");
+}
+
 async function composeUp(p: Record<string, unknown>) {
   const name = validateComposeProject(p.name);
   const composeYaml = p.composeYaml as string;
   await ensureDockerDaemonReady();
-  // Use mkdtemp to avoid predictable path + TOCTOU race
-  const tmpDir = await fs.mkdtemp("/tmp/auxinux-compose-");
-  await fs.writeFile(`${tmpDir}/docker-compose.yml`, composeYaml);
-  try {
-    await execFileAsync("docker", ["compose", "-p", name, "-f", `${tmpDir}/docker-compose.yml`, "up", "-d"]);
-  } finally {
-    await execFileAsync("rm", ["-rf", tmpDir]).catch(() => {});
+  // Persist the file first (so `up` and later `down`/`ps` share the same source),
+  // then deploy from the stable path.
+  if (composeYaml) {
+    await composeSave({ name, composeYaml });
+  } else if (!(await composeProjectExists(name))) {
+    throw new Error(`Compose project '${name}' does not exist and no composeYaml was provided`);
   }
+  await execFileAsync("docker", ["compose", "-p", name, "-f", composeFilePath(name), "up", "-d"]);
+  return { ok: true, name };
+}
+
+async function composeDown(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  await ensureDockerDaemonReady();
+  await composeRead(name);
+  const removeVolumes = Boolean(p.removeVolumes);
+  const args = ["compose", "-p", name, "-f", composeFilePath(name), "down"];
+  if (removeVolumes) args.push("-v");
+  await execFileAsync("docker", args);
+  return { ok: true, name };
+}
+
+async function composePs(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  await ensureDockerDaemonReady();
+  await composeRead(name);
+  const { stdout } = await execFileAsync("docker", ["compose", "-p", name, "-f", composeFilePath(name), "ps", "--format", "{{json .}}"], { maxBuffer: 20 * 1024 * 1024 });
+  return stdout.trim().split("\n").filter(Boolean).map((line) => {
+    try {
+      const entry = JSON.parse(line) as Record<string, string>;
+      return {
+        name: entry.Name ?? "",
+        service: entry.Service ?? "",
+        state: normalizeState(entry.State ?? ""),
+        status: entry.Status ?? "",
+        ports: entry.Ports ?? "",
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+async function composeLogs(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  await ensureDockerDaemonReady();
+  await composeRead(name);
+  const tail = Number(p.tail ?? 100);
+  const args = ["compose", "-p", name, "-f", composeFilePath(name), "logs", "--tail", String(tail), "--timestamps"];
+  if (p.service) args.push(String(p.service));
+  const { stdout } = await execFileAsync("docker", args, { maxBuffer: 20 * 1024 * 1024 });
+  return stdout;
+}
+
+async function composeConfig(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  await ensureDockerDaemonReady();
+  await composeRead(name);
+  const { stdout } = await execFileAsync("docker", ["compose", "-p", name, "-f", composeFilePath(name), "config"], { maxBuffer: 20 * 1024 * 1024 });
+  return stdout;
+}
+
+async function composeRestart(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  await ensureDockerDaemonReady();
+  await composeRead(name);
+  const args = ["compose", "-p", name, "-f", composeFilePath(name), "restart"];
+  if (p.service) args.push(String(p.service));
+  await execFileAsync("docker", args);
+  return { ok: true, name };
+}
+
+/** List all persisted compose projects with their file path and last-modified time. */
+async function composeList() {
+  await ensureComposeDir();
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(COMPOSE_DIR);
+  } catch {
+    return [];
+  }
+  const projects: Array<{ name: string; path: string; modifiedAt: string }> = [];
+  for (const entry of entries) {
+    const filePath = composeFilePath(entry);
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.isFile()) {
+        projects.push({ name: entry, path: filePath, modifiedAt: stat.mtime.toISOString() });
+      }
+    } catch { /* not a project dir */ }
+  }
+  return projects.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function composeDelete(p: Record<string, unknown>) {
+  const name = validateComposeProject(p.name);
+  await ensureDockerDaemonReady();
+  if (await composeProjectExists(name)) {
+    // Bring the stack down first (best-effort), then remove the persisted file.
+    await execFileAsync("docker", ["compose", "-p", name, "-f", composeFilePath(name), "down"]).catch(() => {});
+    await fs.rm(composeProjectPath(name), { recursive: true, force: true });
+  }
+  return { ok: true, name };
+}
+
+// ── Docker volumes ────────────────────────────────────────────────────────────
+async function listVolumes() {
+  const out = await docker("volume", "ls", "--format", "{{json .}}");
+  return out.trim().split("\n").filter(Boolean).map((line) => {
+    try {
+      const v = JSON.parse(line) as Record<string, string>;
+      return { name: v.Name, driver: v.Driver, mountpoint: v.Mountpoint };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+}
+
+async function createVolume(p: Record<string, unknown>) {
+  const name = validateDockerName(p.name as string, "volume name");
+  const driver = typeof p.driver === "string" && p.driver ? p.driver : "local";
+  const args = ["volume", "create", "--driver", driver];
+  if (p.label) args.push("--label", String(p.label));
+  args.push(name);
+  const id = (await docker(...args)).trim();
+  return { ok: true, name: id };
+}
+
+async function deleteVolume(name: string) {
+  await docker("volume", "rm", name);
   return { ok: true };
+}
+
+// ── docker exec ────────────────────────────────────────────────────────────────
+async function execInContainer(p: Record<string, unknown>) {
+  const id = validateDockerName(p.id as string, "container id");
+  const command = p.command as string;
+  if (!command || typeof command !== "string") throw new Error("command is required");
+  const args = ["exec", id, ...splitCommandArgs(command)];
+  const { stdout, stderr } = await execFileAsync("docker", args, { maxBuffer: 20 * 1024 * 1024 });
+  return { stdout, stderr };
+}
+
+// ── prune ─────────────────────────────────────────────────────────────────────
+async function prune(p: Record<string, unknown>) {
+  const target = typeof p.target === "string" ? p.target : "all";
+  const results: Record<string, string> = {};
+  const run = async (label: string, args: string[]) => {
+    const { stdout } = await execFileAsync("docker", args, { maxBuffer: 20 * 1024 * 1024 });
+    results[label] = stdout.trim();
+  };
+  if (target === "all" || target === "containers") await run("containers", ["container", "prune", "-f"]);
+  if (target === "all" || target === "images") await run("images", ["image", "prune", "-f"]);
+  if (target === "all" || target === "volumes") await run("volumes", ["volume", "prune", "-f"]);
+  if (target === "all" || target === "networks") await run("networks", ["network", "prune", "-f"]);
+  return { ok: true, results };
 }
 
 async function listImages() {

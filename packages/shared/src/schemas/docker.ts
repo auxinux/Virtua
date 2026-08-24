@@ -48,6 +48,32 @@ export const UpdateDockerConfigSchema = z.object({
   restartPolicy: z.enum(["no", "always", "unless-stopped", "on-failure"]).optional(),
 });
 
+// Full container edit: any subset of fields may be provided; omitted fields are
+// preserved from the current container (the runner merges against `docker inspect`).
+export const RecreateDockerSchema = z.object({
+  name: z.string().regex(dockerNameRegex).optional(),
+  image: z.string().regex(dockerImageRegex).optional(),
+  command: z.string().optional(),
+  ports: z.array(z.object({
+    hostPort: z.number().int().min(1).max(65535),
+    containerPort: z.number().int().min(1).max(65535),
+    protocol: z.enum(["tcp", "udp"]).default("tcp"),
+  })).optional(),
+  volumes: z.array(z.object({
+    hostPath: z.string().min(1),
+    containerPath: z.string().min(1),
+    mode: z.enum(["ro", "rw"]).default("rw"),
+  })).optional(),
+  env: z.array(z.string()).optional(),
+  network: z.string().regex(dockerNetworkRegex).optional(),
+  ipAddress: z.string().regex(ipv4Regex).optional(),
+  macAddress: z.string().regex(macRegex).optional(),
+  cpuLimit: z.number().optional(),
+  memoryMb: z.number().int().optional(),
+  restartPolicy: z.enum(["no", "always", "unless-stopped", "on-failure"]).optional(),
+  privileged: z.boolean().optional(),
+});
+
 // Attach a container to an additional network (multi-NIC).
 export const DockerConnectNetworkSchema = z.object({
   network: z.string().regex(dockerNetworkRegex),
@@ -62,7 +88,33 @@ export const ComposeDeploySchema = z.object({
   storagePool: z.string().optional(),
 });
 
+// Compose project management. `composeYaml` is required for save/up; optional
+// for down/ps/logs/config/restart (which operate on the persisted file).
+export const ComposeProjectSchema = z.object({
+  name: z.string().min(1),
+  composeYaml: z.string().optional(),
+  service: z.string().optional(),
+  tail: z.number().int().min(1).max(10000).optional(),
+  removeVolumes: z.boolean().optional(),
+});
+
+export const DockerVolumeCreateSchema = z.object({
+  name: z.string().regex(dockerNameRegex),
+  driver: z.string().optional(),
+  label: z.string().optional(),
+});
+
+export const DockerExecSchema = z.object({
+  command: z.string().min(1),
+});
+
+export const DockerPruneSchema = z.object({
+  target: z.enum(["all", "containers", "images", "volumes", "networks"]).default("all"),
+});
+
 export type RunDockerInput = z.infer<typeof RunDockerSchema>;
 export type CreateDockerNetworkInput = z.infer<typeof CreateDockerNetworkSchema>;
 export type UpdateDockerConfigInput = z.infer<typeof UpdateDockerConfigSchema>;
+export type RecreateDockerInput = z.infer<typeof RecreateDockerSchema>;
 export type ComposeDeployInput = z.infer<typeof ComposeDeploySchema>;
+export type ComposeProjectInput = z.infer<typeof ComposeProjectSchema>;

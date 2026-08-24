@@ -48,6 +48,7 @@ Le projet suit une architecture **séparation des privilèges** :
 
 - **Gestion de VMs** : Création, suppression, contrôle (start/stop/reboot), consoles SPICE/VNC
 - **Conteneurs** : Support LXC et Docker
+- **Docker avancé** : Édition complète des conteneurs (ports, volumes, env, image, commande, réseau, CPU/RAM), Docker Compose avec fichiers `.yml` persistants, gestion des volumes, `docker exec`, nettoyage (`prune`)
 - **Stockage** : Pools de stockage, volumes, snapshots
 - **Réseau** : Configuration réseau, bridges, NAT
 - **Templates** : Templates de VMs et ISOs

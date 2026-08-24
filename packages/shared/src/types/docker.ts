@@ -81,3 +81,23 @@ export interface DockerHubDetail {
   exposedPorts: string[]; // e.g. ["80/tcp", "443/tcp"]
   fullDescription?: string;
 }
+
+export interface DockerVolume {
+  name: string;
+  driver: string;
+  mountpoint?: string;
+}
+
+export interface DockerComposeProject {
+  name: string;
+  path: string;
+  modifiedAt: string;
+}
+
+export interface DockerComposeService {
+  name: string;
+  service: string;
+  state: DockerState;
+  status?: string;
+  ports?: string;
+}
