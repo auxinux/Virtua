@@ -13,6 +13,39 @@ interface ComposeDetail {
   logs: string;
 }
 
+// Lit un fichier .yml sélectionné et remplit le textarea cible.
+function readYamlFile(file: File, onContent: (content: string) => void, onError: (msg: string) => void) {
+  const reader = new FileReader();
+  reader.onload = () => onContent(String(reader.result ?? ""));
+  reader.onerror = () => onError("Failed to read file");
+  reader.readAsText(file);
+}
+
+function YamlUploadButton({ onContent, onError, label }: { onContent: (c: string) => void; onError: (m: string) => void; label: string }) {
+  const inputRef = React.useRef<HTMLInputElement | null>(null);
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".yml,.yaml,application/x-yaml,text/yaml"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) readYamlFile(f, onContent, onError);
+          e.target.value = "";
+        }}
+      />
+      <button type="button" className="btn btn-sm" onClick={() => inputRef.current?.click()}>
+        <svg className="w-3.5 h-3.5 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+        </svg>
+        {label}
+      </button>
+    </>
+  );
+}
+
 export default function DockerCompose() {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -159,6 +192,13 @@ export default function DockerCompose() {
                 </div>
                 <div>
                   <label className="label">{t("docker.composeYaml")}</label>
+                  <div className="flex items-center gap-2 mb-2">
+                    <YamlUploadButton
+                      label={t("docker.composeUpload")}
+                      onContent={(c) => setFormYaml(c)}
+                      onError={(m) => setError(m)}
+                    />
+                  </div>
                   <textarea
                     className="input font-mono text-xs h-64 w-full"
                     value={formYaml}
@@ -213,6 +253,13 @@ export default function DockerCompose() {
 
                   <div className="mb-4">
                     <h3 className="text-xs font-semibold text-text-400 mb-2">{t("docker.composeYaml")}</h3>
+                    <div className="flex items-center gap-2 mb-2">
+                      <YamlUploadButton
+                        label={t("docker.composeUpload")}
+                        onContent={(c) => setEditYaml(c)}
+                        onError={(m) => setError(m)}
+                      />
+                    </div>
                     <textarea
                       className="input font-mono text-xs h-48 w-full"
                       value={editYaml}

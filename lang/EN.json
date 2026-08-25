@@ -414,6 +414,7 @@
   "docker.composeCreate": "Create Compose Project",
   "docker.composeName": "Project name",
   "docker.composeYaml": "docker-compose.yml content",
+  "docker.composeUpload": "Import a .yml file",
   "docker.composeYamlPlaceholder": "services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\"",
   "docker.composeUp": "Deploy (up)",
   "docker.composeDown": "Stop (down)",
