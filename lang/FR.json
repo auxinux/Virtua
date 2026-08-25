@@ -85,6 +85,8 @@
   "nav.vmOverview": "Vue VM",
   "nav.lxcOverview": "Vue LXC",
   "nav.dockerOverview": "Vue Docker",
+  "nav.dockerCompose": "Docker Compose",
+  "nav.dockerVolumes": "Volumes Docker",
   "nav.noVms": "Aucune VM",
   "nav.noContainers": "Aucun conteneur",
   "nav.manage": "Gérer",

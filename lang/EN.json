@@ -85,6 +85,8 @@
   "nav.vmOverview": "VM Overview",
   "nav.lxcOverview": "LXC Overview",
   "nav.dockerOverview": "Docker Overview",
+  "nav.dockerCompose": "Docker Compose",
+  "nav.dockerVolumes": "Docker Volumes",
   "nav.noVms": "No VMs",
   "nav.noContainers": "No containers",
   "nav.manage": "Manage",

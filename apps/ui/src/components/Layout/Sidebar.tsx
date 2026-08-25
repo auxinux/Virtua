@@ -208,6 +208,9 @@ export function Sidebar() {
               <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70">
                 {isSimpleMode ? "Applications" : t("nav.docker")}
               </div>
+              <SidebarItem to="/docker" icon={<Box className="w-3.5 h-3.5" />} label={t("nav.dockerOverview")} />
+              <SidebarItem to="/docker/compose" icon={<Package className="w-3.5 h-3.5" />} label={t("nav.dockerCompose", "Docker Compose")} />
+              <SidebarItem to="/docker/volumes" icon={<Database className="w-3.5 h-3.5" />} label={t("nav.dockerVolumes", "Docker Volumes")} />
               {(isAdmin
                 ? dockerList
                 : dockerList.filter((ct) =>

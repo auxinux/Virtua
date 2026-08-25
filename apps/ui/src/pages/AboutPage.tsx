@@ -12,6 +12,16 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.7.43",
+      items: fr
+        ? [
+            "Menu : accès direct à la vue Docker, Docker Compose et Volumes Docker depuis la barre latérale.",
+          ]
+        : [
+            "Navigation: direct access to the Docker overview, Docker Compose and Docker Volumes from the sidebar.",
+          ],
+    },
+    {
       v: "0.7.42",
       items: fr
         ? [
