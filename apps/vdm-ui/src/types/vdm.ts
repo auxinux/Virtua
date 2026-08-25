@@ -4,7 +4,7 @@ export type NodeStatus = "online" | "degraded" | "offline" | "unknown";
 export type ResourceState = "running" | "stopped" | "paused" | "suspended" | "crashed" | "unknown";
 export type TaskStatus = "pending" | "running" | "completed" | "completed-with-warning" | "failed" | "cancelled" | "recovery-required";
 export type TaskKind = "migrate" | "clone" | "backup" | "restore" | "action" | "storage" | "other";
-export type StorageType = "nfs" | "smb" | "cifs" | "glusterfs";
+export type StorageType = "nfs" | "smb" | "cifs" | "glusterfs" | "s3";
 
 export interface VdmUser {
   id: number;
@@ -178,6 +178,12 @@ export interface VdmSharedStorage {
   smbUsername: string | null;
   smbVersion: string | null;
   nfsVersion: string | null;
+  s3Endpoint: string | null;
+  s3Bucket: string | null;
+  s3Region: string | null;
+  s3Provider: string | null;
+  s3VfsCacheMode: string | null;
+  s3Configured: boolean;
   localMountPath: string;
   content: string[];
   enabled: boolean;

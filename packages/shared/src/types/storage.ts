@@ -53,14 +53,14 @@ export interface StoragePool {
   id?: number;
   name: string;
   path: string;
-  type: "directory" | "lvm" | "nfs" | "cifs";
+  type: "directory" | "lvm" | "nfs" | "cifs" | "glusterfs" | "s3";
   content: PoolContentType[];
   totalBytes: number;
   usedBytes: number;
   freeBytes: number;
   enabled: boolean;
   mountSource?: string;
-  fstype?: "ext4" | "xfs" | "btrfs" | "nfs" | "cifs";
+  fstype?: "ext4" | "xfs" | "btrfs" | "nfs" | "cifs" | "glusterfs";
   mountOptions?: string;
   smbUsername?: string;
   smbDomain?: string;

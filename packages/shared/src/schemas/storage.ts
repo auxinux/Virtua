@@ -13,7 +13,7 @@ export const CreateRaidSchema = z.object({
 export const CreateStoragePoolSchema = z.object({
   name: z.string().regex(poolNameRegex),
   path: z.string().min(1),
-  type: z.enum(["directory", "nfs", "cifs", "glusterfs"]),
+  type: z.enum(["directory", "nfs", "cifs", "glusterfs", "s3"]),
   content: z.array(z.enum(["iso", "vm", "backup", "template", "container", "disk"])).min(1),
   mountSource: z.string().min(1).optional(),
   mountDevice: z.string().optional(),
@@ -24,6 +24,14 @@ export const CreateStoragePoolSchema = z.object({
   smbDomain: z.string().optional(),
   smbVersion: z.enum(["default", "1.0", "2.0", "2.1", "3", "3.0", "3.02", "3.11", "3.1.1"]).optional(),
   nfsVersion: z.enum(["3", "4", "4.0", "4.1", "4.2"]).optional(),
+  // S3 / object storage
+  s3Endpoint: z.string().min(1).optional(),
+  s3Bucket: z.string().min(1).optional(),
+  s3Region: z.string().optional(),
+  s3AccessKey: z.string().optional(),
+  s3SecretKey: z.string().optional(),
+  s3Provider: z.enum(["aws", "minio", "b2", "generic"]).optional(),
+  s3VfsCacheMode: z.enum(["off", "minimal", "writes", "full"]).optional(),
 });
 
 export const FormatDiskSchema = z.object({

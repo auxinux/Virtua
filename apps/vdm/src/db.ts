@@ -63,6 +63,13 @@ function migrate(db: Database.Database) {
       smb_password TEXT,
       smb_version TEXT,
       nfs_version TEXT,
+      s3_endpoint TEXT,
+      s3_bucket TEXT,
+      s3_region TEXT,
+      s3_access_key TEXT,
+      s3_secret_key TEXT,
+      s3_provider TEXT,
+      s3_vfs_cache_mode TEXT,
       local_mount_path TEXT NOT NULL,
       content TEXT NOT NULL DEFAULT '["iso","backup","disk"]',
       enabled INTEGER NOT NULL DEFAULT 1,
@@ -201,6 +208,14 @@ function migrateColumns(db: Database.Database) {
 
   add("vdm_shared_storage", "smb_version", "TEXT");
   add("vdm_shared_storage", "nfs_version", "TEXT");
+  // S3 / object storage fields
+  add("vdm_shared_storage", "s3_endpoint", "TEXT");
+  add("vdm_shared_storage", "s3_bucket", "TEXT");
+  add("vdm_shared_storage", "s3_region", "TEXT");
+  add("vdm_shared_storage", "s3_access_key", "TEXT");
+  add("vdm_shared_storage", "s3_secret_key", "TEXT");
+  add("vdm_shared_storage", "s3_provider", "TEXT");
+  add("vdm_shared_storage", "s3_vfs_cache_mode", "TEXT");
   add("vdm_nodes", "virtua_version", "TEXT");
   add("vdm_nodes", "compatibility", "TEXT NOT NULL DEFAULT 'unknown'");
   add("vdm_nodes", "last_error", "TEXT");

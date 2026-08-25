@@ -48,6 +48,13 @@ interface VdmSharedStorageRow {
   smb_password: string | null;
   smb_version: string | null;
   nfs_version: string | null;
+  s3_endpoint: string | null;
+  s3_bucket: string | null;
+  s3_region: string | null;
+  s3_access_key: string | null;
+  s3_secret_key: string | null;
+  s3_provider: string | null;
+  s3_vfs_cache_mode: string | null;
   local_mount_path: string;
   content: string;
   enabled: number;
@@ -367,6 +374,13 @@ function mapStorageRow(row: VdmSharedStorageRow) {
     smbUsername: row.smb_username,
     smbVersion: row.smb_version,
     nfsVersion: row.nfs_version,
+    s3Endpoint: row.s3_endpoint,
+    s3Bucket: row.s3_bucket,
+    s3Region: row.s3_region,
+    s3Provider: row.s3_provider,
+    s3VfsCacheMode: row.s3_vfs_cache_mode,
+    // Secrets are never returned to the client; only an indicator that they're set.
+    s3Configured: !!(row.s3_access_key && row.s3_secret_key),
     localMountPath: row.local_mount_path,
     content: JSON.parse(row.content || "[]"),
     enabled: !!row.enabled,
@@ -452,6 +466,13 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
       smbPassword: storage.smb_password ? decryptSecret(storage.smb_password) : undefined,
       smbVersion: storage.smb_version ?? undefined,
       nfsVersion: storage.nfs_version ?? undefined,
+      s3Endpoint: storage.s3_endpoint ?? undefined,
+      s3Bucket: storage.s3_bucket ?? undefined,
+      s3Region: storage.s3_region ?? undefined,
+      s3AccessKey: storage.s3_access_key ? decryptSecret(storage.s3_access_key) : undefined,
+      s3SecretKey: storage.s3_secret_key ? decryptSecret(storage.s3_secret_key) : undefined,
+      s3Provider: storage.s3_provider ?? undefined,
+      s3VfsCacheMode: storage.s3_vfs_cache_mode ?? undefined,
     }),
   });
   return storage.name;
@@ -1890,23 +1911,32 @@ const NFS_VALID_VERSIONS = new Set(["3", "4", "4.0", "4.1", "4.2"]);
 
 app.post("/api/vdm/storage", async (req, reply) => {
   requireAdmin(req, reply);
-  const { name, displayName, type, source, mountOptions, smbDomain, smbUsername, smbPassword, smbVersion, nfsVersion, localMountPath, content, notes } = req.body as {
+  const { name, displayName, type, source, mountOptions, smbDomain, smbUsername, smbPassword, smbVersion, nfsVersion, localMountPath, content, notes,
+    s3Endpoint, s3Bucket, s3Region, s3AccessKey, s3SecretKey, s3Provider, s3VfsCacheMode } = req.body as {
     name: string; displayName?: string; type: string; source: string;
     mountOptions?: string; smbDomain?: string; smbUsername?: string; smbPassword?: string;
     smbVersion?: string; nfsVersion?: string;
     localMountPath: string; content?: string[]; notes?: string;
+    s3Endpoint?: string; s3Bucket?: string; s3Region?: string; s3AccessKey?: string; s3SecretKey?: string;
+    s3Provider?: string; s3VfsCacheMode?: string;
   };
-  if (!name || !type || !source || !localMountPath) return reply.status(400).send({ error: "name, type, source, localMountPath required" });
+  if (!name || !type || !localMountPath) return reply.status(400).send({ error: "name, type, localMountPath required" });
+  if (type !== "s3" && !source) return reply.status(400).send({ error: "source required for this storage type" });
   if (!/^[a-z0-9_-]+$/.test(name)) return reply.status(400).send({ error: "Name must be lowercase alphanumeric with - or _" });
-  if (!["nfs", "smb", "cifs", "glusterfs"].includes(type)) return reply.status(400).send({ error: "type must be nfs, smb, cifs, or glusterfs" });
+  if (!["nfs", "smb", "cifs", "glusterfs", "s3"].includes(type)) return reply.status(400).send({ error: "type must be nfs, smb, cifs, glusterfs, or s3" });
   if (smbVersion && !SMB_VALID_VERSIONS.has(smbVersion)) return reply.status(400).send({ error: `smbVersion must be one of: ${[...SMB_VALID_VERSIONS].join(", ")}` });
   if (nfsVersion && !NFS_VALID_VERSIONS.has(nfsVersion)) return reply.status(400).send({ error: `nfsVersion must be one of: ${[...NFS_VALID_VERSIONS].join(", ")}` });
+  if (type === "s3") {
+    if (!s3Bucket) return reply.status(400).send({ error: "s3Bucket required for S3 storage" });
+    if (!s3AccessKey || !s3SecretKey) return reply.status(400).send({ error: "s3AccessKey and s3SecretKey required for S3 storage" });
+  }
 
   try {
     db.prepare(`
-      INSERT INTO vdm_shared_storage (name, display_name, type, source, mount_options, smb_domain, smb_username, smb_password, smb_version, nfs_version, local_mount_path, content, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, displayName ?? null, type, source, mountOptions ?? null, smbDomain ?? null, smbUsername ?? null, encryptSecret(smbPassword), smbVersion ?? null, nfsVersion ?? null, localMountPath, JSON.stringify(content ?? ["iso", "backup", "disk"]), notes ?? null);
+      INSERT INTO vdm_shared_storage (name, display_name, type, source, mount_options, smb_domain, smb_username, smb_password, smb_version, nfs_version, local_mount_path, content, notes, s3_endpoint, s3_bucket, s3_region, s3_access_key, s3_secret_key, s3_provider, s3_vfs_cache_mode)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, displayName ?? null, type, source ?? "", mountOptions ?? null, smbDomain ?? null, smbUsername ?? null, smbPassword ? encryptSecret(smbPassword) : null, smbVersion ?? null, nfsVersion ?? null, localMountPath, JSON.stringify(content ?? ["iso", "backup", "disk"]), notes ?? null,
+      s3Endpoint ?? null, s3Bucket ?? null, s3Region ?? null, s3AccessKey ? encryptSecret(s3AccessKey) : null, s3SecretKey ? encryptSecret(s3SecretKey) : null, s3Provider ?? null, s3VfsCacheMode ?? null);
   } catch {
     return reply.status(409).send({ error: "Storage name already exists" });
   }
@@ -1917,13 +1947,14 @@ app.post("/api/vdm/storage", async (req, reply) => {
 app.put("/api/vdm/storage/:name", async (req, reply) => {
   requireAdmin(req, reply);
   const { name } = req.params as { name: string };
-  const { displayName, mountOptions, smbDomain, smbUsername, smbPassword, smbVersion, nfsVersion, enabled, notes } = req.body as { displayName?: string; mountOptions?: string; smbDomain?: string; smbUsername?: string; smbPassword?: string; smbVersion?: string; nfsVersion?: string; enabled?: boolean; notes?: string };
+  const { displayName, mountOptions, smbDomain, smbUsername, smbPassword, smbVersion, nfsVersion, enabled, notes,
+    s3Endpoint, s3Bucket, s3Region, s3AccessKey, s3SecretKey, s3Provider, s3VfsCacheMode } = req.body as { displayName?: string; mountOptions?: string; smbDomain?: string; smbUsername?: string; smbPassword?: string; smbVersion?: string; nfsVersion?: string; enabled?: boolean; notes?: string; s3Endpoint?: string; s3Bucket?: string; s3Region?: string; s3AccessKey?: string; s3SecretKey?: string; s3Provider?: string; s3VfsCacheMode?: string };
   const existing = db.prepare("SELECT id FROM vdm_shared_storage WHERE name = ?").get(name);
   if (!existing) return reply.status(404).send({ error: "Storage not found" });
   if (smbVersion && !SMB_VALID_VERSIONS.has(smbVersion)) return reply.status(400).send({ error: `smbVersion must be one of: ${[...SMB_VALID_VERSIONS].join(", ")}` });
   if (nfsVersion && !NFS_VALID_VERSIONS.has(nfsVersion)) return reply.status(400).send({ error: `nfsVersion must be one of: ${[...NFS_VALID_VERSIONS].join(", ")}` });
-  db.prepare("UPDATE vdm_shared_storage SET display_name = COALESCE(?, display_name), mount_options = COALESCE(?, mount_options), smb_domain = COALESCE(?, smb_domain), smb_username = COALESCE(?, smb_username), smb_password = COALESCE(?, smb_password), smb_version = COALESCE(?, smb_version), nfs_version = COALESCE(?, nfs_version), enabled = COALESCE(?, enabled), notes = COALESCE(?, notes), updated_at = ? WHERE name = ?")
-    .run(displayName ?? null, mountOptions ?? null, smbDomain ?? null, smbUsername ?? null, smbPassword ? encryptSecret(smbPassword) : null, smbVersion ?? null, nfsVersion ?? null, enabled !== undefined ? (enabled ? 1 : 0) : null, notes ?? null, new Date().toISOString(), name);
+  db.prepare("UPDATE vdm_shared_storage SET display_name = COALESCE(?, display_name), mount_options = COALESCE(?, mount_options), smb_domain = COALESCE(?, smb_domain), smb_username = COALESCE(?, smb_username), smb_password = COALESCE(?, smb_password), smb_version = COALESCE(?, smb_version), nfs_version = COALESCE(?, nfs_version), s3_endpoint = COALESCE(?, s3_endpoint), s3_bucket = COALESCE(?, s3_bucket), s3_region = COALESCE(?, s3_region), s3_access_key = COALESCE(?, s3_access_key), s3_secret_key = COALESCE(?, s3_secret_key), s3_provider = COALESCE(?, s3_provider), s3_vfs_cache_mode = COALESCE(?, s3_vfs_cache_mode), enabled = COALESCE(?, enabled), notes = COALESCE(?, notes), updated_at = ? WHERE name = ?")
+    .run(displayName ?? null, mountOptions ?? null, smbDomain ?? null, smbUsername ?? null, smbPassword ? encryptSecret(smbPassword) : null, smbVersion ?? null, nfsVersion ?? null, s3Endpoint ?? null, s3Bucket ?? null, s3Region ?? null, s3AccessKey ? encryptSecret(s3AccessKey) : null, s3SecretKey ? encryptSecret(s3SecretKey) : null, s3Provider ?? null, s3VfsCacheMode ?? null, enabled !== undefined ? (enabled ? 1 : 0) : null, notes ?? null, new Date().toISOString(), name);
   return { ok: true };
 });
 

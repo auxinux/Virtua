@@ -30,7 +30,7 @@ const ICONS = {
 interface StorageForm {
   name: string;
   displayName: string;
-  type: "nfs" | "smb" | "cifs" | "glusterfs";
+  type: "nfs" | "smb" | "cifs" | "glusterfs" | "s3";
   source: string;
   localMountPath: string;
   smbUsername: string;
@@ -38,13 +38,22 @@ interface StorageForm {
   smbDomain: string;
   smbVersion: string;
   nfsVersion: string;
+  s3Endpoint: string;
+  s3Bucket: string;
+  s3Region: string;
+  s3AccessKey: string;
+  s3SecretKey: string;
+  s3Provider: string;
+  s3VfsCacheMode: string;
   notes: string;
 }
 
 const DEFAULT_FORM: StorageForm = {
   name: "", displayName: "", type: "nfs", source: "",
   localMountPath: "/mnt/vdm-shared", smbUsername: "", smbPassword: "",
-  smbDomain: "", smbVersion: "", nfsVersion: "", notes: "",
+  smbDomain: "", smbVersion: "", nfsVersion: "",
+  s3Endpoint: "", s3Bucket: "", s3Region: "", s3AccessKey: "", s3SecretKey: "",
+  s3Provider: "generic", s3VfsCacheMode: "off", notes: "",
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -52,10 +61,12 @@ function typeLabel(type: string): string {
   if (type === "nfs") return "NFS";
   if (type === "smb" || type === "cifs") return "SMB/CIFS";
   if (type === "glusterfs") return "GlusterFS";
+  if (type === "s3") return "S3 / Object";
   return type.toUpperCase();
 }
 
 function typeIconPath(type: string): string {
+  if (type === "s3") return ICONS.server;
   return type === "nfs" ? ICONS.db : ICONS.server;
 }
 
@@ -70,12 +81,15 @@ function AddStorageModal({ open, onClose, onSave, isPending }: {
   const set = <K extends keyof StorageForm>(k: K, v: StorageForm[K]) => setForm((f) => ({ ...f, [k]: v }));
   const isSmb = form.type === "smb" || form.type === "cifs";
   const isNfs = form.type === "nfs";
+  const isS3 = form.type === "s3";
 
-  const sourceLabel = isNfs ? "NFS Source (host:/export)" : isSmb ? "SMB Share (//host/share)" : "GlusterFS (host:/volume)";
-  const sourcePlaceholder = isNfs ? "192.168.1.100:/exports/backups" : isSmb ? "//nas.local/backups" : "gluster1:/gv0";
+  const sourceLabel = isNfs ? "NFS Source (host:/export)" : isSmb ? "SMB Share (//host/share)" : isS3 ? "S3 Endpoint (optional for AWS)" : "GlusterFS (host:/volume)";
+  const sourcePlaceholder = isNfs ? "192.168.1.100:/exports/backups" : isSmb ? "//nas.local/backups" : isS3 ? "https://s3.amazonaws.com" : "gluster1:/gv0";
 
   const handleSave = () => {
-    if (!form.name || !form.source || !form.localMountPath) return;
+    if (!form.name || !form.localMountPath) return;
+    if (form.type !== "s3" && !form.source) return;
+    if (isS3 && (!form.s3Bucket || !form.s3AccessKey || !form.s3SecretKey)) return;
     onSave(form);
     onClose();
     setForm(DEFAULT_FORM);
@@ -106,25 +120,74 @@ function AddStorageModal({ open, onClose, onSave, isPending }: {
         {/* Type */}
         <div>
           <label className="vdm-label">Storage Type <span className="text-vdm-danger">*</span></label>
-          <div className="grid grid-cols-3 gap-2">
-            {(["nfs", "smb", "glusterfs"] as const).map((t) => (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {(["nfs", "smb", "glusterfs", "s3"] as const).map((t) => (
               <button key={t} type="button"
                 className={`rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors ${form.type === t || (t === "smb" && form.type === "cifs")
                   ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent"
                   : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}
                 onClick={() => set("type", t)}>
-                {t === "nfs" ? "NFS" : t === "smb" ? "SMB / CIFS" : "GlusterFS"}
+                {t === "nfs" ? "NFS" : t === "smb" ? "SMB / CIFS" : t === "glusterfs" ? "GlusterFS" : "S3 / Object"}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Source */}
-        <div>
-          <label className="vdm-label">{sourceLabel} <span className="text-vdm-danger">*</span></label>
-          <input className="vdm-input font-mono text-sm" placeholder={sourcePlaceholder}
-            value={form.source} onChange={(e) => set("source", e.target.value)} />
-        </div>
+        {/* Source (NFS/SMB/GlusterFS) */}
+        {!isS3 && (
+          <div>
+            <label className="vdm-label">{sourceLabel} <span className="text-vdm-danger">*</span></label>
+            <input className="vdm-input font-mono text-sm" placeholder={sourcePlaceholder}
+              value={form.source} onChange={(e) => set("source", e.target.value)} />
+          </div>
+        )}
+
+        {/* S3 / object storage fields */}
+        {isS3 && (
+          <div className="rounded-lg border border-vdm-border bg-vdm-bg p-4 space-y-4">
+            <p className="text-xs font-semibold text-vdm-textMuted uppercase tracking-wider">S3 / Object Storage</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="vdm-label">Provider</label>
+                <select className="vdm-input" value={form.s3Provider} onChange={(e) => set("s3Provider", e.target.value)}>
+                  <option value="generic">S3 compatible</option>
+                  <option value="aws">AWS S3</option>
+                  <option value="minio">MinIO</option>
+                  <option value="b2">Backblaze B2</option>
+                </select>
+              </div>
+              <div>
+                <label className="vdm-label">Bucket <span className="text-vdm-danger">*</span></label>
+                <input className="vdm-input font-mono" placeholder="my-bucket" value={form.s3Bucket} onChange={(e) => set("s3Bucket", e.target.value)} />
+              </div>
+              <div className="col-span-2">
+                <label className="vdm-label">Endpoint (optional for AWS)</label>
+                <input className="vdm-input font-mono" placeholder="https://s3.amazonaws.com or http://minio:9000" value={form.s3Endpoint} onChange={(e) => set("s3Endpoint", e.target.value)} />
+              </div>
+              <div>
+                <label className="vdm-label">Region (optional)</label>
+                <input className="vdm-input font-mono" placeholder="us-east-1" value={form.s3Region} onChange={(e) => set("s3Region", e.target.value)} />
+              </div>
+              <div>
+                <label className="vdm-label">VFS Cache</label>
+                <select className="vdm-input" value={form.s3VfsCacheMode} onChange={(e) => set("s3VfsCacheMode", e.target.value)}>
+                  <option value="off">Off (network reads)</option>
+                  <option value="minimal">Minimal</option>
+                  <option value="writes">Writes</option>
+                  <option value="full">Full</option>
+                </select>
+              </div>
+              <div>
+                <label className="vdm-label">Access Key <span className="text-vdm-danger">*</span></label>
+                <input className="vdm-input font-mono" autoComplete="off" value={form.s3AccessKey} onChange={(e) => set("s3AccessKey", e.target.value)} />
+              </div>
+              <div>
+                <label className="vdm-label">Secret Key <span className="text-vdm-danger">*</span></label>
+                <input className="vdm-input font-mono" type="password" autoComplete="new-password" value={form.s3SecretKey} onChange={(e) => set("s3SecretKey", e.target.value)} />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Mount Path */}
         <div>
@@ -293,6 +356,7 @@ function StorageRow({ stor, isAdmin, onDelete }: {
 
   const isSmb = stor.type === "smb" || stor.type === "cifs";
   const isNfs = stor.type === "nfs";
+  const isS3 = stor.type === "s3";
 
   const handleMountAll = async () => {
     setMountingAll(true);
@@ -332,14 +396,16 @@ function StorageRow({ stor, isAdmin, onDelete }: {
               {typeLabel(stor.type)}
               {isSmb && stor.smbVersion ? ` v${stor.smbVersion}` : ""}
               {isNfs && stor.nfsVersion ? ` v${stor.nfsVersion}` : ""}
+              {isS3 && stor.s3Provider ? ` ${stor.s3Provider}` : ""}
             </span>
             {!stor.enabled && <span className="pill-gray text-[10px]">Disabled</span>}
           </div>
-          <p className="text-sm font-mono text-vdm-textMuted mt-0.5 truncate">{stor.source}</p>
+          <p className="text-sm font-mono text-vdm-textMuted mt-0.5 truncate">{isS3 ? (stor.s3Bucket || "bucket") : stor.source}</p>
           <p className="text-xs text-vdm-textMuted/70 mt-0.5">
             Mount: <code className="font-mono">{stor.localMountPath}</code>
             {isSmb && stor.smbUsername && <span className="ml-2 text-vdm-textMuted">user: {stor.smbUsername}</span>}
             {isSmb && stor.smbDomain && <span className="ml-2 text-vdm-textMuted">domain: {stor.smbDomain}</span>}
+            {isS3 && <span className="ml-2 text-vdm-textMuted">{stor.s3Endpoint || "AWS S3"}{stor.s3Region ? ` · ${stor.s3Region}` : ""}</span>}
           </p>
           {stor.notes && <p className="text-xs text-vdm-textMuted/60 mt-0.5 italic">{stor.notes}</p>}
         </div>
@@ -396,6 +462,13 @@ export default function StoragePage() {
       smbDomain: data.smbDomain || undefined,
       smbVersion: data.smbVersion || undefined,
       nfsVersion: data.nfsVersion || undefined,
+      s3Endpoint: data.s3Endpoint || undefined,
+      s3Bucket: data.s3Bucket || undefined,
+      s3Region: data.s3Region || undefined,
+      s3AccessKey: data.s3AccessKey || undefined,
+      s3SecretKey: data.s3SecretKey || undefined,
+      s3Provider: data.s3Provider || undefined,
+      s3VfsCacheMode: data.s3VfsCacheMode || undefined,
       notes: data.notes || undefined,
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-storage"] }),

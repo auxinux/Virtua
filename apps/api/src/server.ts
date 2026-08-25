@@ -3398,6 +3398,13 @@ async function createLocalStoragePool(input: {
   smbDomain?: string;
   smbVersion?: string;
   nfsVersion?: string;
+  s3Endpoint?: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  s3AccessKey?: string;
+  s3SecretKey?: string;
+  s3Provider?: string;
+  s3VfsCacheMode?: string;
 }) {
   await callRunner("storage_pool_mount", input);
   db.prepare(`
@@ -4919,6 +4926,13 @@ app.post("/api/internal/storage/pools", async (req, reply) => {
     smbDomain: parsed.data.smbDomain ?? undefined,
     smbVersion: parsed.data.smbVersion ?? undefined,
     nfsVersion: parsed.data.nfsVersion ?? undefined,
+    s3Endpoint: parsed.data.s3Endpoint ?? undefined,
+    s3Bucket: parsed.data.s3Bucket ?? undefined,
+    s3Region: parsed.data.s3Region ?? undefined,
+    s3AccessKey: parsed.data.s3AccessKey ?? undefined,
+    s3SecretKey: parsed.data.s3SecretKey ?? undefined,
+    s3Provider: parsed.data.s3Provider ?? undefined,
+    s3VfsCacheMode: parsed.data.s3VfsCacheMode ?? undefined,
   });
 });
 

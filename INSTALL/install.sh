@@ -1262,8 +1262,9 @@ install_system_packages() {
         libspice-server1 libspice-client-glib-2.0-8 \
         spice-client-glib-usb-acl-helper \
         libvirt-daemon-config-nwfilter \
-        cloud-image-utils
-    success "Virtualization packages installed (KVM/QEMU, VirtIO, SPICE, VirGL, swTPM, VirtIO-FS)"
+        cloud-image-utils \
+        rclone fuse3
+    success "Virtualization packages installed (KVM/QEMU, VirtIO, SPICE, VirGL, swTPM, VirtIO-FS, rclone/S3)"
 }
 
 install_docker_stack() {

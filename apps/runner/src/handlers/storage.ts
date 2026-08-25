@@ -523,12 +523,19 @@ async function mountPool(p: Record<string, unknown>) {
   const name = p.name as string | undefined;
   const mountPath = validateMountPath(p.path, "path");
   const rawType = (p.type as string | undefined) ?? "directory";
-  if (!["directory", "nfs", "nfs4", "cifs", "smbfs", "glusterfs"].includes(rawType)) {
+  if (!["directory", "nfs", "nfs4", "cifs", "smbfs", "glusterfs", "s3"].includes(rawType)) {
     throw new Error(`Invalid pool type: ${rawType}`);
   }
   const type = rawType;
   const source = (p.mountSource as string | undefined) ?? (p.mountDevice as string | undefined);
   const device = p.mountDevice as string | undefined;
+
+  // S3 / object storage pool — handled by rclone mount (FUSE). It does not use
+  // fstab or the classic mount() path, so branch before fstype validation.
+  if (type === "s3") {
+    return mountS3Pool({ name, mountPath, source, p });
+  }
+
   const rawFstype = (p.fstype as string) ?? "ext4";
   if (!ALLOWED_FSTAB_MOUNT_TYPES.has(rawFstype)) {
     throw new Error(`Invalid fstype: ${rawFstype}`);
@@ -630,10 +637,59 @@ async function mountPool(p: Record<string, unknown>) {
   return { ok: true };
 }
 
+// ── S3 / object storage pool via rclone mount (FUSE) ─────────────────────
+async function mountS3Pool(args: { name?: string; mountPath: string; source?: string; p: Record<string, unknown> }) {
+  const { name, mountPath, source, p } = args;
+  const bucket = (p.s3Bucket as string | undefined)?.trim();
+  const endpoint = (p.s3Endpoint as string | undefined)?.trim();
+  const accessKey = (p.s3AccessKey as string | undefined)?.trim();
+  const secretKey = (p.s3SecretKey as string | undefined)?.trim();
+  const region = (p.s3Region as string | undefined)?.trim();
+  const provider = (p.s3Provider as string | undefined) ?? "generic";
+  const vfsCache = (p.s3VfsCacheMode as string | undefined) ?? "off";
+  if (!bucket) throw new Error("S3 bucket name is required");
+  if (!accessKey || !secretKey) throw new Error("S3 access key and secret key are required");
+
+  // Configure a per-pool rclone remote (isolated config file) to avoid clobbering
+  // other rclone configs on the host. Type "s3" works for AWS, MinIO and most S3
+  // compatible services; provider selection maps to the rclone provider name.
+  const remoteName = `virtua-${(name ?? "s3").replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const credsDir = "/etc/auxinuxvirtual/credentials";
+  await fs.mkdir(credsDir, { recursive: true });
+  const configPath = path.join(credsDir, `${remoteName}.conf`);
+  const providerMap: Record<string, string> = { aws: "AWS", minio: "Minio", b2: "B2", generic: "Other" };
+  const rcloneProvider = providerMap[provider] ?? "Other";
+
+  const lines = [
+    `[${remoteName}]`,
+    `type = s3`,
+    `provider = ${rcloneProvider}`,
+    `access_key_id = ${accessKey}`,
+    `secret_access_key = ${secretKey}`,
+    ...(endpoint ? [`endpoint = ${endpoint}`] : []),
+    ...(region ? [`region = ${region}`] : []),
+  ];
+  await fs.writeFile(configPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+
+  // rclone mount exposes the bucket as a FUSE filesystem at the mount path.
+  await ensureLibvirtPoolAccess(args.mountPath);
+  const cacheArg = vfsCache === "off" ? ["--vfs-cache-mode=off"] : [`--vfs-cache-mode=${vfsCache}`];
+  // Run rclone mount in background (daemon) so it survives the runner call.
+  await execFileAsync("rclone", [
+    "--config", configPath, "mount", `${remoteName}:${bucket}`,
+    args.mountPath, "--daemon", ...cacheArg,
+    "--allow-other", "--dir-cache-time", "10m",
+  ]);
+  return { ok: true };
+}
+
 async function umountPool(p: Record<string, unknown>) {
   const poolPath = validateMountPath(p.path, "path");
   const poolName = p.name as string | undefined;
+  // S3 / rclone mounts also expose a FUSE mountpoint; unmount it with fusermount/rclone.
   await execFileAsync("umount", [poolPath]).catch(() => {});
+  await execFileAsync("fusermount3", ["-u", poolPath]).catch(() => {});
+  await execFileAsync("fusermount", ["-u", poolPath]).catch(() => {});
   const fstab = await fs.readFile("/etc/fstab", "utf8").catch(() => "");
   const escapedMountPath = fstabEscape(poolPath);
   const filtered = fstab.split("\n").filter((line) => {
@@ -645,6 +701,9 @@ async function umountPool(p: Record<string, unknown>) {
   if (poolName) {
     const credentialsPath = path.join("/etc/auxinuxvirtual/credentials", `${poolName.replace(/[^a-zA-Z0-9._-]/g, "_")}.cifs`);
     await fs.unlink(credentialsPath).catch(() => {});
+    // Remove the rclone S3 credentials file if present
+    const s3CredPath = path.join("/etc/auxinuxvirtual/credentials", `${poolName.replace(/[^a-zA-Z0-9._-]/g, "_")}.s3`);
+    await fs.unlink(s3CredPath).catch(() => {});
   }
   return { ok: true };
 }
