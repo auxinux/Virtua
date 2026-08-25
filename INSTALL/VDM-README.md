@@ -23,9 +23,7 @@ VDM is a **vSphere-like centralized management interface** for AuxiNux nodes. It
 ### Quick Start (Dev Mode)
 
 ```bash
-cd "/Volumes/Data/Progammation/ProjetWeb/Virtua"
-
-# Install dependencies
+# Depuis la racine du projet
 npm install
 
 # Start VDM backend + frontend together
@@ -75,7 +73,7 @@ known node; an unreachable or unverifiable node blocks installation.
 From your development machine:
 
 ```bash
-cd "/Volumes/Data/Progammation/ProjetWeb/Virtua"
+# Depuis la racine du projet
 bash INSTALL/release.sh -vdm
 ```
 

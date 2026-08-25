@@ -122,8 +122,7 @@ thread principal Fastify).
 ## Catalogue dépôt distant
 
 Le serveur peut **parcourir et importer** des templates/ISO depuis un dépôt HTTP
-(autoindex). URL de base configurable via `TEMPLATE_DEPOT_URL` (défaut
-`https://dep.auxinux.ca/TEMPLATES/`). Arborescence attendue :
+(autoindex). URL de base configurable via `TEMPLATE_DEPOT_URL`. Arborescence attendue :
 
 ```
 TEMPLATES/

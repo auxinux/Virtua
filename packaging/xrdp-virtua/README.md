@@ -23,8 +23,6 @@ Les configurations sans `autorun` (xrdp de bureau classique) sont inchangées.
 
 ## Construire et publier
 
-Sur `debiandev` :
-
 ```bash
 sudo apt-get install -y devscripts quilt dpkg-dev
 sudo apt-get build-dep -y xrdp     # nécessite deb-src dans sources.list
@@ -32,8 +30,8 @@ bash build-xrdp-virtua.sh
 ```
 
 Le paquet produit est versionné `<version>+virtua1` (apt le préfère au paquet
-Debian). Publier sur `dep.auxinux.ca/VIRTUA` via `publish-repo.sh`, puis sur
-les hôtes : `apt update && apt upgrade`.
+Debian). Publier sur votre dépôt APT via `publish-repo.sh`, puis sur les hôtes :
+`apt update && apt upgrade`.
 
 ## Sécurité (important)
 

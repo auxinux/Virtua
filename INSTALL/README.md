@@ -13,63 +13,53 @@
 
 ---
 
-## Méthode recommandée — Via `release.sh`
+## Méthode recommandée — Via le dépôt APT (`.deb`)
 
-Cette méthode crée une archive autonome depuis votre machine de développement,
-contenant le projet déjà compilé. Le serveur n'a pas besoin de TypeScript.
-
-### 1. Sur la machine de développement
+La façon la plus simple d'installer Virtua est d'utiliser le paquet Debian `auxinux-virtua` :
 
 ```bash
-# Depuis la racine du projet
-bash INSTALL/release.sh
+# 1. Ajouter la source APT (clé de signature incluse)
+sudo curl -fsSL https://dep.auxinux.ca/VIRTUA/virtua.sources \
+  -o /etc/apt/sources.list.d/virtua.sources
+
+# 2. Mettre à jour et installer
+sudo apt update
+sudo apt install auxinux-virtua
 ```
 
-Le script :
-
-1. Build tout le projet (`npm run build`, CLI incluse)
-2. Vérifie que les nouveaux fichiers critiques sont bien présents
-3. Crée `../auxinuxvirtual-v<NODE_VERSION>.tar.gz` (sources + dist, sans node_modules)
-4. Affiche les commandes de déploiement prêtes à copier-coller
-
-### 2. Envoyer l'archive sur le serveur
+Le paquet provisionne automatiquement l'hôte (Node.js, Docker, la pile KVM/libvirt, les services systemd et le pont réseau) via un service systemd en arrière-plan. Suivez la progression :
 
 ```bash
-scp ../auxinuxvirtual-v<NODE_VERSION>.tar.gz root@<IP-SERVEUR>:/opt/
+journalctl -fu auxinux-virtua-setup
 ```
 
-### 3. Installer sur le serveur Debian 13
+Une fois terminé, le panneau est disponible sur :
+
+```
+https://<IP-SERVEUR>
+http://<IP-SERVEUR>:8441
+```
+
+### Mise à jour
 
 ```bash
-ssh root@<IP-SERVEUR>
-mkdir -p /opt/auxinuxvirtual
-tar xzf /opt/auxinuxvirtual-v<NODE_VERSION>.tar.gz -C /opt/auxinuxvirtual --strip-components=1
-sudo bash /opt/auxinuxvirtual/INSTALL/install.sh -update
+sudo apt update && sudo apt upgrade
 ```
 
 ---
 
 ## Méthode alternative — Depuis les sources
 
-Si vous souhaitez installer directement depuis les sources (sans pré-compilation) :
+Si vous souhaitez installer directement depuis les sources (sans paquet Debian) :
 
 ```bash
-# Option A : via rsync depuis la machine de dev
-rsync -avz --exclude node_modules \
-  'Virtua/' \
-  root@<IP-SERVEUR>:/opt/auxinuxvirtual/
-
-# Option B : via Git (si le projet est hébergé)
-git clone https://github.com/votre-repo/auxinuxvirtual /opt/auxinuxvirtual
-
-# Puis sur le serveur :
-ssh root@<IP-SERVEUR>
-sudo bash /opt/auxinuxvirtual/INSTALL/install.sh
+# Sur le serveur Debian 13
+git clone https://git.auxinux.ca/Auxinux/Virtua.git /opt/auxinuxvirtual
+cd /opt/auxinuxvirtual
+sudo bash INSTALL/install.sh
 ```
 
-Dans ce cas, `install.sh` effectue lui-même le build TypeScript
-(Node.js 22 et les outils de compilation sont installés automatiquement), et vérifie aussi
-que l'arborescence extraite contient bien les nouveaux fichiers attendus avant d'installer.
+`install.sh` installe les dépendances système, Node.js 22, compile le projet et configure les services systemd.
 
 ---
 
@@ -138,25 +128,6 @@ systemctl stop auxinuxvirtual-api auxinuxvirtual-runner
 # Désactiver au démarrage
 systemctl disable auxinuxvirtual-runner auxinuxvirtual-api
 ```
-
----
-
-## Mise à jour du projet
-
-```bash
-# 1. Sur la machine de dev : générer une nouvelle release
-bash INSTALL/release.sh
-
-# 2. Envoyer sur le serveur
-scp ../auxinuxvirtual-v<NODE_VERSION>.tar.gz root@<IP-SERVEUR>:/opt/
-
-# 3. Sur le serveur : extraire puis lancer l'update complet
-tar xzf /opt/auxinuxvirtual-v<NODE_VERSION>.tar.gz -C /opt/auxinuxvirtual --strip-components=1
-sudo bash /opt/auxinuxvirtual/INSTALL/install.sh -update
-```
-
-Pendant l'update, `install.sh` affiche aussi la version détectée de Virtua pour confirmer
-que le serveur rebuild bien le bon code.
 
 ---
 

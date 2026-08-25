@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build the VirtuaOS-patched xrdp package (skip login window when autorun is set).
 #
-# Run on debiandev (Debian 13 build host):
+# Run on a Debian 13 build host:
 #   sudo apt-get build-dep -y xrdp && sudo apt-get install -y devscripts quilt
 #   bash build-xrdp-virtua.sh
 #
 # Output: ../xrdp_<version>+virtua1_amd64.deb (plus xorgxrdp untouched deps),
-# to publish on dep.auxinux.ca so apt prefers it over the Debian package.
+# to publish on your APT repository so apt prefers it over the Debian package.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -8,7 +8,6 @@ sudo vos vdm movenode node2
 sudo vos vdm ha status
 sudo vos vdm ha disable
 ```
-
 Activation is refused unless Pacemaker has at least two members, quorum,
 STONITH/fencing, root SSH between members, and the same supported cluster
 filesystem mounted on every member. NFS/CIFS are rejected for the VDM database.
