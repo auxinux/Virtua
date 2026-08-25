@@ -5,7 +5,7 @@ import { api } from "@/api/client";
 import type { VdmVm, VdmVmInfo, VdmVmStats, VdmLxc, VdmDocker, VdmNode, VdmSharedStorage, VdmSnapshot, VdmTask } from "@/types/vdm";
 import { LogsModal } from "@/components/LogsModal";
 import { ConsoleModal } from "@/components/ConsoleModal";
-import { VmConfigForm, LxcConfigForm, DockerConfigForm, LxcNetworks, DockerNetworks, LxcSnapshots } from "@/components/ResourcePanels";
+import { VmConfigForm, LxcConfigForm, DockerConfigForm, DockerExec, LxcNetworks, DockerNetworks, LxcSnapshots } from "@/components/ResourcePanels";
 
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
   return (
@@ -463,7 +463,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
   const qc = useQueryClient();
   const [showLogs, setShowLogs] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
-  const [tab, setTab] = useState<"summary" | "config" | "network">("summary");
+  const [tab, setTab] = useState<"summary" | "config" | "network" | "exec">("summary");
   const ctQuery = useQuery({
     queryKey: ["vdm-docker", nodeName, containerId],
     queryFn: () => api.get<VdmDocker>(`/api/vdm/docker/${encodeURIComponent(nodeName)}/${encodeURIComponent(containerId)}`),
@@ -498,7 +498,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-vdm-border">
-        {(["summary", "config", "network"] as const).map((t) => (
+        {(["summary", "config", "network", "exec"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-3 py-2 text-sm capitalize transition-colors border-b-2 -mb-px ${tab === t ? "border-vdm-accent text-vdm-accent" : "border-transparent text-vdm-textMuted hover:text-vdm-text"}`}>{t}</button>
         ))}
       </div>
@@ -516,6 +516,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
       )}
       {tab === "config" && <DockerConfigForm node={nodeName} id={containerId} ct={ct} />}
       {tab === "network" && <DockerNetworks node={nodeName} id={containerId} />}
+      {tab === "exec" && <DockerExec node={nodeName} id={containerId} />}
     </div>
   );
 }

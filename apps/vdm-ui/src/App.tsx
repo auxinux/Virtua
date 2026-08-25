@@ -11,6 +11,8 @@ const NodesPage = lazy(() => import("@/pages/NodesPage"));
 const VmsPage = lazy(() => import("@/pages/VmsPage"));
 const LxcPage = lazy(() => import("@/pages/LxcPage"));
 const DockerPage = lazy(() => import("@/pages/DockerPage"));
+const DockerComposePage = lazy(() => import("@/pages/DockerComposePage"));
+const DockerVolumesPage = lazy(() => import("@/pages/DockerVolumesPage"));
 const StoragePage = lazy(() => import("@/pages/StoragePage"));
 const TasksPage = lazy(() => import("@/pages/TasksPage"));
 const BackupsPage = lazy(() => import("@/pages/BackupsPage"));
@@ -87,6 +89,8 @@ export default function App() {
           <Route path="/vms" element={<VmsPage />} />
           <Route path="/lxc" element={<LxcPage />} />
           <Route path="/docker" element={<DockerPage />} />
+          <Route path="/docker/compose" element={<DockerComposePage />} />
+          <Route path="/docker/volumes" element={<DockerVolumesPage />} />
           <Route path="/storage" element={<StoragePage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/backups" element={<BackupsPage />} />

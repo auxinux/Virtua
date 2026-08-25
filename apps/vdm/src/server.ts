@@ -1749,6 +1749,132 @@ app.post("/api/vdm/docker/:node/:id/console-ticket", async (req, reply) => {
   return relayConsoleTicket(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/console-ticket`, "term");
 });
 
+// ── VDM Docker: advanced actions (edit/recreate, exec) relayed to remote nodes ──
+app.put("/api/vdm/docker/:node/:id/recreate", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, id } = req.params as { node: string; id: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/recreate`, { method: "PUT", body: JSON.stringify(req.body) });
+});
+
+app.post("/api/vdm/docker/:node/:id/exec", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, id } = req.params as { node: string; id: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/exec`, { method: "POST", body: JSON.stringify(req.body) });
+});
+
+// ── VDM Docker Compose (relayed to each node's persistent .yml store) ──
+app.get("/api/vdm/docker/compose", async (req, reply) => {
+  requireAuth(req, reply);
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name ASC").all() as VdmNodeRow[];
+  const results = await Promise.allSettled(
+    nodes.map(async (node) => {
+      const projects = await fetchNode<unknown[]>(node, "/api/internal/docker/compose");
+      return (projects as Record<string, unknown>[]).map((p) => ({ ...p, nodeName: node.name, nodeDisplayName: node.display_name ?? node.name }));
+    }),
+  );
+  return results.flatMap((r) => r.status === "fulfilled" ? r.value : []);
+});
+
+app.get("/api/vdm/docker/compose/:node/:name", async (req, reply) => {
+  requireAuth(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}`);
+});
+
+app.post("/api/vdm/docker/compose/:node", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName } = req.params as { node: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, "/api/internal/docker/compose", { method: "POST", body: JSON.stringify(req.body) });
+});
+
+app.put("/api/vdm/docker/compose/:node/:name", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(req.body) });
+});
+
+app.delete("/api/vdm/docker/compose/:node/:name", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}`, { method: "DELETE" });
+});
+
+app.post("/api/vdm/docker/compose/:node/:name/up", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}/up`, { method: "POST" });
+});
+
+app.post("/api/vdm/docker/compose/:node/:name/down", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}/down`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
+});
+
+app.post("/api/vdm/docker/compose/:node/:name/restart", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}/restart`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
+});
+
+app.get("/api/vdm/docker/compose/:node/:name/ps", async (req, reply) => {
+  requireAuth(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}/ps`);
+});
+
+app.get("/api/vdm/docker/compose/:node/:name/logs", async (req, reply) => {
+  requireAuth(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/compose/${encodeURIComponent(name)}/logs?tail=200`);
+});
+
+// ── VDM Docker volumes ──
+app.get("/api/vdm/docker/volumes", async (req, reply) => {
+  requireAuth(req, reply);
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name ASC").all() as VdmNodeRow[];
+  const results = await Promise.allSettled(
+    nodes.map(async (node) => {
+      const volumes = await fetchNode<unknown[]>(node, "/api/internal/docker/volumes");
+      return (volumes as Record<string, unknown>[]).map((v) => ({ ...v, nodeName: node.name, nodeDisplayName: node.display_name ?? node.name }));
+    }),
+  );
+  return results.flatMap((r) => r.status === "fulfilled" ? r.value : []);
+});
+
+app.post("/api/vdm/docker/volumes/:node", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName } = req.params as { node: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, "/api/internal/docker/volumes", { method: "POST", body: JSON.stringify(req.body) });
+});
+
+app.delete("/api/vdm/docker/volumes/:node/:name", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/docker/volumes/${encodeURIComponent(name)}`, { method: "DELETE" });
+});
+
+// ── VDM Docker prune ──
+app.post("/api/vdm/docker/:node/prune", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName } = req.params as { node: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, "/api/internal/docker/prune", { method: "POST", body: JSON.stringify(req.body ?? {}) });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SHARED STORAGE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════

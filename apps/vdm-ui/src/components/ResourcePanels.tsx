@@ -82,19 +82,25 @@ export function LxcConfigForm({ node, name, ct }: { node: string; name: string; 
   );
 }
 
-// ── Docker config ──────────────────────────────────────────────────────────
+// ── Docker config (full edit → recreate) ─────────────────────────────────
 export function DockerConfigForm({ node, id, ct }: { node: string; id: string; ct: Record<string, unknown> }) {
   const qc = useQueryClient();
   const [restartPolicy, setRestartPolicy] = useState<string>(String(ct.restartPolicy ?? "unless-stopped"));
+  const [image, setImage] = useState<string>(String(ct.image ?? ""));
+  const [command, setCommand] = useState<string>(String(ct.command ?? ""));
   const [memoryMb, setMemoryMb] = useState<number>(0);
   const [cpuLimit, setCpuLimit] = useState<number>(0);
+  const [privileged, setPrivileged] = useState<boolean>(Boolean(ct.privileged));
   const [err, setErr] = useState("");
 
   const save = useMutation({
-    mutationFn: () => api.put(`/api/vdm/docker/${encodeURIComponent(node)}/${encodeURIComponent(id)}/config`, {
+    mutationFn: () => api.put(`/api/vdm/docker/${encodeURIComponent(node)}/${encodeURIComponent(id)}/recreate`, {
       restartPolicy,
+      ...(image ? { image } : {}),
+      ...(command ? { command } : {}),
       ...(memoryMb ? { memoryMb } : {}),
       ...(cpuLimit ? { cpuLimit } : {}),
+      privileged,
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-docker", node, id] }),
     onError: (e: Error) => setErr(e.message),
@@ -102,7 +108,18 @@ export function DockerConfigForm({ node, id, ct }: { node: string; id: string; c
 
   return (
     <div className="vdm-card p-4 space-y-3 max-w-md">
-      <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Configuration</h3>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Edit Container (recreates)</h3>
+      <p className="text-xs text-vdm-warning bg-vdm-warning/10 border border-vdm-warning/30 rounded px-3 py-2">
+        Editing recreates the container (stop + remove + recreate). Volumes and data are preserved.
+      </p>
+      <div>
+        <label className="vdm-label">Image</label>
+        <input className="vdm-input font-mono" value={image} onChange={(e) => setImage(e.target.value)} />
+      </div>
+      <div>
+        <label className="vdm-label">Command (optional)</label>
+        <input className="vdm-input font-mono" value={command} onChange={(e) => setCommand(e.target.value)} />
+      </div>
       <div>
         <label className="vdm-label">Restart policy</label>
         <select className="vdm-input" value={restartPolicy} onChange={(e) => setRestartPolicy(e.target.value)}>
@@ -113,10 +130,38 @@ export function DockerConfigForm({ node, id, ct }: { node: string; id: string; c
         <div><label className="vdm-label">CPU limit (0 = keep)</label><input className="vdm-input" type="number" min={0} value={cpuLimit} onChange={(e) => setCpuLimit(parseInt(e.target.value, 10) || 0)} /></div>
         <div><label className="vdm-label">Memory MB (0 = keep)</label><input className="vdm-input" type="number" min={0} value={memoryMb} onChange={(e) => setMemoryMb(parseInt(e.target.value, 10) || 0)} /></div>
       </div>
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" className="accent-vdm-accent" checked={privileged} onChange={(e) => setPrivileged(e.target.checked)} />
+        <span className="text-sm text-vdm-text">Privileged mode</span>
+      </label>
       <div className="flex items-center gap-3">
-        <button className="vdm-btn-primary" disabled={save.isPending} onClick={() => { setErr(""); save.mutate(); }}>{save.isPending ? "Saving…" : "Save"}</button>
+        <button className="vdm-btn-primary" disabled={save.isPending} onClick={() => { setErr(""); save.mutate(); }}>{save.isPending ? "Recreating…" : "Save & Recreate"}</button>
         <SavedHint saved={save.isSuccess} error={err || undefined} />
       </div>
+    </div>
+  );
+}
+
+// ── Docker exec ───────────────────────────────────────────────────────────
+export function DockerExec({ node, id }: { node: string; id: string }) {
+  const [command, setCommand] = useState("");
+  const [output, setOutput] = useState("");
+  const [err, setErr] = useState("");
+  const run = useMutation({
+    mutationFn: () => api.post<{ stdout: string; stderr: string }>(`/api/vdm/docker/${encodeURIComponent(node)}/${encodeURIComponent(id)}/exec`, { command }),
+    onSuccess: (res) => { setOutput([res.stdout, res.stderr].filter(Boolean).join("\n")); setErr(""); },
+    onError: (e: Error) => setErr(e.message),
+  });
+  return (
+    <div className="vdm-card p-4 space-y-3 max-w-2xl">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Execute</h3>
+      <div className="flex gap-2">
+        <input className="vdm-input font-mono flex-1" placeholder="e.g. ls -la /app" value={command} onChange={(e) => setCommand(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && command.trim()) run.mutate(); }} />
+        <button className="vdm-btn-primary" disabled={run.isPending || !command.trim()} onClick={() => run.mutate()}>{run.isPending ? "Running…" : "Run"}</button>
+      </div>
+      {err && <p className="text-xs text-vdm-danger">{err}</p>}
+      {output && <pre className="bg-[#0d1117] rounded-lg p-3 text-xs font-mono text-vdm-textMuted overflow-auto max-h-72 whitespace-pre-wrap break-all">{output}</pre>}
     </div>
   );
 }

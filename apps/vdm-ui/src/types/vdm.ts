@@ -145,6 +145,28 @@ export interface VdmDocker {
   userId?: number | null;
 }
 
+export interface VdmComposeProject {
+  name: string;
+  modifiedAt: string;
+  nodeName: string;
+  nodeDisplayName: string;
+}
+
+export interface VdmComposeService {
+  service: string;
+  name: string;
+  state: string;
+  ports?: string;
+}
+
+export interface VdmDockerVolume {
+  name: string;
+  driver: string;
+  mountpoint?: string;
+  nodeName: string;
+  nodeDisplayName: string;
+}
+
 export interface VdmSharedStorage {
   id: number;
   name: string;

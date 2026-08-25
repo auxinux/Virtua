@@ -5561,6 +5561,101 @@ app.delete("/api/internal/docker/containers/:id", async (req, reply) => {
   return { ok: true };
 });
 
+// ── Internal Docker Compose (persistent .yml) — called by the primary node for remote nodes ──
+app.get("/api/internal/docker/compose", async (req, reply) => {
+  requireInternalNodeToken(req);
+  return callRunner("docker_compose_list");
+});
+
+app.post("/api/internal/docker/compose", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const parsed = ComposeProjectSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
+  return callRunner("docker_compose_save", parsed.data, 60_000);
+});
+
+app.get("/api/internal/docker/compose/:name", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_config", { name });
+});
+
+app.put("/api/internal/docker/compose/:name", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const parsed = ComposeProjectSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
+  return callRunner("docker_compose_save", { name, composeYaml: parsed.data.composeYaml }, 60_000);
+});
+
+app.delete("/api/internal/docker/compose/:name", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_delete", { name }, 120_000);
+});
+
+app.post("/api/internal/docker/compose/:name/up", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_up", { name }, 300_000);
+});
+
+app.post("/api/internal/docker/compose/:name/down", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { removeVolumes } = (req.body ?? {}) as { removeVolumes?: boolean };
+  return callRunner("docker_compose_down", { name, removeVolumes }, 300_000);
+});
+
+app.post("/api/internal/docker/compose/:name/restart", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { service } = (req.body ?? {}) as { service?: string };
+  return callRunner("docker_compose_restart", { name, service }, 120_000);
+});
+
+app.get("/api/internal/docker/compose/:name/ps", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_compose_ps", { name });
+});
+
+app.get("/api/internal/docker/compose/:name/logs", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { tail = 100, service } = req.query as { tail?: number; service?: string };
+  return { logs: await callRunner("docker_compose_logs", { name, tail, service }) };
+});
+
+// ── Internal Docker volumes ──
+app.get("/api/internal/docker/volumes", async (req, reply) => {
+  requireInternalNodeToken(req);
+  return callRunner("docker_volumes");
+});
+
+app.post("/api/internal/docker/volumes", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const parsed = DockerVolumeCreateSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  return callRunner("docker_volume_create", parsed.data);
+});
+
+app.delete("/api/internal/docker/volumes/:name", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  return callRunner("docker_volume_delete", { id: name });
+});
+
+// ── Internal Docker prune ──
+app.post("/api/internal/docker/prune", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const parsed = DockerPruneSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  return callRunner("docker_prune", parsed.data);
+});
+
 app.get("/api/internal/backups", async (req, reply) => {
   requireInternalNodeToken(req);
   const { resourceType, resourceName } = req.query as { resourceType?: string; resourceName?: string };

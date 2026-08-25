@@ -212,6 +212,8 @@ export function Sidebar() {
           <NavItem to="/vms" icon={ICONS.vm} label="Virtual Machines" />
           <NavItem to="/lxc" icon={ICONS.container} label="LXC Containers" />
           <NavItem to="/docker" icon={ICONS.docker} label="Docker" />
+          <NavItem to="/docker/compose" icon={ICONS.docker} label="Docker Compose" />
+          <NavItem to="/docker/volumes" icon={ICONS.storage} label="Docker Volumes" />
         </div>
 
         {/* Shared Storage */}
