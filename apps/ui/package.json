@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/ui",
-  "version": "0.7.40",
+  "version": "0.7.42",
   "type": "module",
   "scripts": {
     "dev": "vite",

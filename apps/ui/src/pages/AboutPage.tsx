@@ -12,6 +12,18 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.7.42",
+      items: fr
+        ? [
+            "Correctif de version : la version affichée (CLI, interface web, À propos, VDM) est maintenant cohérente partout.",
+            "Fonctions Docker avancées : édition complète des conteneurs, gestion Docker Compose persistante, volumes, exec et nettoyage — désormais visibles dans l'interface.",
+          ]
+        : [
+            "Version fix: the displayed version (CLI, web UI, About, VDM) is now consistent everywhere.",
+            "Advanced Docker features: full container editing, persistent Docker Compose management, volumes, exec and prune — now exposed in the UI.",
+          ],
+    },
+    {
       v: "0.7.40",
       items: fr
         ? [

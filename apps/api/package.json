@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/api",
-  "version": "0.7.40",
+  "version": "0.7.42",
   "type": "module",
   "main": "./dist/server.js",
   "scripts": {
