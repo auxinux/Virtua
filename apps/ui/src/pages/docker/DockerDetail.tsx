@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { apiGet, apiPost, apiDelete } from "../../api/client";
+import { apiGet, apiPost, apiPut, apiDelete } from "../../api/client";
 import { StatusBadge } from "../../components/ui/Badge";
 import { MetricBar } from "../../components/ui/MetricBar";
 import { NotesCard } from "../../components/NotesCard";
@@ -362,6 +362,223 @@ function DockerVolumesTab({ ct }: { ct: DockerContainerDetail }) {
   );
 }
 
+// ─── Edit Tab ──────────────────────────────────────────────────────────────────
+function DockerEditTab({ ct, id }: { ct: DockerContainerDetail; id: string }) {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const [image, setImage] = useState(ct.image ?? "");
+  const [command, setCommand] = useState(ct.command ?? "");
+  const [cpuLimit, setCpuLimit] = useState("");
+  const [memoryMb, setMemoryMb] = useState("");
+  const [restartPolicy, setRestartPolicy] = useState(ct.restartPolicy ?? "unless-stopped");
+  const [privileged, setPrivileged] = useState(Boolean(ct.privileged));
+  const [ports, setPorts] = useState<Array<{ hostPort: number; containerPort: number; protocol: "tcp" | "udp" }>>(
+    (ct.ports ?? []).map((p) => ({ hostPort: p.hostPort, containerPort: p.containerPort, protocol: p.protocol }))
+  );
+  const [volumes, setVolumes] = useState<Array<{ hostPath: string; containerPath: string; mode: "ro" | "rw" }>>(
+    (ct.mounts ?? []).filter((m) => m.type === "bind").map((m) => ({ hostPath: m.source, containerPath: m.destination, mode: (m.mode === "ro" ? "ro" : "rw") as "ro" | "rw" }))
+  );
+  const [env, setEnv] = useState<string[]>((ct.env ?? []).map((e) => e));
+  const [network, setNetwork] = useState(ct.networks?.[0] ?? "");
+  const [error, setError] = useState("");
+
+  const { data: dockerNetworks = [] } = useQuery<Array<{ name: string }>>({
+    queryKey: ["docker", "networks-list"],
+    queryFn: () => apiGet("/api/docker/networks"),
+  });
+
+  const save = useMutation({
+    mutationFn: (payload: Record<string, unknown>) => apiPut(`/api/docker/containers/${id}/recreate`, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["docker"] });
+      setError("");
+    },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  const addPort = () => setPorts([...ports, { hostPort: 8080, containerPort: 80, protocol: "tcp" }]);
+  const addVolume = () => setVolumes([...volumes, { hostPath: "", containerPath: "", mode: "rw" }]);
+  const addEnv = () => setEnv([...env, ""]);
+
+  const handleSave = () => {
+    setError("");
+    const payload: Record<string, unknown> = {
+      image: image || undefined,
+      command: command || undefined,
+      restartPolicy,
+      privileged,
+      ports: ports.filter((p) => p.hostPort && p.containerPort),
+      volumes: volumes.filter((v) => v.hostPath && v.containerPath),
+      env: env.filter((e) => e.trim()),
+      network: network || undefined,
+    };
+    if (cpuLimit) payload.cpuLimit = Number(cpuLimit);
+    if (memoryMb) payload.memoryMb = Number(memoryMb);
+    save.mutate(payload);
+  };
+
+  return (
+    <div className="space-y-4 max-w-2xl">
+      <div className="rounded border border-yellow-800/50 bg-yellow-900/20 px-3 py-2 text-xs text-yellow-400">
+        {t("docker.editWarning")}
+      </div>
+
+      <div className="card p-5 space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="label">{t("docker.editImage")}</label>
+            <input className="input font-mono" value={image} onChange={(e) => setImage(e.target.value)} />
+          </div>
+          <div>
+            <label className="label">{t("docker.restartPolicy")}</label>
+            <select className="input" value={restartPolicy} onChange={(e) => setRestartPolicy(e.target.value)}>
+              <option value="no">{t("docker.restartNo")}</option>
+              <option value="always">{t("docker.restartAlways")}</option>
+              <option value="unless-stopped">{t("docker.restartUnlessStopped")}</option>
+              <option value="on-failure">{t("docker.restartOnFailure")}</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="label">{t("docker.editCommand")}</label>
+          <input className="input font-mono" value={command} onChange={(e) => setCommand(e.target.value)} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="label">{t("docker.editCpu")}</label>
+            <input className="input font-mono" value={cpuLimit} onChange={(e) => setCpuLimit(e.target.value)} placeholder="1.5" />
+          </div>
+          <div>
+            <label className="label">{t("docker.editMemory")}</label>
+            <input className="input font-mono" value={memoryMb} onChange={(e) => setMemoryMb(e.target.value)} placeholder="512" />
+          </div>
+        </div>
+
+        <div>
+          <label className="label">{t("docker.network")}</label>
+          <select className="input font-mono" value={network} onChange={(e) => setNetwork(e.target.value)}>
+            <option value="">{t("docker.defaultNetwork")}</option>
+            {dockerNetworks.map((n) => (
+              <option key={n.name} value={n.name}>{n.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue" checked={privileged} onChange={(e) => setPrivileged(e.target.checked)} />
+          <span className="text-sm text-text-300">{t("docker.editPrivileged")}</span>
+        </label>
+      </div>
+
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-text-300">{t("docker.portMappings")}</h3>
+          <button type="button" onClick={addPort} className="text-xs btn">+ {t("docker.addPort")}</button>
+        </div>
+        {ports.map((p, i) => (
+          <div key={i} className="flex gap-2 items-center">
+            <input type="number" className="input w-24 text-sm" value={p.hostPort} onChange={(e) => setPorts(ports.map((x, idx) => idx === i ? { ...x, hostPort: parseInt(e.target.value, 10) } : x))} placeholder="Host" />
+            <span className="text-text-500">:</span>
+            <input type="number" className="input w-24 text-sm" value={p.containerPort} onChange={(e) => setPorts(ports.map((x, idx) => idx === i ? { ...x, containerPort: parseInt(e.target.value, 10) } : x))} placeholder="Container" />
+            <select className="input w-20 text-sm" value={p.protocol} onChange={(e) => setPorts(ports.map((x, idx) => idx === i ? { ...x, protocol: e.target.value as "tcp" | "udp" } : x))}>
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+            </select>
+            <button type="button" onClick={() => setPorts(ports.filter((_, idx) => idx !== i))} className="text-red-400 hover:text-red-300 ml-1">✕</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-text-300">{t("docker.volumeMounts")}</h3>
+          <button type="button" onClick={addVolume} className="text-xs btn">+ {t("docker.addVolume")}</button>
+        </div>
+        {volumes.map((v, i) => (
+          <div key={i} className="flex gap-2 items-center">
+            <input className="input text-sm font-mono" value={v.hostPath} onChange={(e) => setVolumes(volumes.map((x, idx) => idx === i ? { ...x, hostPath: e.target.value } : x))} placeholder="/host/path" />
+            <span className="text-text-500">:</span>
+            <input className="input text-sm font-mono" value={v.containerPath} onChange={(e) => setVolumes(volumes.map((x, idx) => idx === i ? { ...x, containerPath: e.target.value } : x))} placeholder="/container/path" />
+            <select className="input w-20 text-sm" value={v.mode} onChange={(e) => setVolumes(volumes.map((x, idx) => idx === i ? { ...x, mode: e.target.value as "ro" | "rw" } : x))}>
+              <option value="rw">rw</option>
+              <option value="ro">ro</option>
+            </select>
+            <button type="button" onClick={() => setVolumes(volumes.filter((_, idx) => idx !== i))} className="text-red-400 hover:text-red-300 ml-1">✕</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="card p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-text-300">{t("docker.environmentVariables")}</h3>
+          <button type="button" onClick={addEnv} className="text-xs btn">+ {t("docker.addVariable")}</button>
+        </div>
+        {env.map((e, i) => (
+          <div key={i} className="flex gap-2 items-center">
+            <input className="input text-sm font-mono flex-1" value={e} onChange={(ev) => setEnv(env.map((x, idx) => idx === i ? ev.target.value : x))} placeholder="KEY=VALUE" />
+            <button type="button" onClick={() => setEnv(env.filter((_, idx) => idx !== i))} className="text-red-400 hover:text-red-300 ml-1">✕</button>
+          </div>
+        ))}
+      </div>
+
+      {error && <div className="bg-red-900/30 border border-red-800 rounded px-3 py-2 text-sm text-red-400">{error}</div>}
+      {save.isSuccess && <div className="bg-green-900/30 border border-green-800 rounded px-3 py-2 text-sm text-green-400">{t("docker.editSaved")}</div>}
+
+      <div className="flex gap-3">
+        <button className="btn-primary" disabled={save.isPending} onClick={handleSave}>
+          {save.isPending ? t("msg.loading") : t("action.save")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Exec Tab ──────────────────────────────────────────────────────────────────
+function DockerExecTab({ id }: { id: string }) {
+  const { t } = useTranslation();
+  const [command, setCommand] = useState("");
+  const [output, setOutput] = useState("");
+  const [error, setError] = useState("");
+
+  const run = useMutation({
+    mutationFn: (cmd: string) => apiPost<{ stdout: string; stderr: string }>(`/api/docker/containers/${id}/exec`, { command: cmd }),
+    onSuccess: (res) => {
+      setOutput([res.stdout, res.stderr].filter(Boolean).join("\n"));
+      setError("");
+    },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  return (
+    <div className="space-y-4 max-w-2xl">
+      <div className="card p-5 space-y-3">
+        <h3 className="text-sm font-semibold text-text-300">{t("docker.execTitle")}</h3>
+        <div className="flex gap-2">
+          <input
+            className="input font-mono flex-1"
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            placeholder={t("docker.execPlaceholder")}
+            onKeyDown={(e) => { if (e.key === "Enter" && command.trim()) run.mutate(command); }}
+          />
+          <button className="btn-primary" disabled={run.isPending || !command.trim()} onClick={() => run.mutate(command)}>
+            {run.isPending ? t("msg.loading") : t("docker.execRun")}
+          </button>
+        </div>
+        {error && <div className="bg-red-900/30 border border-red-800 rounded px-3 py-2 text-sm text-red-400">{error}</div>}
+      </div>
+      {output && (
+        <div className="card p-4">
+          <h3 className="text-xs font-semibold text-text-400 mb-2">{t("docker.execOutput")}</h3>
+          <pre className="bg-surface-900 rounded-lg p-3 text-xs font-mono text-text-300 overflow-auto max-h-80 whitespace-pre-wrap break-all">{output}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Component ─────────────────────────────────────────────────────────────
 export default function DockerDetail() {
   const { id } = useParams<{ id: string }>();
@@ -383,6 +600,8 @@ export default function DockerDetail() {
     { key: "ports", label: "Ports" },
     perms?.canModify ? { key: "networks", label: t("tab.networks", "Réseaux") } : null,
     { key: "volumes", label: "Volumes" },
+    perms?.canModify ? { key: "edit", label: t("docker.edit", "Éditer") } : null,
+    perms?.canConsole ? { key: "exec", label: t("docker.exec", "Exécuter") } : null,
   ].filter(Boolean) as Array<{ key: string; label: string }>, [perms?.canAdmin, perms?.canConsole, perms?.canModify, t]);
 
   const { data: ct, isLoading, error } = useQuery<DockerContainerDetail>({
@@ -492,6 +711,8 @@ export default function DockerDetail() {
         {tab === "ports" && <DockerPortsTab ct={ct} />}
         {tab === "networks" && perms?.canModify && <DockerNetworksTab id={id!} />}
         {tab === "volumes" && <DockerVolumesTab ct={ct} />}
+        {tab === "edit" && perms?.canModify && <DockerEditTab ct={ct} id={id!} />}
+        {tab === "exec" && perms?.canConsole && <DockerExecTab id={id!} />}
       </div>
 
       <ConfirmModal

@@ -51,6 +51,8 @@ const LxcCreate = lazy(() => import("./pages/lxc/LxcCreate"));
 const DockerList = lazy(() => import("./pages/docker/DockerList"));
 const DockerDetail = lazy(() => import("./pages/docker/DockerDetail"));
 const DockerCreate = lazy(() => import("./pages/docker/DockerCreate"));
+const DockerCompose = lazy(() => import("./pages/docker/DockerCompose"));
+const DockerVolumes = lazy(() => import("./pages/docker/DockerVolumes"));
 const StorageDashboard = lazy(() => import("./pages/storage/StorageDashboard"));
 const PoolDetail = lazy(() => import("./pages/storage/PoolDetail"));
 const IsoManager = lazy(() => import("./pages/storage/IsoManager"));
@@ -197,6 +199,8 @@ export default function App() {
 
           <Route path="/docker" element={<ProtectedLayout><SectionRoute section="docker"><DockerList /></SectionRoute></ProtectedLayout>} />
           <Route path="/docker/create" element={<ProtectedLayout><SectionRoute section="dockerCreate"><DockerCreate /></SectionRoute></ProtectedLayout>} />
+          <Route path="/docker/compose" element={<ProtectedLayout><SectionRoute section="docker"><DockerCompose /></SectionRoute></ProtectedLayout>} />
+          <Route path="/docker/volumes" element={<ProtectedLayout><SectionRoute section="docker"><DockerVolumes /></SectionRoute></ProtectedLayout>} />
           <Route path="/docker/:id" element={<ProtectedLayout><ResourceRoute resourceType="docker" paramName="id"><DockerDetail /></ResourceRoute></ProtectedLayout>} />
 
           <Route path="/storage" element={<ProtectedLayout><SectionRoute section="storageOverview"><StorageDashboard /></SectionRoute></ProtectedLayout>} />

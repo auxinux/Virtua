@@ -79,6 +79,12 @@ export default function DockerList() {
             onChange={(e) => setSearch(e.target.value)}
             className="input text-sm w-44"
           />
+          <Link to="/docker/compose" className="btn-secondary">
+            {t("docker.compose")}
+          </Link>
+          <Link to="/docker/volumes" className="btn-secondary">
+            {t("docker.volumes")}
+          </Link>
           {capabilities?.sections.dockerCreate && <Link to="/docker/create" className="btn-primary">
             <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
