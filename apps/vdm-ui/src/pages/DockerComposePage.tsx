@@ -118,7 +118,7 @@ export default function DockerComposePage() {
           </div>
           <div>
             <label className="vdm-label">docker-compose.yml</label>
-            <textarea className="vdm-input font-mono text-xs h-48 w-full" placeholder="services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\"" value={newYaml} onChange={(e) => setNewYaml(e.target.value)} spellCheck={false} />
+            <textarea className="vdm-input font-mono text-xs h-48 w-full" placeholder={`services:\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"`} value={newYaml} onChange={(e) => setNewYaml(e.target.value)} spellCheck={false} />
           </div>
           <div className="flex gap-2">
             <button className="vdm-btn-primary text-xs" disabled={create.isPending || !newName || !newNode || !newYaml} onClick={() => create.mutate({ node: newNode, name: newName, yaml: newYaml })}>
