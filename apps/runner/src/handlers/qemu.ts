@@ -323,9 +323,14 @@ async function listVms() {
       const uuid = parseField(info, "UUID") ?? "";
       const autostart = parseField(info, "Autostart") === "enable";
       const qemuAgentEnabled = hasGuestAgentChannel(xml);
-      return { name, state: normalizeState(state), vcpus, maxMemoryKiB: maxMem, usedMemoryKiB: usedMem, uuid, autostart, qemuAgentEnabled };
+      return {
+        name, state: normalizeState(state), vcpus,
+        maxMemoryKiB: maxMem, usedMemoryKiB: usedMem,
+        memoryMb: Math.round(maxMem / 1024), usedMemoryMb: Math.round(usedMem / 1024),
+        uuid, autostart, qemuAgentEnabled,
+      };
     } catch {
-      return { name, state: "unknown", vcpus: 0, maxMemoryKiB: 0, usedMemoryKiB: 0, uuid: "", autostart: false, qemuAgentEnabled: false };
+      return { name, state: "unknown", vcpus: 0, maxMemoryKiB: 0, usedMemoryKiB: 0, memoryMb: 0, usedMemoryMb: 0, uuid: "", autostart: false, qemuAgentEnabled: false };
     }
   }));
   return vms;
@@ -1627,7 +1632,12 @@ async function getVmInfo(name: string) {
 
   const uefi = /<loader\b/i.test(xml);
   const secureBoot = /<loader[^>]*\bsecure=['"]yes['"]/i.test(xml);
-  return { name, state, vcpus, currentMemoryKiB: curMem, maxMemoryKiB: maxMem, uuid, autostart, machine, arch, uefi, secureBoot, bootOrder, tpmEnabled, qemuAgentEnabled, videoModel, disks, networks, usbDevices, mountedIso, vncPort, vncHost: "127.0.0.1", spicePort: spice.port, spiceTlsPort: spice.tlsPort, spiceHost: spice.host, spiceEnabled: spice.enabled, os: "Unknown" };
+  return {
+    name, state, vcpus,
+    currentMemoryKiB: curMem, maxMemoryKiB: maxMem,
+    memoryMb: Math.round(maxMem / 1024), usedMemoryMb: Math.round(curMem / 1024),
+    uuid, autostart, machine, arch, uefi, secureBoot, bootOrder, tpmEnabled, qemuAgentEnabled, videoModel, disks, networks, usbDevices, mountedIso, vncPort, vncHost: "127.0.0.1", spicePort: spice.port, spiceTlsPort: spice.tlsPort, spiceHost: spice.host, spiceEnabled: spice.enabled, os: "Unknown",
+  };
 }
 
 async function ensureSpiceConsole(name: string) {

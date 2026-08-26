@@ -1229,7 +1229,7 @@ WantedBy=multi-user.target
   } catch { /* best-effort */ }
 }
 
-function parseContainerConfig(cfg: string) {
+function parseContainerConfig(cfg: string, name?: string) {
   const cpuMax = getCfgValue(cfg, "lxc.cgroup2.cpu.max");
   const cpuQuota = cpuMax?.split(/\s+/)[0];
   const cpus = cpuQuota && cpuQuota !== "max" ? Math.max(1, Math.round(parseInt(cpuQuota, 10) / 100000)) : 1;
@@ -1248,11 +1248,15 @@ function parseContainerConfig(cfg: string) {
   const autostart = getCfgValue(cfg, "lxc.start.auto") === "1";
   const usbDevices = parseLxcUsbDevices(cfg);
   const gpuDevices = parseLxcGpuDevices(cfg);
+  const arch = getCfgValue(cfg, "lxc.arch") ?? "amd64";
 
   return {
     cpus,
     memoryMiB,
+    memoryMb: memoryMiB,
     diskGb,
+    rootfsSizeGb: diskGb,
+    arch,
     ipAddress,
     gateway: gateway && gateway !== "auto" ? gateway : undefined,
     bridge,
@@ -1379,6 +1383,20 @@ async function deleteLxcNic(name: string, index: number) {
   return { ok: true };
 }
 
+// Reads the guest OS name from the container's rootfs os-release (best-effort).
+async function readContainerOs(name: string): Promise<string | undefined> {
+  try {
+    const etcDir = await resolveRootfsDir(name, "etc");
+    const content = await readRootfsFile(etcDir, "os-release");
+    if (!content) return undefined;
+    const pretty = content.match(/^PRETTY_NAME\s*=\s*"?(.+?)"?\s*$/im)?.[1];
+    const nameMatch = content.match(/^NAME\s*=\s*"?(.+?)"?\s*$/im)?.[1];
+    return pretty ?? nameMatch ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function listContainers() {
   const out = await lxcCmd("lxc-ls", "-1").catch(() => "");
   const names = out.trim().split("\n").filter(Boolean);
@@ -1389,6 +1407,7 @@ async function listContainers() {
       const dns = await readContainerDns(name);
       const runtimeIp = parseContainerIP(info);
       const state = normalizeState(parseField(info, "State") ?? "unknown");
+      const os = await readContainerOs(name);
 
       // For running containers, read the live MAC and persist if it differs from config
       let effectiveMac = parsed.macAddress;
@@ -1413,6 +1432,7 @@ async function listContainers() {
         name,
         state,
         ...parsed,
+        os,
         ipAddress: runtimeIp ?? parsed.ipAddress,
         macAddress: effectiveMac,
         dns,
@@ -1706,6 +1726,7 @@ async function getContainerInfo(name: string) {
   const dns = await readContainerDns(name);
   const runtimeIp = parseContainerIP(info);
   const state = normalizeState(parseField(info, "State") ?? "unknown");
+  const os = await readContainerOs(name);
 
   // If the container is running, read the actual runtime MAC from inside the container
   // and persist it to config if it differs (keeps UI in sync)
@@ -1731,6 +1752,7 @@ async function getContainerInfo(name: string) {
     name,
     state,
     ...parsed,
+    os,
     ipAddress: runtimeIp ?? parsed.ipAddress,
     macAddress: effectiveMac,
     dns,

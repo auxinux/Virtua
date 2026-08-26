@@ -15,12 +15,29 @@ export default function DockerComposePage() {
   const [selected, setSelected] = useState<{ node: string; name: string } | null>(null);
   const [editYaml, setEditYaml] = useState("");
   const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newNode, setNewNode] = useState("");
+  const [newYaml, setNewYaml] = useState("");
 
   const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
   const projectsQuery = useQuery<VdmComposeProject[]>({
     queryKey: ["vdm-compose"],
     queryFn: () => api.get("/api/vdm/docker/compose"),
     refetchInterval: 15_000,
+  });
+
+  const create = useMutation({
+    mutationFn: ({ node, name, yaml }: { node: string; name: string; yaml: string }) =>
+      api.post(`/api/vdm/docker/compose/${encodeURIComponent(node)}`, { name, composeYaml: yaml }),
+    onSuccess: () => {
+      setCreating(false);
+      setNewName("");
+      setNewYaml("");
+      setNewNode("");
+      qc.invalidateQueries({ queryKey: ["vdm-compose"] });
+    },
+    onError: (err: Error) => setError(err.message),
   });
 
   const detailQuery = useQuery<ComposeDetail>({
@@ -76,9 +93,41 @@ export default function DockerComposePage() {
           <h1 className="text-lg font-semibold text-vdm-text">Docker Compose</h1>
           <p className="text-sm text-vdm-textMuted">Persistent Compose projects across nodes</p>
         </div>
+        <button className="vdm-btn-primary" onClick={() => setCreating((v) => !v)}>
+          {creating ? "Cancel" : "+ New project"}
+        </button>
       </div>
 
       {error && <div className="rounded-lg border border-vdm-danger/40 bg-vdm-danger/10 px-3 py-2 text-sm text-vdm-danger">{error}</div>}
+
+      {creating && (
+        <div className="vdm-card p-4 space-y-3">
+          <h2 className="text-sm font-semibold text-vdm-text">New Compose project</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="vdm-label">Name</label>
+              <input className="vdm-input font-mono" placeholder="my-stack" value={newName} onChange={(e) => setNewName(e.target.value)} />
+            </div>
+            <div>
+              <label className="vdm-label">Node</label>
+              <select className="vdm-input" value={newNode} onChange={(e) => setNewNode(e.target.value)}>
+                <option value="">Select node…</option>
+                {(nodesQuery.data ?? []).map((n) => <option key={n.name} value={n.name}>{n.displayName}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="vdm-label">docker-compose.yml</label>
+            <textarea className="vdm-input font-mono text-xs h-48 w-full" placeholder="services:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\"" value={newYaml} onChange={(e) => setNewYaml(e.target.value)} spellCheck={false} />
+          </div>
+          <div className="flex gap-2">
+            <button className="vdm-btn-primary text-xs" disabled={create.isPending || !newName || !newNode || !newYaml} onClick={() => create.mutate({ node: newNode, name: newName, yaml: newYaml })}>
+              {create.isPending ? "Creating…" : "Create project"}
+            </button>
+            <button className="vdm-btn-ghost text-xs" onClick={() => setCreating(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="vdm-card p-3 space-y-1">
