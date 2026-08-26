@@ -72,7 +72,8 @@ function RestoreModal({ item, nodes, onClose, onRestore, isPending }: {
   );
 }
 
-function AddJobModal({ repositories, nodes, onClose, onAdd, isPending }: {
+function AddJobModal({ open, repositories, nodes, onClose, onAdd, isPending }: {
+  open: boolean;
   repositories: VdmBackupRepository[];
   nodes: VdmNode[];
   onClose: () => void;
@@ -80,6 +81,7 @@ function AddJobModal({ repositories, nodes, onClose, onAdd, isPending }: {
   isPending: boolean;
 }) {
   const [form, setForm] = useState({ name: "", repositoryId: "", resourceType: "vm", resourceName: "", sourceNode: "", intervalMinutes: "1440" });
+  if (!open) return null;
   const onlineNodes = nodes.filter((n) => n.status === "online");
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
   const canSubmit = form.name && form.repositoryId && form.resourceName && form.sourceNode;
@@ -279,6 +281,7 @@ export default function BackupsPage() {
         isPending={restore.isPending}
       />
       <AddJobModal
+        open={showAddJob}
         repositories={repositories.data ?? []}
         nodes={nodes.data ?? []}
         onClose={() => setShowAddJob(false)}
