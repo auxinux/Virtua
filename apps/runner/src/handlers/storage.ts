@@ -515,12 +515,28 @@ async function getPoolDf(poolPath: string) {
   }
 }
 
-// A FUSE mount whose daemon died still shows up in `findmnt` (the kernel keeps
-// the entry), but any real access fails with ENOTCONN. `stat` is the reliable
-// liveness probe: it succeeds on a live mount and throws on a dead one.
+// Liveness probe for a storage pool mount. Two failure modes must be caught:
+//   1. NOT mounted at all — the path is just an empty directory (created by
+//      ensureLibvirtPoolAccess). `stat` succeeds here, so it is NOT enough.
+//   2. FUSE mount whose daemon died — `findmnt` still lists the kernel entry,
+//      but any real access (readdir) fails with ENOTCONN.
+// A pool is alive only if it is BOTH a real mountpoint (findmnt) AND readable
+// (readdir). This distinguishes "mounted and healthy" from "empty dir" and
+// "dead FUSE".
 async function isPoolAlive(poolPath: string): Promise<{ alive: boolean }> {
+  // 1. Is it actually a mountpoint?
+  let isMountpoint = false;
   try {
-    await fs.stat(poolPath);
+    await execFileAsync("findmnt", ["-n", "-o", "TARGET", poolPath]);
+    isMountpoint = true;
+  } catch {
+    isMountpoint = false;
+  }
+  if (!isMountpoint) return { alive: false };
+
+  // 2. Is it readable (not a dead FUSE mount)?
+  try {
+    await fs.readdir(poolPath);
     return { alive: true };
   } catch {
     return { alive: false };
@@ -732,20 +748,18 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
     "--log-file", logPath, "--log-level", "INFO",
   ]);
 
-  // Verify the mount came up and is ALIVE. `findmnt` only proves the kernel
-  // entry exists — a daemon that dies right after mounting still leaves it.
-  // `stat` (real access) is the reliable probe: it throws ENOTCONN on a dead
-  // FUSE mount. Poll it for a short window.
+  // Verify the mount came up and is ALIVE. Reuse the same liveness probe as
+  // isPoolAlive: it must be a real mountpoint (findmnt) AND readable (readdir),
+  // so neither an empty directory nor a daemon that died right after mounting
+  // is mistaken for a healthy mount. Poll for a short window.
   const deadline = Date.now() + 8000;
   let mounted = false;
   while (Date.now() < deadline) {
-    try {
-      await fs.stat(mountPath);
+    if ((await isPoolAlive(mountPath)).alive) {
       mounted = true;
       break;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   if (!mounted) {
     const logTail = await fs.readFile(logPath, "utf8").catch(() => "");
