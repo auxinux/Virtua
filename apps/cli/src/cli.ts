@@ -48,7 +48,7 @@ function readPkgVersion(): string {
     const pkg = JSON.parse(fs.readFileSync(rootPkg, "utf-8")) as { version?: string };
     if (pkg.version) return pkg.version;
   } catch { /* fall through */ }
-  return "0.7.51";
+  return "0.7.52";
 }
 const VIRTUA_VERSION = readPkgVersion();
 
