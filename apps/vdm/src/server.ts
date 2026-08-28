@@ -482,7 +482,10 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
   let s3VfsCacheMode = storage.s3_vfs_cache_mode ?? undefined;
   if (isS3 && contents.includes("backup") && (!s3VfsCacheMode || s3VfsCacheMode === "off")) {
     s3VfsCacheMode = "writes";
-    recordVdmLog(db, "warn", "vdm", "storage", `S3 storage ${storage.name}: VFS cache "off" cannot store backups — mounting with "writes" instead (edit the storage to change this)`);
+    // Persist the escalation so the warning is not re-emitted on every remount.
+    db.prepare("UPDATE vdm_shared_storage SET s3_vfs_cache_mode = 'writes', updated_at = ? WHERE name = ?")
+      .run(new Date().toISOString(), storage.name);
+    recordVdmLog(db, "warn", "vdm", "storage", `S3 storage ${storage.name}: VFS cache "off" cannot store backups — switched to "writes" (edit the storage to change this)`);
   }
   try {
     await fetchNode(node, "/api/internal/storage/pools", {
@@ -694,12 +697,17 @@ app.setErrorHandler((err: Error & { statusCode?: number }, req, reply) => {
   const code = err.statusCode ?? 500;
   if (code >= 500) app.log.error(err);
   const pathname = req.url.split("?")[0];
-  const category: VdmLogCategory = pathname.includes("/storage") ? "storage"
-    : pathname.includes("/backup") ? "backup"
-    : pathname.includes("/migrat") ? "migration"
-    : pathname.includes("/node") ? "nodes"
-    : "system";
-  recordVdmLog(db, "error", "vdm", category, `${req.method} ${pathname} → ${code}: ${err.message}`.slice(0, 2000));
+  // Only 5xx are operational incidents worth logging. 4xx (401 Unauthorized on
+  // /auth/me before login, 403, 404, validation) are normal client states and
+  // would otherwise flood the LOGS page with noise.
+  if (code >= 500) {
+    const category: VdmLogCategory = pathname.includes("/storage") ? "storage"
+      : pathname.includes("/backup") ? "backup"
+      : pathname.includes("/migrat") ? "migration"
+      : pathname.includes("/node") ? "nodes"
+      : "system";
+    recordVdmLog(db, "error", "vdm", category, `${req.method} ${pathname} → ${code}: ${err.message}`.slice(0, 2000));
+  }
   const isProduction = process.env.NODE_ENV === "production";
   const clientMessage = code >= 500 && isProduction ? "Internal Server Error" : err.message;
   return reply.status(code).send({ error: clientMessage });
