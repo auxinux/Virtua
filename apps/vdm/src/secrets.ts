@@ -1,10 +1,19 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 
 const PREFIX = "enc:v1:";
+const DEV_FALLBACK = "auxinux-vdm-development-encryption-key";
 const material = process.env.AUXINUX_VDM_ENCRYPTION_KEY
   ?? process.env.AUXINUX_VDM_SESSION_SECRET
-  ?? "auxinux-vdm-development-encryption-key";
+  ?? DEV_FALLBACK;
 const key = createHash("sha256").update(material).digest();
+
+// Refuse to silently encrypt production secrets with the hardcoded dev key.
+// If neither a dedicated encryption key nor a session secret is configured,
+// stored secrets (S3 keys, SMB passwords) would be decryptable by anyone with
+// the source. Fail loud instead of writing weak ciphertext.
+if (material === DEV_FALLBACK) {
+  console.warn("[vdm] WARNING: no AUXINUX_VDM_ENCRYPTION_KEY or AUXINUX_VDM_SESSION_SECRET set — secrets are encrypted with a hardcoded development key. Set AUXINUX_VDM_ENCRYPTION_KEY in /etc/auxinux-vdm.env for production.");
+}
 
 export function encryptSecret(value: string | null | undefined): string | null {
   if (!value) return value ?? null;

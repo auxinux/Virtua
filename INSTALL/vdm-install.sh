@@ -1621,6 +1621,12 @@ UNIT
         if [[ -z "${AUXINUX_VDM_SESSION_SECRET:-}" ]]; then
             AUXINUX_VDM_SESSION_SECRET="$(openssl rand -base64 48 | tr -d '\n')"
         fi
+        # Generate a DEDICATED encryption key for stored secrets (S3 keys, SMB
+        # passwords). It must be independent of the session secret so rotating
+        # the session secret never makes stored secrets undecryptable.
+        if [[ -z "${AUXINUX_VDM_ENCRYPTION_KEY:-}" ]]; then
+            AUXINUX_VDM_ENCRYPTION_KEY="$(openssl rand -base64 48 | tr -d '\n')"
+        fi
         # Write via tmp + atomic rename + restrictive mode before populating secrets.
         local env_tmp
         env_tmp="$(mktemp)"
@@ -1637,7 +1643,7 @@ UNIT
 #AUXINUX_VDM_INSTANCE_ID=vdm-01
 #AUXINUX_VDM_ROLE=active
 #AUXINUX_VDM_MIN_VIRTUA_VERSION=0.7.32
-#AUXINUX_VDM_ENCRYPTION_KEY=generate-a-dedicated-random-secret
+AUXINUX_VDM_ENCRYPTION_KEY=${AUXINUX_VDM_ENCRYPTION_KEY}
 #AUXINUX_VDM_SECURE_COOKIE=0
 #AUXINUX_VDM_TRUST_PROXY=0
 ENV

@@ -41,6 +41,23 @@ async function ensureLibvirtPoolAccess(poolPath: string): Promise<void> {
   }
 }
 
+// `rclone mount --allow-other` (and any FUSE mount with allow_other) requires
+// `user_allow_other` in /etc/fuse.conf. Without it the daemon dies right after
+// mounting. The runner runs as root, so it can guarantee this on the fly.
+async function ensureFuseAllowOther(): Promise<void> {
+  const fuseConf = "/etc/fuse.conf";
+  try {
+    const existing = await fs.readFile(fuseConf, "utf8").catch(() => "");
+    const lines = existing.split("\n").map((l) => l.trim());
+    if (lines.some((l) => l === "user_allow_other")) return;
+    const filtered = lines.filter((l) => l && !l.startsWith("#") && l !== "user_allow_other");
+    filtered.push("user_allow_other");
+    await fs.writeFile(fuseConf, `${filtered.join("\n")}\n`, { mode: 0o644 });
+  } catch {
+    // Non-fatal: if we can't write fuse.conf, rclone will surface the error.
+  }
+}
+
 const ALLOWED_FSTAB_MOUNT_TYPES = new Set([
   "ext4", "xfs", "btrfs", "ext3", "ext2", "f2fs",
   "nfs", "nfs4", "cifs", "smbfs", "glusterfs",
@@ -483,11 +500,18 @@ async function removeRaidMember(device: string, member: string) {
 }
 
 async function getPoolDf(poolPath: string) {
-  const { stdout } = await execFileAsync("df", ["-B1", "--output=size,used,avail", poolPath]);
-  const lines = stdout.trim().split("\n");
-  if (lines.length < 2) return { totalBytes: 0, usedBytes: 0, freeBytes: 0 };
-  const parts = lines[1].trim().split(/\s+/);
-  return { totalBytes: parseInt(parts[0]) || 0, usedBytes: parseInt(parts[1]) || 0, freeBytes: parseInt(parts[2]) || 0 };
+  // A dead FUSE mount (rclone daemon crashed) makes `df` fail with ENOTCONN
+  // ("Transport endpoint is not connected"). Report zeros instead of throwing,
+  // so a dead mount surfaces as 0 bytes rather than a 500 on every status poll.
+  try {
+    const { stdout } = await execFileAsync("df", ["-B1", "--output=size,used,avail", poolPath]);
+    const lines = stdout.trim().split("\n");
+    if (lines.length < 2) return { totalBytes: 0, usedBytes: 0, freeBytes: 0 };
+    const parts = lines[1].trim().split(/\s+/);
+    return { totalBytes: parseInt(parts[0]) || 0, usedBytes: parseInt(parts[1]) || 0, freeBytes: parseInt(parts[2]) || 0 };
+  } catch {
+    return { totalBytes: 0, usedBytes: 0, freeBytes: 0 };
+  }
 }
 
 function fstabEscape(value: string): string {
@@ -533,7 +557,7 @@ async function mountPool(p: Record<string, unknown>) {
   // S3 / object storage pool — handled by rclone mount (FUSE). It does not use
   // fstab or the classic mount() path, so branch before fstype validation.
   if (type === "s3") {
-    return mountS3Pool({ name, mountPath, source, p });
+    return mountS3Pool({ name, mountPath, p });
   }
 
   const rawFstype = (p.fstype as string) ?? "ext4";
@@ -638,8 +662,8 @@ async function mountPool(p: Record<string, unknown>) {
 }
 
 // ── S3 / object storage pool via rclone mount (FUSE) ─────────────────────
-async function mountS3Pool(args: { name?: string; mountPath: string; source?: string; p: Record<string, unknown> }) {
-  const { name, mountPath, source, p } = args;
+async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<string, unknown> }) {
+  const { name, mountPath, p } = args;
   const bucket = (p.s3Bucket as string | undefined)?.trim();
   const endpoint = (p.s3Endpoint as string | undefined)?.trim();
   const accessKey = (p.s3AccessKey as string | undefined)?.trim();
@@ -656,7 +680,10 @@ async function mountS3Pool(args: { name?: string; mountPath: string; source?: st
   const remoteName = `virtua-${(name ?? "s3").replace(/[^a-zA-Z0-9_-]/g, "_")}`;
   const credsDir = "/etc/auxinuxvirtual/credentials";
   await fs.mkdir(credsDir, { recursive: true });
+  // The directory holds S3 keys in plaintext (rclone config) — restrict it to root.
+  await fs.chmod(credsDir, 0o700).catch(() => {});
   const configPath = path.join(credsDir, `${remoteName}.conf`);
+  const logPath = path.join(credsDir, `${remoteName}.log`);
   const providerMap: Record<string, string> = { aws: "AWS", minio: "Minio", b2: "B2", generic: "Other" };
   const rcloneProvider = providerMap[provider] ?? "Other";
 
@@ -672,14 +699,48 @@ async function mountS3Pool(args: { name?: string; mountPath: string; source?: st
   await fs.writeFile(configPath, `${lines.join("\n")}\n`, { mode: 0o600 });
 
   // rclone mount exposes the bucket as a FUSE filesystem at the mount path.
-  await ensureLibvirtPoolAccess(args.mountPath);
+  await ensureLibvirtPoolAccess(mountPath);
+  // `--allow-other` requires `user_allow_other` in /etc/fuse.conf, otherwise the
+  // rclone daemon dies right after mounting (mount registered, then ENOTCONN on
+  // any access). Ensure it is present so the mount survives.
+  await ensureFuseAllowOther();
+  // Clear any stale FUSE entry from a previous dead mount before mounting, so a
+  // remount after a crash doesn't fail on a zombie mountpoint.
+  await execFileAsync("fusermount3", ["-uz", mountPath]).catch(() => {});
+  await execFileAsync("fusermount", ["-uz", mountPath]).catch(() => {});
   const cacheArg = vfsCache === "off" ? ["--vfs-cache-mode=off"] : [`--vfs-cache-mode=${vfsCache}`];
   // Run rclone mount in background (daemon) so it survives the runner call.
+  // --daemon returns immediately and MASKS failures (bad credentials, unreachable
+  // endpoint, dead FUSE), so we MUST verify the mount actually holds below.
   await execFileAsync("rclone", [
     "--config", configPath, "mount", `${remoteName}:${bucket}`,
-    args.mountPath, "--daemon", ...cacheArg,
+    mountPath, "--daemon", ...cacheArg,
     "--allow-other", "--dir-cache-time", "10m",
+    "--log-file", logPath, "--log-level", "INFO",
   ]);
+
+  // Verify the mount came up and is alive. Poll findmnt for a short window;
+  // a dead FUSE mount (rclone daemon crashed) reports ENOTCONN on any access.
+  const deadline = Date.now() + 8000;
+  let mounted = false;
+  while (Date.now() < deadline) {
+    try {
+      await execFileAsync("findmnt", ["-n", "-o", "TARGET", mountPath]);
+      mounted = true;
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  if (!mounted) {
+    const logTail = await fs.readFile(logPath, "utf8").catch(() => "");
+    const reason = logTail.trim().split("\n").slice(-3).join(" | ") || "rclone mount did not come up";
+    // Clean up the dead attempt so a retry starts fresh (no stale FUSE entry).
+    await execFileAsync("fusermount3", ["-u", mountPath]).catch(() => {});
+    await execFileAsync("fusermount", ["-u", mountPath]).catch(() => {});
+    await fs.unlink(configPath).catch(() => {});
+    throw new Error(`S3 mount failed: ${reason}`);
+  }
   return { ok: true };
 }
 
@@ -687,9 +748,15 @@ async function umountPool(p: Record<string, unknown>) {
   const poolPath = validateMountPath(p.path, "path");
   const poolName = p.name as string | undefined;
   // S3 / rclone mounts also expose a FUSE mountpoint; unmount it with fusermount/rclone.
+  // A DEAD FUSE mount (rclone daemon crashed) reports ENOTCONN and refuses a normal
+  // unmount — use lazy unmount (-l / -uz) so the stale mountpoint is released and a
+  // later remount can succeed instead of looping on a zombie FUSE entry.
   await execFileAsync("umount", [poolPath]).catch(() => {});
+  await execFileAsync("umount", ["-l", poolPath]).catch(() => {});
   await execFileAsync("fusermount3", ["-u", poolPath]).catch(() => {});
+  await execFileAsync("fusermount3", ["-uz", poolPath]).catch(() => {});
   await execFileAsync("fusermount", ["-u", poolPath]).catch(() => {});
+  await execFileAsync("fusermount", ["-uz", poolPath]).catch(() => {});
   const fstab = await fs.readFile("/etc/fstab", "utf8").catch(() => "");
   const escapedMountPath = fstabEscape(poolPath);
   const filtered = fstab.split("\n").filter((line) => {
@@ -699,11 +766,17 @@ async function umountPool(p: Record<string, unknown>) {
   }).join("\n");
   await fs.writeFile("/etc/fstab", filtered);
   if (poolName) {
-    const credentialsPath = path.join("/etc/auxinuxvirtual/credentials", `${poolName.replace(/[^a-zA-Z0-9._-]/g, "_")}.cifs`);
+    const safeName = poolName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const credentialsPath = path.join("/etc/auxinuxvirtual/credentials", `${safeName}.cifs`);
     await fs.unlink(credentialsPath).catch(() => {});
     // Remove the rclone S3 credentials file if present
-    const s3CredPath = path.join("/etc/auxinuxvirtual/credentials", `${poolName.replace(/[^a-zA-Z0-9._-]/g, "_")}.s3`);
+    const s3CredPath = path.join("/etc/auxinuxvirtual/credentials", `${safeName}.s3`);
     await fs.unlink(s3CredPath).catch(() => {});
+    // Remove the rclone remote config + log (the config holds the S3 keys in
+    // plaintext — it MUST be deleted when the pool is removed).
+    const remoteName = `virtua-${safeName}`;
+    await fs.unlink(path.join("/etc/auxinuxvirtual/credentials", `${remoteName}.conf`)).catch(() => {});
+    await fs.unlink(path.join("/etc/auxinuxvirtual/credentials", `${remoteName}.log`)).catch(() => {});
   }
   return { ok: true };
 }
