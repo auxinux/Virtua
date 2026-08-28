@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
+import { mountFailureMessage, type StorageMountResult } from "@/lib/storageMountResults";
 import type { VdmSharedStorage, VdmNode, VdmStorageNodeStatus, VdmStorageContentItem } from "@/types/vdm";
 
 // ── Icon ────────────────────────────────────────────────────────────────────
@@ -413,6 +414,7 @@ function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
   const [expanded, setExpanded] = useState(!!initiallyExpanded);
   const [mountingAll, setMountingAll] = useState(false);
   const [mountingNode, setMountingNode] = useState<string | null>(null);
+  const [mountError, setMountError] = useState<string | null>(null);
 
   const isSmb = stor.type === "smb" || stor.type === "cifs";
   const isNfs = stor.type === "nfs";
@@ -420,9 +422,13 @@ function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
 
   const handleMountAll = async () => {
     setMountingAll(true);
+    setMountError(null);
     try {
-      await api.post(`/api/vdm/storage/${encodeURIComponent(stor.name)}/mount`);
-      qc.invalidateQueries({ queryKey: ["vdm-storage-cluster-status", stor.name] });
+      const results = await api.post<StorageMountResult[]>(`/api/vdm/storage/${encodeURIComponent(stor.name)}/mount`);
+      setMountError(mountFailureMessage(results));
+      await qc.invalidateQueries({ queryKey: ["vdm-storage-cluster-status", stor.name] });
+    } catch (error) {
+      setMountError(error instanceof Error ? error.message : "Mount all failed");
     } finally {
       setMountingAll(false);
     }
@@ -430,9 +436,12 @@ function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
 
   const handleMountOne = async (nodeName: string) => {
     setMountingNode(nodeName);
+    setMountError(null);
     try {
       await api.post(`/api/vdm/storage/${encodeURIComponent(stor.name)}/mount/${encodeURIComponent(nodeName)}`);
-      qc.invalidateQueries({ queryKey: ["vdm-storage-cluster-status", stor.name] });
+      await qc.invalidateQueries({ queryKey: ["vdm-storage-cluster-status", stor.name] });
+    } catch (error) {
+      setMountError(`${nodeName}: ${error instanceof Error ? error.message : "Mount failed"}`);
     } finally {
       setMountingNode(null);
     }
@@ -487,6 +496,11 @@ function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
       {/* Cluster panel */}
       {expanded && (
         <>
+          {mountError && (
+            <div className="mt-3 rounded-lg border border-vdm-danger/40 bg-vdm-danger/10 px-3 py-2 text-xs text-vdm-danger whitespace-pre-wrap">
+              {mountError}
+            </div>
+          )}
           <ClusterStatusPanel
             storage={stor}
             onMountAll={handleMountAll}

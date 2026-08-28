@@ -333,6 +333,9 @@ const app = Fastify({
   trustProxy: true,
   ...(tlsOptions ? { https: tlsOptions } : {}),
 });
+// Keep binary migration uploads as streams; never buffer VM/LXC/Docker images
+// in API memory. Routes consuming this type must pipe req.body to disk.
+app.addContentTypeParser("application/octet-stream", (_request, payload, done) => done(null, payload));
 const db = getDb();
 
 // ── Local operational error log (polled by VDM) ────────────────────────────
@@ -4970,7 +4973,13 @@ app.post("/api/internal/storage/pools/:name/content/upload", async (req, reply) 
   const destDir = path.join(pool.path, "backups");
   await fs.promises.mkdir(destDir, { recursive: true });
   const destPath = path.join(destDir, safeName);
-  await pipeline(req.raw, fs.createWriteStream(destPath));
+  const tempPath = `${destPath}.part-${randomUUID()}`;
+  try {
+    await pipeline(req.body as NodeJS.ReadableStream, fs.createWriteStream(tempPath, { flags: "wx" }));
+    await fs.promises.rename(tempPath, destPath);
+  } finally {
+    await fs.promises.unlink(tempPath).catch(() => {});
+  }
   const stat = await fs.promises.stat(destPath);
   return { ok: true, filename: safeName, sizeBytes: stat.size, path: destPath };
 });
@@ -5610,6 +5619,33 @@ app.put("/api/internal/docker/containers/:id/recreate", async (req, reply) => {
 app.get("/api/internal/docker/containers/:id/details", async (req, reply) => {
   requireInternalNodeToken(req);
   return callRunner("docker_inspect", req.params);
+});
+
+app.post("/api/internal/docker/containers/:id/migration-export", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { id } = req.params as { id: string };
+  const { storagePool, targetName } = req.body as { storagePool?: string; targetName?: string };
+  if (!storagePool || !targetName) return reply.status(400).send({ error: "storagePool and targetName are required" });
+  const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(storagePool) as { path: string } | undefined;
+  if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
+  const filename = sanitizeManagedFilename(`docker-${targetName}-${randomUUID()}.tar`);
+  const archivePath = path.join(pool.path, "backups", filename);
+  await fs.promises.mkdir(path.dirname(archivePath), { recursive: true });
+  return callRunner("docker_migration_export", { id, targetName, archivePath }, BACKUP_TIMEOUT_MS);
+});
+
+app.post("/api/internal/docker/migration-import", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { storagePool, filename, imageRef, manifest } = req.body as { storagePool?: string; filename?: string; imageRef?: string; manifest?: Record<string, unknown> };
+  if (!storagePool || !filename || !imageRef || !manifest) return reply.status(400).send({ error: "storagePool, filename, imageRef and manifest are required" });
+  const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(storagePool) as { path: string } | undefined;
+  if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
+  const archivePath = path.join(pool.path, "backups", sanitizeManagedFilename(filename));
+  const result = await callRunner<{ ok: boolean; id: string; name: string }>("docker_migration_import", { archivePath, imageRef, manifest }, BACKUP_TIMEOUT_MS);
+  db.prepare("INSERT OR IGNORE INTO docker_containers (container_id, container_name, image, user_id, node_name) VALUES (?, ?, ?, NULL, ?)")
+    .run(result.id, result.name, imageRef, getLocalNodeName());
+  await syncFirewallState();
+  return result;
 });
 
 // Internal Docker multi-NIC (called by the primary node for remote containers).

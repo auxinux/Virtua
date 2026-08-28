@@ -17,6 +17,7 @@ import { getDb, getSetting, setSetting, DATA_DIR } from "./db.js";
 import { fetchNode, tryFetchNode, pingNode, type VdmNodeRow } from "./nodeClient.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { parseLogSettings, serializeLogSettings, shouldLog, recordVdmLog, purgeOldLogs, LOG_SETTINGS_KEY, type VdmLogLevel, type VdmLogCategory, type VdmLogSettings } from "./logs.js";
+import { reconcileStorageMounts } from "./storageReconcile.js";
 
 declare module "@fastify/session" {
   interface FastifySessionObject {
@@ -522,6 +523,24 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
   return storage.name;
 }
 
+// ── Automatic shared-storage mount reconciliation ──────────────────────────
+let storageReconcileRunning = false;
+async function runStorageMountReconciliation(): Promise<void> {
+  if (storageReconcileRunning) return;
+  storageReconcileRunning = true;
+  try {
+    const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1").all() as VdmNodeRow[];
+    const storages = db.prepare("SELECT * FROM vdm_shared_storage WHERE enabled = 1 ORDER BY name").all() as VdmSharedStorageRow[];
+    await reconcileStorageMounts(nodes, storages, (node, storage) => ensureStorageMountedOnNode(node, storage));
+  } finally {
+    storageReconcileRunning = false;
+  }
+}
+
+// Start shortly after VDM boots, then continuously heal missing/dead mounts.
+setTimeout(() => { void runStorageMountReconciliation(); }, 5_000).unref();
+setInterval(() => { void runStorageMountReconciliation(); }, 60_000).unref();
+
 // ── Cross-node binary transfer (for migration/duplication to local storage) ─
 // Streams a file from one node's pool to another node's pool without routing
 // the bytes through the VDM process. Uses the node's internal token directly.
@@ -535,31 +554,44 @@ async function transferFileBetweenNodes(
 ): Promise<{ filename: string; sizeBytes: number }> {
   const base = sourceNode.api_url.replace(/\/+$/, "");
   const url = `${base}/api/internal/storage/pools/${encodeURIComponent(sourcePool)}/content/download?itemPath=${encodeURIComponent(sourcePath)}`;
-  const res = await fetch(url, {
-    headers: { "x-auxinux-node-token": decryptSecret(sourceNode.auth_token) },
-  });
-  if (!res.ok || !res.body) {
-    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
-    throw new Error(`Download from ${sourceNode.name} failed: ${err.error ?? res.statusText}`);
-  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("Cross-node transfer timeout")), LONG_OPERATION_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      headers: { "x-auxinux-node-token": decryptSecret(sourceNode.auth_token) },
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+      throw new Error(`Download from ${sourceNode.name} failed: ${err.error ?? res.statusText}`);
+    }
+    const expectedSize = Number(res.headers.get("content-length") ?? 0);
 
-  const targetBase = targetNode.api_url.replace(/\/+$/, "");
-  const uploadUrl = `${targetBase}/api/internal/storage/pools/${encodeURIComponent(targetPool)}/content/upload?filename=${encodeURIComponent(filename)}`;
-  const uploadRes = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      "x-auxinux-node-token": decryptSecret(targetNode.auth_token),
-      "content-type": "application/octet-stream",
-    },
-    body: res.body as unknown as BodyInit,
-    // @ts-expect-error duplex is required for streaming request bodies in undici
-    duplex: "half",
-  });
-  if (!uploadRes.ok) {
-    const err = await uploadRes.json().catch(() => ({ error: uploadRes.statusText })) as { error?: string };
-    throw new Error(`Upload to ${targetNode.name} failed: ${err.error ?? uploadRes.statusText}`);
+    const targetBase = targetNode.api_url.replace(/\/+$/, "");
+    const uploadUrl = `${targetBase}/api/internal/storage/pools/${encodeURIComponent(targetPool)}/content/upload?filename=${encodeURIComponent(filename)}`;
+    const uploadRes = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        "x-auxinux-node-token": decryptSecret(targetNode.auth_token),
+        "content-type": "application/octet-stream",
+      },
+      body: res.body as unknown as BodyInit,
+      signal: controller.signal,
+      // @ts-expect-error duplex is required for streaming request bodies in undici
+      duplex: "half",
+    });
+    if (!uploadRes.ok) {
+      const err = await uploadRes.json().catch(() => ({ error: uploadRes.statusText })) as { error?: string };
+      throw new Error(`Upload to ${targetNode.name} failed: ${err.error ?? uploadRes.statusText}`);
+    }
+    const uploaded = await uploadRes.json() as { filename: string; sizeBytes: number };
+    if (expectedSize > 0 && uploaded.sizeBytes !== expectedSize) {
+      throw new Error(`Transfer size mismatch: expected ${expectedSize} bytes, received ${uploaded.sizeBytes}`);
+    }
+    return uploaded;
+  } finally {
+    clearTimeout(timer);
   }
-  return await uploadRes.json() as { filename: string; sizeBytes: number };
 }
 
 // Resolve a pool's filesystem path on a node (for local-storage transfers).
@@ -1897,6 +1929,79 @@ app.post("/api/vdm/docker/:node/:id/action", async (req, reply) => {
   return fetchNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: "POST" });
 });
 
+app.post("/api/vdm/docker/:node/:id/transfer", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: sourceNodeName, id } = req.params as { node: string; id: string };
+  const { targetNode: targetNodeName, targetName, sharedStorageName, targetStoragePool, deleteSource = false } = req.body as {
+    targetNode?: string; targetName?: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource?: boolean;
+  };
+  if (!targetNodeName || !targetName) return reply.status(400).send({ error: "targetNode and targetName are required" });
+  if (!sharedStorageName && !targetStoragePool) return reply.status(400).send({ error: "sharedStorageName or targetStoragePool required" });
+  if (sourceNodeName === targetNodeName) return reply.status(400).send({ error: "Source and target nodes must be different" });
+
+  const sourceNode = getEnabledNode(sourceNodeName);
+  const targetNode = getEnabledNode(targetNodeName);
+  const task = createTask({
+    kind: deleteSource ? "migrate" : "clone",
+    label: `${deleteSource ? "Migrate" : "Duplicate"} Docker ${id}: ${sourceNodeName} → ${targetNodeName}`,
+    sourceNode: sourceNodeName, targetNode: targetNodeName, resourceType: "docker", resourceName: targetName,
+    createdBy: req.session.username,
+  });
+
+  void (async () => {
+    try {
+      let sourcePool: string;
+      let targetPool: string;
+      let sharedStorage: VdmSharedStorageRow | undefined;
+      if (targetStoragePool) {
+        sourcePool = "local";
+        targetPool = targetStoragePool;
+      } else {
+        sharedStorage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
+        if (!sharedStorage) throw new Error("Shared storage not found");
+        updateTask(task.id, "running", 5, "Mounting shared storage on both nodes...");
+        sourcePool = await ensureStorageMountedOnNode(sourceNode, sharedStorage);
+        targetPool = await ensureStorageMountedOnNode(targetNode, sharedStorage);
+      }
+
+      updateTask(task.id, "running", 15, "Capturing Docker writable layer and configuration...");
+      const exported = await fetchNode<{ filename: string; sizeBytes: number; imageRef: string; manifest: Record<string, unknown>; archivePath: string }>(
+        sourceNode,
+        `/api/internal/docker/containers/${encodeURIComponent(id)}/migration-export`,
+        { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify({ storagePool: sourcePool, targetName }) },
+      );
+
+      if (targetStoragePool) {
+        updateTask(task.id, "running", 45, "Streaming Docker image bundle to target node...");
+        await transferFileBetweenNodes(sourceNode, sourcePool, exported.archivePath, targetNode, targetPool, exported.filename);
+      }
+
+      updateTask(task.id, "running", 70, "Importing and recreating Docker container on target node...");
+      const imported = await fetchNode<{ id: string; name: string }>(targetNode, "/api/internal/docker/migration-import", {
+        method: "POST",
+        timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+        body: JSON.stringify({ storagePool: targetPool, filename: exported.filename, imageRef: exported.imageRef, manifest: exported.manifest }),
+      });
+      await fetchNode(targetNode, `/api/internal/docker/containers/${encodeURIComponent(imported.id)}/details`);
+
+      if (deleteSource) {
+        updateTask(task.id, "running", 90, "Removing source Docker container...");
+        try {
+          await fetchNode(sourceNode, `/api/internal/docker/containers/${encodeURIComponent(id)}`, { method: "DELETE" });
+        } catch (error) {
+          updateTask(task.id, "completed-with-warning", 100, `Docker restored on ${targetNodeName}, but source cleanup failed`, error instanceof Error ? error.message : "Source cleanup failed", { targetNode: targetNodeName, sourceRetained: true, targetId: imported.id });
+          return;
+        }
+      }
+      updateTask(task.id, "completed", 100, `${deleteSource ? "Migration" : "Duplication"} complete: ${targetName} on ${targetNodeName}`, undefined, { targetId: imported.id, targetNode: targetNodeName });
+    } catch (error) {
+      updateTask(task.id, "failed", 0, undefined, error instanceof Error ? error.message : "Docker transfer failed");
+    }
+  })();
+
+  return reply.status(202).send(mapTaskRow(task));
+});
+
 app.delete("/api/vdm/docker/:node/:id", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: nodeName, id } = req.params as { node: string; id: string };
@@ -2170,13 +2275,14 @@ app.post("/api/vdm/storage/:name/mount", async (req, reply) => {
   if (!storage) return reply.status(404).send({ error: "Storage not found" });
 
   const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1").all() as VdmNodeRow[];
-  const results = await Promise.allSettled(
-    nodes.map(async (node) => {
+  return Promise.all(nodes.map(async (node) => {
+    try {
       await ensureStorageMountedOnNode(node, storage);
-      return { node: node.name, ok: true };
-    }),
-  );
-  return results.map((r) => r.status === "fulfilled" ? r.value : { ok: false, error: (r.reason as Error).message });
+      return { node: node.name, ok: true as const };
+    } catch (error) {
+      return { node: node.name, ok: false as const, error: error instanceof Error ? error.message : "Mount failed" };
+    }
+  }));
 });
 
 // Mount shared storage on one specific node

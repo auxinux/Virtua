@@ -1,6 +1,8 @@
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import * as fs from "fs/promises";
+import { buildDockerMigrationManifest, type DockerMigrationManifest } from "./dockerMigration";
 
 const execFileAsync = promisify(execFile);
 
@@ -216,6 +218,8 @@ export async function handleDocker(action: string, params: unknown): Promise<unk
     case "docker_network_connect": return connectContainerNetwork(p);
     case "docker_network_disconnect": return disconnectContainerNetwork(p.id as string, p.network as string);
     case "docker_rename": return renameContainer(p.id as string, p.newName as string);
+    case "docker_migration_export": return exportContainerMigration(p);
+    case "docker_migration_import": return importContainerMigration(p);
     default: throw new Error(`Unknown docker action: ${action}`);
   }
 }
@@ -409,7 +413,7 @@ async function listContainers() {
 async function runContainer(p: Record<string, unknown>) {
   const name = validateDockerName(p.name);
   const image = validateDockerImage(p.image);
-  const rawPorts = (p.ports as Array<{ hostPort: number; containerPort: number; protocol: string }>) ?? [];
+  const rawPorts = (p.ports as Array<{ hostPort: number; containerPort: number; protocol: string; hostIp?: string }>) ?? [];
   const rawVolumes = (p.volumes as Array<{ hostPath: string; containerPath: string; mode: string }>) ?? [];
   const rawEnv = (p.env as string[]) ?? [];
   const cpuLimit = p.cpuLimit !== undefined ? Number(p.cpuLimit) : undefined;
@@ -428,6 +432,7 @@ async function runContainer(p: Record<string, unknown>) {
     hostPort: validatePortNumber(port.hostPort, "hostPort"),
     containerPort: validatePortNumber(port.containerPort, "containerPort"),
     protocol: validateProtocol(port.protocol),
+    hostIp: port.hostIp ? validateIpv4Address(port.hostIp, "port hostIp") : undefined,
   }));
   const volumes = rawVolumes.map((vol) => ({
     hostPath: validateHostPath(vol.hostPath, "volume hostPath"),
@@ -444,7 +449,10 @@ async function runContainer(p: Record<string, unknown>) {
 
   const args = ["run", "-d", "--name", name, `--restart=${restartPolicy}`];
   if (privileged) args.push("--privileged");
-  for (const port of ports) args.push("-p", `${port.hostPort}:${port.containerPort}/${port.protocol}`);
+  for (const port of ports) {
+    const bind = port.hostIp ? `${port.hostIp}:${port.hostPort}:${port.containerPort}/${port.protocol}` : `${port.hostPort}:${port.containerPort}/${port.protocol}`;
+    args.push("-p", bind);
+  }
   for (const vol of volumes) args.push("-v", `${vol.hostPath}:${vol.containerPath}:${vol.mode}`);
   for (const value of env) args.push("-e", value);
   if (cpuLimit) args.push("--cpus", String(cpuLimit));
@@ -596,7 +604,48 @@ async function inspectContainer(id: string) {
     restartPolicy: String((hostCfg.RestartPolicy as Record<string, unknown>)?.Name ?? "no"),
     command: ((cfg.Cmd as string[]) ?? []).join(" "),
     entrypoint: Array.isArray(cfg.Entrypoint) ? (cfg.Entrypoint as string[]).join(" ") : String(cfg.Entrypoint ?? ""),
+    cpuLimit: Number(hostCfg.NanoCpus ?? 0) > 0 ? Number(hostCfg.NanoCpus) / 1_000_000_000 : undefined,
+    memoryMb: Number(hostCfg.Memory ?? 0) > 0 ? Math.round(Number(hostCfg.Memory) / 1024 / 1024) : undefined,
   };
+}
+
+async function exportContainerMigration(p: Record<string, unknown>) {
+  const id = validateDockerName(p.id, "container id");
+  const targetName = validateDockerName(p.targetName, "target container name");
+  const archivePath = validateHostPath(p.archivePath, "migration archive path");
+  const current = await inspectContainer(id);
+  const manifest = buildDockerMigrationManifest(current, targetName);
+  const imageRef = `auxinux-migrate/${targetName.toLowerCase()}:${randomUUID()}`;
+
+  await fs.mkdir(archivePath.slice(0, archivePath.lastIndexOf("/")), { recursive: true });
+  try {
+    // docker commit pauses a running container by default, giving a consistent
+    // writable-layer snapshot without deleting or stopping the source.
+    await docker("commit", id, imageRef);
+    await docker("save", "--output", archivePath, imageRef);
+    const stat = await fs.stat(archivePath);
+    return { archivePath, filename: archivePath.split("/").pop()!, sizeBytes: stat.size, imageRef, manifest };
+  } finally {
+    await docker("image", "rm", imageRef).catch(() => {});
+  }
+}
+
+async function importContainerMigration(p: Record<string, unknown>) {
+  const archivePath = validateHostPath(p.archivePath, "migration archive path");
+  const imageRef = validateDockerImage(p.imageRef);
+  const rawManifest = p.manifest as DockerMigrationManifest;
+  if (!rawManifest || typeof rawManifest !== "object") throw new Error("Migration manifest is required");
+  const manifest = buildDockerMigrationManifest({
+    ...rawManifest,
+    state: rawManifest.wasRunning ? "running" : "stopped",
+    networks: rawManifest.network ? [rawManifest.network] : [],
+    mounts: [],
+  }, validateDockerName(rawManifest.name));
+
+  await docker("load", "--input", archivePath);
+  const result = await runContainer({ ...manifest, image: imageRef });
+  if (!rawManifest.wasRunning) await docker("stop", result.id).catch(() => {});
+  return { ...result, name: manifest.name };
 }
 
 async function updateConfig(p: Record<string, unknown>) {
@@ -620,7 +669,7 @@ interface RecreateInput {
   name?: string;
   image?: string;
   command?: string;
-  ports?: Array<{ hostPort: number; containerPort: number; protocol: string }>;
+  ports?: Array<{ hostPort: number; containerPort: number; protocol: string; hostIp?: string }>;
   volumes?: Array<{ hostPath: string; containerPath: string; mode: string }>;
   env?: string[];
   network?: string;
@@ -656,11 +705,13 @@ async function recreateContainer(p: Record<string, unknown>) {
         hostPort: validatePortNumber(port.hostPort, "hostPort"),
         containerPort: validatePortNumber(port.containerPort, "containerPort"),
         protocol: validateProtocol(port.protocol),
+        hostIp: port.hostIp ? validateIpv4Address(port.hostIp, "port hostIp") : undefined,
       }))
     : (current.ports ?? []).map((port) => ({
         hostPort: port.hostPort,
         containerPort: port.containerPort,
         protocol: port.protocol,
+        hostIp: port.hostIp,
       }));
 
   // Volumes: if provided, replace; otherwise keep current bind mounts.
@@ -707,7 +758,10 @@ async function recreateContainer(p: Record<string, unknown>) {
   // 4. Re-run with the merged config.
   const args = ["run", "-d", "--name", name, `--restart=${restartPolicy}`];
   if (privileged) args.push("--privileged");
-  for (const port of ports) args.push("-p", `${port.hostPort}:${port.containerPort}/${port.protocol}`);
+  for (const port of ports) {
+    const bind = port.hostIp ? `${port.hostIp}:${port.hostPort}:${port.containerPort}/${port.protocol}` : `${port.hostPort}:${port.containerPort}/${port.protocol}`;
+    args.push("-p", bind);
+  }
   for (const vol of volumes) args.push("-v", `${vol.hostPath}:${vol.containerPath}:${vol.mode}`);
   for (const value of env) args.push("-e", value);
   if (cpuLimit) args.push("--cpus", String(cpuLimit));

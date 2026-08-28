@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
+import { buildAllResourceRows } from "@/lib/allResources";
 import type { VdmVm, VdmVmInfo, VdmVmStats, VdmLxc, VdmDocker, VdmNode, VdmSharedStorage, VdmSnapshot, VdmTask } from "@/types/vdm";
 import { LogsModal } from "@/components/LogsModal";
 import { ConsoleModal } from "@/components/ConsoleModal";
@@ -481,6 +482,46 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
 }
 
 // ── Docker Detail Panel ────────────────────────────────────────────────────
+function DockerTransferModal({ open, onClose, mode, currentName, sourceNode, nodes, storages, onSubmit }: {
+  open: boolean; onClose: () => void; mode: "migrate" | "duplicate"; currentName: string; sourceNode: string;
+  nodes: VdmNode[]; storages: VdmSharedStorage[];
+  onSubmit: (payload: { targetNode: string; targetName: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource: boolean }) => void;
+}) {
+  const [targetNode, setTargetNode] = useState("");
+  const [targetName, setTargetName] = useState(mode === "migrate" ? currentName : `${currentName}-copy`);
+  const [transferMode, setTransferMode] = useState<"shared" | "local">("local");
+  const [storageName, setStorageName] = useState("");
+  if (!open) return null;
+  const ready = !!targetNode && !!targetName && (transferMode === "local" || !!storageName);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="vdm-card w-full max-w-md p-5 space-y-4">
+        <h3 className="text-base font-semibold text-vdm-text">{mode === "migrate" ? "Migrate" : "Duplicate"} Docker: {currentName}</h3>
+        <div><label className="vdm-label">Target Node</label><select className="vdm-input" value={targetNode} onChange={(e) => setTargetNode(e.target.value)}>
+          <option value="">Select node...</option>
+          {nodes.filter((n) => n.name !== sourceNode && n.status === "online").map((n) => <option key={n.name} value={n.name}>{n.displayName}</option>)}
+        </select></div>
+        <div><label className="vdm-label">Target container name</label><input className="vdm-input font-mono" value={targetName} disabled={mode === "migrate"} onChange={(e) => setTargetName(e.target.value)} /></div>
+        <div><label className="vdm-label">Transfer method</label><div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={() => setTransferMode("local")} className={`rounded-lg border px-3 py-2 text-sm ${transferMode === "local" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted"}`}>Local copy</button>
+          <button type="button" onClick={() => setTransferMode("shared")} className={`rounded-lg border px-3 py-2 text-sm ${transferMode === "shared" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted"}`}>Shared storage</button>
+        </div></div>
+        {transferMode === "shared" && <div><label className="vdm-label">Shared storage</label><select className="vdm-input" value={storageName} onChange={(e) => setStorageName(e.target.value)}>
+          <option value="">Select storage...</option>{storages.map((s) => <option key={s.name} value={s.name}>{s.displayName}</option>)}
+        </select></div>}
+        <p className="text-xs text-vdm-warning bg-vdm-warning/10 border border-vdm-warning/30 rounded px-3 py-2">
+          The writable container layer and configuration are preserved. Containers with volumes or bind mounts are refused to prevent silent data loss.
+        </p>
+        <div className="flex justify-end gap-2"><button className="vdm-btn-ghost" onClick={onClose}>Cancel</button><button className="vdm-btn-primary" disabled={!ready} onClick={() => {
+          if (!ready) return;
+          onSubmit({ targetNode, targetName, sharedStorageName: transferMode === "shared" ? storageName : undefined, targetStoragePool: transferMode === "local" ? "local" : undefined, deleteSource: mode === "migrate" });
+          onClose();
+        }}>{mode === "migrate" ? "Start Migration" : "Start Duplication"}</button></div>
+      </div>
+    </div>
+  );
+}
+
 function formatDockerPorts(ports: VdmDocker["ports"]): string {
   if (!ports) return "—";
   if (typeof ports === "string") return ports;
@@ -490,8 +531,10 @@ function formatDockerPorts(ports: VdmDocker["ports"]): string {
 
 function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId: string }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [showLogs, setShowLogs] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
+  const [transferMode, setTransferMode] = useState<"migrate" | "duplicate" | null>(null);
   const [tab, setTab] = useState<"summary" | "config" | "network" | "exec">("summary");
   const ctQuery = useQuery({
     queryKey: ["vdm-docker", nodeName, containerId],
@@ -501,6 +544,13 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
   const actionMut = useMutation({
     mutationFn: (action: string) => api.post(`/api/vdm/docker/${encodeURIComponent(nodeName)}/${encodeURIComponent(containerId)}/action`, { action }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-docker", nodeName, containerId] }),
+  });
+  const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
+  const storagesQuery = useQuery<VdmSharedStorage[]>({ queryKey: ["vdm-storage"], queryFn: () => api.get("/api/vdm/storage") });
+  const transferMut = useMutation({
+    mutationFn: (payload: { targetNode: string; targetName: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource: boolean }) =>
+      api.post<VdmTask>(`/api/vdm/docker/${encodeURIComponent(nodeName)}/${encodeURIComponent(containerId)}/transfer`, payload),
+    onSuccess: () => navigate("/tasks"),
   });
 
   const ct = ctQuery.data as Record<string, unknown> | undefined;
@@ -519,11 +569,16 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
         {isRunning && <ActionButton label="Stop" icon="M5.25 7.5A2.25 2.25 0 0 1 7.5 5.25h9a2.25 2.25 0 0 1 2.25 2.25v9a2.25 2.25 0 0 1-2.25 2.25h-9a2.25 2.25 0 0 1-2.25-2.25v-9Z" variant="warning" onClick={() => actionMut.mutate("stop")} />}
         {isRunning && <ActionButton label="Restart" icon="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" onClick={() => actionMut.mutate("restart")} />}
         <div className="h-6 w-px bg-vdm-border self-center" />
+        <ActionButton label="Migrate" icon="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" onClick={() => setTransferMode("migrate")} />
+        <ActionButton label="Duplicate" icon="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75m9 10.5h3.375c.621 0 1.125-.504 1.125-1.125V4.875c0-.621-.504-1.125-1.125-1.125h-9.75A1.125 1.125 0 0 0 8.25 4.875V7.5" onClick={() => setTransferMode("duplicate")} />
         <ActionButton label="Logs" icon="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" onClick={() => setShowLogs(true)} />
         <ActionButton label="Console" icon="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" variant="primary" disabled={!isRunning} onClick={() => setShowConsole(true)} />
       </div>
       <LogsModal open={showLogs} onClose={() => setShowLogs(false)} type="docker" node={nodeName} name={containerId} title={ct.name as string} />
       <ConsoleModal open={showConsole} onClose={() => setShowConsole(false)} type="docker" node={nodeName} name={containerId} title={ct.name as string} mode="term" />
+      {transferMode && <DockerTransferModal key={transferMode} open onClose={() => setTransferMode(null)} mode={transferMode}
+        currentName={String(ct.name ?? containerId)} sourceNode={nodeName} nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
+        onSubmit={(payload) => transferMut.mutate(payload)} />}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-vdm-border">
@@ -535,7 +590,12 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
       {tab === "summary" && (
         <div className="vdm-card p-4 space-y-2">
           <h3 className="text-xs font-semibold uppercase text-vdm-textMuted">Container Info</h3>
-          {([["Image", ct.image], ["Status", ct.status], ["Created", ct.createdAt ?? ct.created ?? "—"], ["Ports", formatDockerPorts(ct.ports as VdmDocker["ports"])]] as [string, string][]).map(([k, v]) => (
+          {([
+            ["Image", String(ct.image ?? "—")],
+            ["Status", String(ct.status ?? ct.state ?? "—")],
+            ["Created", String(ct.createdAt ?? ct.created ?? "—")],
+            ["Ports", formatDockerPorts(ct.ports as VdmDocker["ports"])],
+          ] as [string, string][]).map(([k, v]) => (
             <div key={k} className="flex justify-between text-xs">
               <span className="text-vdm-textMuted">{k}</span>
               <span className="text-vdm-text font-mono truncate max-w-48">{v}</span>
@@ -546,6 +606,60 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
       {tab === "config" && <DockerConfigForm node={nodeName} id={containerId} ct={ct} />}
       {tab === "network" && <DockerNetworks node={nodeName} id={containerId} />}
       {tab === "exec" && <DockerExec node={nodeName} id={containerId} />}
+    </div>
+  );
+}
+
+// ── All Resources overview ──────────────────────────────────────────────────
+function AllResourcesView() {
+  const [search, setSearch] = useState("");
+  const vmQuery = useQuery<VdmVm[]>({ queryKey: ["vdm-vms-all"], queryFn: () => api.get("/api/vdm/vms"), refetchInterval: 15_000 });
+  const lxcQuery = useQuery<VdmLxc[]>({ queryKey: ["vdm-lxc-all"], queryFn: () => api.get("/api/vdm/lxc"), refetchInterval: 15_000 });
+  const dockerQuery = useQuery<VdmDocker[]>({ queryKey: ["vdm-docker-all"], queryFn: () => api.get("/api/vdm/docker"), refetchInterval: 15_000 });
+  const loading = vmQuery.isLoading || lxcQuery.isLoading || dockerQuery.isLoading;
+  const rows = buildAllResourceRows(vmQuery.data ?? [], lxcQuery.data ?? [], dockerQuery.data ?? []);
+  const needle = search.trim().toLowerCase();
+  const filtered = needle
+    ? rows.filter((row) => `${row.type} ${row.name} ${row.nodeName} ${row.nodeDisplayName} ${row.detail}`.toLowerCase().includes(needle))
+    : rows;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-lg font-semibold text-vdm-text">All Resources</h1>
+          <p className="text-sm text-vdm-textMuted">{rows.length} resources across all nodes</p>
+        </div>
+        <input className="vdm-input w-56" placeholder="Search resources…" value={search} onChange={(e) => setSearch(e.target.value)} />
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {(["VM", "LXC", "Docker"] as const).map((type) => (
+          <div key={type} className="vdm-card px-4 py-3">
+            <div className="text-xs uppercase tracking-wider text-vdm-textMuted">{type}</div>
+            <div className="text-xl font-semibold text-vdm-text mt-1">{rows.filter((row) => row.type === type).length}</div>
+          </div>
+        ))}
+      </div>
+      <div className="vdm-card overflow-x-auto">
+        {loading ? (
+          <div className="p-10 flex justify-center"><div className="w-6 h-6 border-2 border-vdm-accent border-t-transparent rounded-full animate-spin" /></div>
+        ) : filtered.length === 0 ? (
+          <div className="p-10 text-center text-sm text-vdm-textMuted">No resources found.</div>
+        ) : (
+          <table className="vdm-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Node</th><th>State</th><th>Details</th></tr></thead>
+            <tbody>{filtered.map((row) => (
+              <tr key={row.key} className="hover:bg-vdm-bg/40">
+                <td><Link className="font-medium text-vdm-accent hover:underline" to={row.href}>{row.name}</Link></td>
+                <td><span className="pill-gray">{row.type}</span></td>
+                <td className="text-sm text-vdm-textMuted">{row.nodeDisplayName}</td>
+                <td><StateChip state={row.state} /></td>
+                <td className="text-xs text-vdm-textMuted font-mono truncate max-w-64">{row.detail}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
@@ -561,10 +675,7 @@ export default function InventoryPage() {
       {/* Detail panel */}
       <div className="flex-1 min-w-0">
         {!hasSelection ? (
-          <div className="vdm-card p-8 text-center">
-            <p className="text-vdm-textMuted text-sm">Select a resource from the inventory tree on the left to view details.</p>
-            <p className="text-vdm-textMuted/60 text-xs mt-2">Navigate to VMs, LXC Containers, or Docker sections for list views.</p>
-          </div>
+          <AllResourcesView />
         ) : type === "vm" ? (
           <div className="vdm-card p-4">
             <VmDetail nodeName={node!} vmName={decodeURIComponent(name!)} />

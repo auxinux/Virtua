@@ -2,6 +2,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs/promises";
 import * as path from "path";
+import { probePoolAlive } from "./storageLiveness";
 
 const execFileAsync = promisify(execFile);
 
@@ -524,23 +525,14 @@ async function getPoolDf(poolPath: string) {
 // (readdir). This distinguishes "mounted and healthy" from "empty dir" and
 // "dead FUSE".
 async function isPoolAlive(poolPath: string): Promise<{ alive: boolean }> {
-  // 1. Is it actually a mountpoint?
-  let isMountpoint = false;
-  try {
-    await execFileAsync("findmnt", ["-n", "-o", "TARGET", poolPath]);
-    isMountpoint = true;
-  } catch {
-    isMountpoint = false;
-  }
-  if (!isMountpoint) return { alive: false };
-
-  // 2. Is it readable (not a dead FUSE mount)?
-  try {
-    await fs.readdir(poolPath);
-    return { alive: true };
-  } catch {
-    return { alive: false };
-  }
+  return probePoolAlive(poolPath, {
+    isMountpoint: async (candidate) => {
+      await execFileAsync("findmnt", ["-n", "-o", "TARGET", candidate]);
+      return true;
+    },
+    readDirectory: (candidate) => fs.readdir(candidate),
+    accessTimeoutMs: 2_000,
+  });
 }
 
 function fstabEscape(value: string): string {
