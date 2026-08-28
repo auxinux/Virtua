@@ -5,6 +5,7 @@ import { useVdmAuth } from "@/hooks/useVdmAuth";
 import type { VdmUser as AuthUser } from "@/types/vdm";
 
 interface VdmSettings { vdmName?: string; allowSelfSigned?: boolean; }
+interface LogsConfig { enabled: boolean; minLevel: "warn" | "error" | "info"; retentionDays: number; categories: string[]; }
 interface VdmUser { id: number; username: string; role: string; createdAt: string; }
 interface VdmNode { name: string; displayName?: string; enabled: boolean; }
 interface VdmHaStatus { enabled: boolean; available: boolean; controlNode: string | null; sharedPath?: string | null; output?: string; error?: string; }
@@ -65,6 +66,11 @@ export default function SettingsPage() {
   });
   const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes"), enabled: isAdmin });
   const haQuery = useQuery<VdmHaStatus>({ queryKey: ["vdm-ha"], queryFn: () => api.get("/api/vdm/ha"), enabled: isAdmin });
+  const logsConfigQuery = useQuery<LogsConfig>({ queryKey: ["vdm-logs-config"], queryFn: () => api.get("/api/vdm/logs/config"), enabled: isAdmin });
+  const saveLogsConfigMut = useMutation({
+    mutationFn: (data: Partial<LogsConfig>) => api.put("/api/vdm/logs/config", data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-logs-config"] }),
+  });
 
   useEffect(() => {
     if (haQuery.data?.sharedPath) setHaPath(haQuery.data.sharedPath);
@@ -133,6 +139,62 @@ export default function SettingsPage() {
                 Allow self-signed TLS certificates when connecting to nodes
               </label>
             </div>
+          </SectionCard>
+
+          <SectionCard title="LOGS — Journal opérationnel">
+            {logsConfigQuery.isLoading ? (
+              <p className="text-sm text-vdm-textMuted">Chargement…</p>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-vdm-textMuted">
+                  Capture les warnings/erreurs de VDM et des nœuds (montages, backups, migrations, nœuds hors ligne).
+                  Consultation dans le menu <span className="font-mono text-vdm-text">LOGS</span>. Heures : stockées en UTC, affichées dans votre fuseau.
+                </p>
+                <label className="flex items-center gap-2 text-sm text-vdm-text cursor-pointer">
+                  <input type="checkbox" className="rounded" checked={logsConfigQuery.data?.enabled ?? true}
+                    onChange={(e) => saveLogsConfigMut.mutate({ enabled: e.target.checked })} />
+                  Activer la collecte des LOGS
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="vdm-label">Niveau minimum capturé</label>
+                    <select className="vdm-input" value={logsConfigQuery.data?.minLevel ?? "warn"}
+                      onChange={(e) => saveLogsConfigMut.mutate({ minLevel: e.target.value as LogsConfig["minLevel"] })}>
+                      <option value="warn">Warnings et erreurs (recommandé)</option>
+                      <option value="error">Erreurs seulement</option>
+                      <option value="info">Info, warnings et erreurs</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="vdm-label">Rétention (jours, 1–365)</label>
+                    <input className="vdm-input" type="number" min={1} max={365} defaultValue={logsConfigQuery.data?.retentionDays ?? 30}
+                      onBlur={(e) => { const v = Number.parseInt(e.target.value, 10); if (v >= 1 && v <= 365) saveLogsConfigMut.mutate({ retentionDays: v }); }} />
+                  </div>
+                </div>
+                <div>
+                  <label className="vdm-label">Catégories collectées</label>
+                  <div className="flex gap-2 flex-wrap">
+                    {["storage", "backup", "migration", "nodes", "system"].map((c) => {
+                      const active = logsConfigQuery.data?.categories?.includes(c) ?? true;
+                      return (
+                        <button key={c} type="button"
+                          className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${active
+                            ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent"
+                            : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/40"}`}
+                          onClick={() => {
+                            const cur = logsConfigQuery.data?.categories ?? [];
+                            const next = cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c];
+                            if (next.length) saveLogsConfigMut.mutate({ categories: next });
+                          }}>
+                          {c}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {saveLogsConfigMut.isError && <p className="text-sm text-vdm-danger">Échec de l'enregistrement : {(saveLogsConfigMut.error as Error).message}</p>}
+              </div>
+            )}
           </SectionCard>
 
           <SectionCard title="High Availability">

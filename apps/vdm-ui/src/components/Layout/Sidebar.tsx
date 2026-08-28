@@ -14,6 +14,7 @@ function Icon({ path, className = "w-4 h-4" }: { path: string; className?: strin
 }
 
 const ICONS = {
+  logs: "M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0ZM3.75 12h.007v.008H3.75V12Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm-.375 5.25h.007v.008H3.75v-.008Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z",
   datacenter: "M2.25 21h19.5m-18-18v18m10.5-18v18m6-13.5V21M6.75 6.75h.75m-.75 3h.75m-.75 3h.75m3-6h.75m-.75 3h.75m-.75 3h.75M6.75 21v-3.375c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21M3 3h12m-.75 4.5H21m-3.75 3.75h.008v.008h-.008v-.008Zm0 3h.008v.008h-.008v-.008Zm0 3h.008v.008h-.008v-.008Z",
   server: "M21.75 17.25v.002A2.25 2.25 0 0 1 19.5 19.5H4.5A2.25 2.25 0 0 1 2.25 17.25v-.002m19.5 0a2.25 2.25 0 0 0-2.25-2.25H4.5a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.002a2.25 2.25 0 0 1-2.25 2.248H4.5a2.25 2.25 0 0 1-2.25-2.248v-.002M3 7.5h18m-18 0A2.25 2.25 0 0 1 5.25 9.75h13.5A2.25 2.25 0 0 1 21 7.5m-18 0V5.25A2.25 2.25 0 0 1 5.25 3h13.5A2.25 2.25 0 0 1 21 5.25V7.5",
   vm: "M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0H3",
@@ -255,6 +256,7 @@ export function Sidebar() {
           <NavItem to="/nodes" icon={ICONS.nodes} label="Nodes" count={nodes.filter((n) => n.status === "offline").length} />
           <NavItem to="/tasks" icon={ICONS.tasks} label="Tasks" count={activeTasksCount} />
           <NavItem to="/backups" icon={ICONS.storage} label="Backups" />
+          <NavItem to="/logs" icon={ICONS.logs} label="LOGS" />
           <NavItem to="/settings" icon={ICONS.settings} label="Settings" />
         </div>
       </nav>

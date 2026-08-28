@@ -17,6 +17,7 @@ const StoragePage = lazy(() => import("@/pages/StoragePage"));
 const TasksPage = lazy(() => import("@/pages/TasksPage"));
 const BackupsPage = lazy(() => import("@/pages/BackupsPage"));
 const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
+const LogsPage = lazy(() => import("@/pages/LogsPage"));
 const ConsoleWindowPage = lazy(() => import("@/pages/ConsoleWindowPage"));
 
 function Spinner() {
@@ -94,6 +95,7 @@ export default function App() {
           <Route path="/storage" element={<StoragePage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/backups" element={<BackupsPage />} />
+          <Route path="/logs" element={<LogsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to={user?.mustChangePassword ? "/settings" : "/dashboard"} replace />} />
         </Routes>}

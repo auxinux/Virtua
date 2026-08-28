@@ -344,6 +344,17 @@ function migrate(db: Database.Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (resource_type, resource_name)
     );
+
+    -- Local operational error log, polled by VDM (/api/internal/logs/recent).
+    -- ts is UTC ISO 8601; capped to keep the table small on long-running nodes.
+    CREATE TABLE IF NOT EXISTS node_error_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      level TEXT NOT NULL,
+      category TEXT NOT NULL,
+      message TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_error_log_ts ON node_error_log(ts);
   `);
 
   const storagePoolColumns = db.prepare("PRAGMA table_info(storage_pools)").all() as Array<{ name: string }>;

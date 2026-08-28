@@ -16,6 +16,7 @@ import type { Socket } from "net";
 import { getDb, getSetting, setSetting, DATA_DIR } from "./db.js";
 import { fetchNode, tryFetchNode, pingNode, type VdmNodeRow } from "./nodeClient.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { parseLogSettings, serializeLogSettings, shouldLog, recordVdmLog, purgeOldLogs, LOG_SETTINGS_KEY, type VdmLogLevel, type VdmLogCategory, type VdmLogSettings } from "./logs.js";
 
 declare module "@fastify/session" {
   interface FastifySessionObject {
@@ -224,6 +225,12 @@ function createTask(opts: {
 function updateTask(id: string, status: string, progress: number, message?: string, error?: string, result?: unknown): void {
   const now = new Date().toISOString();
   const terminal = TERMINAL_TASK_STATUSES.has(status);
+  const taskMeta = db.prepare("SELECT kind, source_node, resource_type, resource_name FROM vdm_tasks WHERE id = ?").get(id) as { kind: string; source_node: string | null; resource_type: string | null; resource_name: string | null } | undefined;
+  if (terminal && error && taskMeta) {
+    const kind = taskMeta.kind ?? "";
+    const category: VdmLogCategory = /backup/i.test(kind) ? "backup" : /migrat/i.test(kind) ? "migration" : /storage/i.test(kind) ? "storage" : "system";
+    recordVdmLog(db, "error", taskMeta.source_node || "vdm", category, `${kind} ${taskMeta.resource_type ?? ""} ${taskMeta.resource_name ?? ""} failed: ${error}`.replace(/\s+/g, " ").trim());
+  }
   db.transaction(() => {
     db.prepare(`UPDATE vdm_tasks SET status = ?, progress = ?, message = ?, error = ?, result = ?, updated_at = ?, heartbeat_at = ?,
       started_at = CASE WHEN ? = 'running' THEN COALESCE(started_at, ?) ELSE started_at END,
@@ -333,9 +340,10 @@ async function syncNodeState(node: VdmNodeRow): Promise<boolean> {
     const virtuaVersion = `${summary.virtuaVersion ?? summaryNode.version ?? ""}`.trim() || null;
     const compatibility = virtuaVersion && compareVersions(virtuaVersion, MIN_VIRTUA_VERSION) >= 0 ? "compatible" : virtuaVersion ? "incompatible" : "unknown";
 
+    const newStatus = compatibility === "incompatible" ? "degraded" : "online";
     db.prepare("UPDATE vdm_nodes SET status = ?, last_seen_at = ?, display_name = COALESCE(?, display_name), virtua_version = ?, compatibility = ?, last_error = NULL, failure_count = 0, latency_ms = ?, updated_at = ? WHERE id = ?")
       .run(
-        compatibility === "incompatible" ? "degraded" : "online",
+        newStatus,
         now,
         shouldReplaceNodeDisplayName(node.display_name, node.name) ? remoteDisplayName : null,
         virtuaVersion,
@@ -344,12 +352,20 @@ async function syncNodeState(node: VdmNodeRow): Promise<boolean> {
         now,
         node.id,
       );
+    if (node.status !== "online" && newStatus === "online") {
+      recordVdmLog(db, "info", node.name, "nodes", `Node back online (v${virtuaVersion ?? "?"})`);
+    }
     return true;
   } catch (error) {
     const failures = (node.failure_count ?? 0) + 1;
     const status = failures >= 2 ? "offline" : "degraded";
+    const message = error instanceof Error ? error.message : "Node request failed";
     db.prepare("UPDATE vdm_nodes SET status = ?, last_error = ?, failure_count = ?, latency_ms = ?, updated_at = ? WHERE id = ?")
-      .run(status, error instanceof Error ? error.message : "Node request failed", failures, Date.now() - startedAt, now, node.id);
+      .run(status, message, failures, Date.now() - startedAt, now, node.id);
+    // Log transitions only, so a persistently offline node doesn't flood the log.
+    if (node.status !== status) {
+      recordVdmLog(db, status === "offline" ? "error" : "warn", node.name, "nodes", `Node ${status}: ${message}`);
+    }
     return false;
   }
 }
@@ -451,7 +467,8 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
   // Mount it by creating a storage pool on the node
   const nodeStorageType = storage.type === "smb" ? "cifs" : storage.type;
   const isS3 = nodeStorageType === "s3";
-  await fetchNode(node, "/api/internal/storage/pools", {
+  try {
+    await fetchNode(node, "/api/internal/storage/pools", {
     method: "POST",
     timeoutMs: 120_000,
     body: JSON.stringify({
@@ -477,6 +494,11 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
       s3VfsCacheMode: storage.s3_vfs_cache_mode ?? undefined,
     }),
   });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Mount request failed";
+    recordVdmLog(db, "error", node.name, "storage", `Mount failed for ${storage.name} (${storage.type}) on ${node.name}: ${message}`);
+    throw error;
+  }
   return storage.name;
 }
 
@@ -645,7 +667,7 @@ if (CLUSTER_ID !== "standalone" && INSTANCE_ROLE === "active") {
 const updateInstanceHeartbeat = () => {
   db.prepare(`INSERT INTO vdm_instances (instance_id, cluster_id, role, leader_epoch, last_heartbeat, metadata)
     VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET role = excluded.role, last_heartbeat = excluded.last_heartbeat, metadata = excluded.metadata`)
-    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.50", pid: process.pid }));
+    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.51", pid: process.pid }));
 };
 updateInstanceHeartbeat();
 setInterval(updateInstanceHeartbeat, 10_000).unref();
@@ -654,6 +676,13 @@ setInterval(updateInstanceHeartbeat, 10_000).unref();
 app.setErrorHandler((err: Error & { statusCode?: number }, req, reply) => {
   const code = err.statusCode ?? 500;
   if (code >= 500) app.log.error(err);
+  const pathname = req.url.split("?")[0];
+  const category: VdmLogCategory = pathname.includes("/storage") ? "storage"
+    : pathname.includes("/backup") ? "backup"
+    : pathname.includes("/migrat") ? "migration"
+    : pathname.includes("/node") ? "nodes"
+    : "system";
+  recordVdmLog(db, "error", "vdm", category, `${req.method} ${pathname} → ${code}: ${err.message}`.slice(0, 2000));
   const isProduction = process.env.NODE_ENV === "production";
   const clientMessage = code >= 500 && isProduction ? "Internal Server Error" : err.message;
   return reply.status(code).send({ error: clientMessage });
@@ -691,7 +720,7 @@ app.get("/api/vdm/health", async (_req, reply) => {
   const unhealthy = nodes.some((row) => row.status === "offline") || recoveryRequired > 0;
   return reply.status(unhealthy ? 503 : 200).send({
     ok: !unhealthy,
-    version: "0.7.50",
+    version: "0.7.51",
     role: INSTANCE_ROLE,
     clusterId: CLUSTER_ID,
     database: "sqlite",
@@ -2233,6 +2262,97 @@ app.post("/api/vdm/tasks/:id/resolve", async (req, reply) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// LOGS (operational log, LOGS page)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LOG_LEVELS = new Set(["warn", "error", "info"]);
+const LOG_CATEGORIES = new Set(["storage", "backup", "migration", "nodes", "system"]);
+
+function getLogSettings(): VdmLogSettings {
+  return parseLogSettings(getSetting(db, LOG_SETTINGS_KEY));
+}
+
+// GET /api/vdm/logs?level=&category=&source=&since=&limit=
+app.get("/api/vdm/logs", async (req, reply) => {
+  requireAuth(req, reply);
+  const query = req.query as { level?: string; category?: string; source?: string; since?: string; limit?: string };
+  const clauses: string[] = [];
+  const args: unknown[] = [];
+  if (query.level && LOG_LEVELS.has(query.level)) { clauses.push("level = ?"); args.push(query.level); }
+  if (query.category && LOG_CATEGORIES.has(query.category)) { clauses.push("category = ?"); args.push(query.category); }
+  if (query.source) { clauses.push("source = ?"); args.push(query.source); }
+  if (query.since && /^\d{4}-\d{2}-\d{2}T/.test(query.since)) { clauses.push("ts >= ?"); args.push(query.since); }
+  const limit = Math.max(1, Math.min(1000, Number.parseInt(query.limit ?? "200", 10) || 200));
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db.prepare(`SELECT id, ts, level, source, category, message, meta FROM vdm_logs ${where} ORDER BY ts DESC, id DESC LIMIT ?`).all(...args, limit) as Array<{ id: number; ts: string; level: string; source: string; category: string; message: string; meta: string | null }>;
+  return rows.map((r) => ({ ...r, meta: r.meta ? JSON.parse(r.meta) : undefined }));
+});
+
+// GET/PUT config LOGS (admin) — persistée dans vdm_settings
+app.get("/api/vdm/logs/config", async (req, reply) => {
+  requireAdmin(req, reply);
+  return parseLogSettings(getSetting(db, LOG_SETTINGS_KEY));
+});
+
+app.put("/api/vdm/logs/config", async (req, reply) => {
+  requireAdmin(req, reply);
+  const body = (req.body ?? {}) as { enabled?: unknown; minLevel?: unknown; retentionDays?: unknown; categories?: unknown };
+  const current = parseLogSettings(getSetting(db, LOG_SETTINGS_KEY));
+  const minLevel = typeof body.minLevel === "string" && LOG_LEVELS.has(body.minLevel) ? body.minLevel as VdmLogLevel : current.minLevel;
+  const retentionDays = Number.isFinite(body.retentionDays) ? Math.max(1, Math.min(365, Math.trunc(body.retentionDays as number))) : current.retentionDays;
+  const categories = Array.isArray(body.categories)
+    ? (body.categories as string[]).filter((c) => LOG_CATEGORIES.has(c)) as VdmLogCategory[]
+    : current.categories;
+  const next: VdmLogSettings = {
+    enabled: typeof body.enabled === "boolean" ? body.enabled : current.enabled,
+    minLevel,
+    retentionDays,
+    categories: categories.length ? categories : current.categories,
+  };
+  setSetting(db, LOG_SETTINGS_KEY, serializeLogSettings(next));
+  return next;
+});
+
+// DELETE /api/vdm/logs — vide le journal (admin)
+app.delete("/api/vdm/logs", async (req, reply) => {
+  requireAdmin(req, reply);
+  db.prepare("DELETE FROM vdm_logs").run();
+  return { ok: true };
+});
+
+// Poll node local logs (warn/error) and merge them into the central log.
+// Dedupe via unique index (source, ts, message) so re-polls are idempotent.
+const NODE_LOG_POLL_MS = 60_000;
+async function pollNodeLogs(): Promise<void> {
+  const settings = parseLogSettings(getSetting(db, LOG_SETTINGS_KEY));
+  if (!settings.enabled) return;
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 AND status = 'online'").all() as VdmNodeRow[];
+  const since = new Date(Date.now() - 5 * 60_000).toISOString();
+  await Promise.allSettled(nodes.map(async (node) => {
+    const entries = await fetchNode<Array<{ ts: string; level: string; category: string; message: string }>>(node, `/api/internal/logs/recent?since=${encodeURIComponent(since)}`, { timeoutMs: 15_000 });
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      if (!entry || typeof entry.ts !== "string" || typeof entry.message !== "string") continue;
+      if (entry.level !== "warn" && entry.level !== "error") continue;
+      if (!LOG_CATEGORIES.has(entry.category)) continue;
+      recordVdmLog(db, entry.level, node.name, entry.category as VdmLogCategory, entry.message, entry);
+    }
+  }));
+}
+let nodeLogPollRunning = false;
+setInterval(() => {
+  if (nodeLogPollRunning) return;
+  nodeLogPollRunning = true;
+  pollNodeLogs().catch(() => {}).finally(() => { nodeLogPollRunning = false; });
+}, NODE_LOG_POLL_MS).unref();
+
+// Retention purge (hourly) — uses the configured retentionDays.
+setInterval(() => {
+  const settings = parseLogSettings(getSetting(db, LOG_SETTINGS_KEY));
+  purgeOldLogs(db, settings.retentionDays);
+}, 60 * 60_000).unref();
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2250,6 +2370,17 @@ app.put("/api/vdm/settings", async (req, reply) => {
   for (const [key, value] of Object.entries(settings)) {
     if (!allowed.has(key)) return reply.status(400).send({ error: `Unknown setting: ${key}` });
     stmt.run(key, String(value));
+  }
+  return { ok: true };
+});
+
+// LOGS config via le canal settings générique (UI Settings → section LOGS)
+app.put("/api/vdm/logs-config", async (req, reply) => {
+  requireAdmin(req, reply);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(body)) {
+    if (!key.startsWith("logs")) return reply.status(400).send({ error: `Unknown setting: ${key}` });
+    setSetting(db, key, typeof value === "boolean" ? (value ? "true" : "false") : String(value));
   }
   return { ok: true };
 });

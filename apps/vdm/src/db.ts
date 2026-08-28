@@ -193,10 +193,25 @@ function migrate(db: Database.Database) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Central operational log (LOGS page). Timestamps are stored in UTC (ISO 8601);
+    -- the UI renders them in the viewer timezone. "source" is "vdm" or a node name.
+    CREATE TABLE IF NOT EXISTS vdm_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      level TEXT NOT NULL,
+      source TEXT NOT NULL,
+      category TEXT NOT NULL,
+      message TEXT NOT NULL,
+      meta TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_vdm_tasks_status ON vdm_tasks(status, updated_at);
     CREATE INDEX IF NOT EXISTS idx_vdm_backup_items_resource ON vdm_backup_items(resource_type, resource_name, created_at);
     CREATE INDEX IF NOT EXISTS idx_vdm_backup_jobs_next_run ON vdm_backup_jobs(enabled, next_run_at);
     CREATE INDEX IF NOT EXISTS idx_vdm_audit_created ON vdm_audit_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_vdm_logs_ts ON vdm_logs(ts);
+    -- Dedupe key for node log polling (re-polls must not duplicate rows).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vdm_logs_dedupe ON vdm_logs(source, ts, message);
   `);
 }
 

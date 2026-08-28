@@ -334,6 +334,27 @@ const app = Fastify({
   ...(tlsOptions ? { https: tlsOptions } : {}),
 });
 const db = getDb();
+
+// ── Local operational error log (polled by VDM) ────────────────────────────
+function recordNodeError(level: "warn" | "error", category: string, message: string): void {
+  try {
+    db.prepare("INSERT INTO node_error_log (ts, level, category, message) VALUES (?, ?, ?, ?)")
+      .run(new Date().toISOString(), level, category, message.slice(0, 2000));
+    // Cap the table: keep only the most recent 5000 entries.
+    db.prepare("DELETE FROM node_error_log WHERE id NOT IN (SELECT id FROM node_error_log ORDER BY id DESC LIMIT 5000)").run();
+  } catch {
+    // Logging must never crash an operation.
+  }
+}
+
+function classifyNodeCategory(url: string): string {
+  const pathname = url.split("?")[0];
+  if (pathname.includes("/storage")) return "storage";
+  if (pathname.includes("/backup")) return "backup";
+  if (pathname.includes("/migrat")) return "migration";
+  if (pathname.includes("/node") || pathname.includes("/cluster")) return "nodes";
+  return "system";
+}
 startAuditLogPruner(db);
 ensureLocalNodeAuthToken();
 ensureLocalDatacenterNode();
@@ -901,6 +922,7 @@ app.setErrorHandler((error, req, reply) => {
   const errorId = randomUUID().slice(0, 8);
   const stack = error instanceof Error && error.stack ? error.stack : message;
   console.error(`[api][${errorId}] ${req.method} ${req.url} — ${stack}`);
+  recordNodeError("error", classifyNodeCategory(req.url ?? ""), `${req.method} ${req.url} — ${message}`.slice(0, 2000));
 
   let clientMessage: string;
   if (!isProduction || isAdmin) {
@@ -4945,6 +4967,15 @@ app.delete("/api/internal/storage/pools/:name", async (req, reply) => {
 app.get("/api/internal/storage/isos", async (req, reply) => {
   requireInternalNodeToken(req);
   return (await listManagedFiles()).filter((entry) => entry.type === "iso");
+});
+
+// Recent local warn/error entries for the VDM central LOGS page.
+app.get("/api/internal/logs/recent", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const query = req.query as { since?: string };
+  const since = query.since && /^\d{4}-\d{2}-\d{2}T/.test(query.since) ? query.since : new Date(Date.now() - 5 * 60_000).toISOString();
+  const rows = db.prepare("SELECT ts, level, category, message FROM node_error_log WHERE ts >= ? AND level IN ('warn','error') ORDER BY ts DESC LIMIT 200").all(since) as Array<{ ts: string; level: string; category: string; message: string }>;
+  return rows;
 });
 
 app.get("/api/internal/network/bridges", async (req, reply) => {
