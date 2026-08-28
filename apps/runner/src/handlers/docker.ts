@@ -410,7 +410,7 @@ async function listContainers() {
   }).filter(Boolean);
 }
 
-async function runContainer(p: Record<string, unknown>) {
+async function runContainer(p: Record<string, unknown>, start = true) {
   const name = validateDockerName(p.name);
   const image = validateDockerImage(p.image);
   const rawPorts = (p.ports as Array<{ hostPort: number; containerPort: number; protocol: string; hostIp?: string }>) ?? [];
@@ -447,7 +447,9 @@ async function runContainer(p: Record<string, unknown>) {
   await ensureDockerNetworkReady(network);
   await ensureImageAvailable(image);
 
-  const args = ["run", "-d", "--name", name, `--restart=${restartPolicy}`];
+  // `docker create` builds the container exactly like `docker run -d` but does
+  // not start it — used to restore a container that was stopped on the source.
+  const args = [start ? "run" : "create", ...(start ? ["-d"] : []), "--name", name, `--restart=${restartPolicy}`];
   if (privileged) args.push("--privileged");
   for (const port of ports) {
     const bind = port.hostIp ? `${port.hostIp}:${port.hostPort}:${port.containerPort}/${port.protocol}` : `${port.hostPort}:${port.containerPort}/${port.protocol}`;
@@ -643,8 +645,9 @@ async function importContainerMigration(p: Record<string, unknown>) {
   }, validateDockerName(rawManifest.name));
 
   await docker("load", "--input", archivePath);
-  const result = await runContainer({ ...manifest, image: imageRef });
-  if (!rawManifest.wasRunning) await docker("stop", result.id).catch(() => {});
+  // A stopped source is restored with `docker create` (created but NOT started),
+  // so its state is faithfully preserved and no race can leave the target running.
+  const result = await runContainer({ ...manifest, image: imageRef }, rawManifest.wasRunning);
   return { ...result, name: manifest.name };
 }
 
