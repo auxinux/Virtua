@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/shared",
-  "version": "0.7.56",
+  "version": "0.7.57",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
