@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/vdm-ui",
-  "version": "0.7.58",
+  "version": "0.7.59",
   "type": "module",
   "scripts": {
     "dev": "vite",
