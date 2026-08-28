@@ -456,12 +456,20 @@ function mapJoinTokenRow(row: VdmJoinTokenRow) {
 async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedStorageRow): Promise<string> {
   if (!storage.enabled) throw new Error(`Shared storage ${storage.name} is disabled`);
   // Check if a pool with this name already exists on the node
-  const localPools = await fetchNode<Array<{ name: string; path?: string; type?: string; mountSource?: string }>>(node, "/api/internal/storage/pools");
+  const localPools = await fetchNode<Array<{ name: string; path?: string; type?: string; mountSource?: string; mounted?: boolean }>>(node, "/api/internal/storage/pools");
   const existing = localPools.find((p) => p.name === storage.name);
   if (existing) {
     if (existing.path && existing.path !== storage.local_mount_path) throw new Error(`Storage ${storage.name} path mismatch on ${node.name}`);
-    if (existing.mountSource && existing.mountSource !== storage.source) throw new Error(`Storage ${storage.name} source mismatch on ${node.name}`);
-    return storage.name;
+    // Network/FUSE pools (NFS/SMB/GlusterFS/S3) can be registered in the node DB
+    // while their mount died (rclone daemon gone, NFS timeout). If the node
+    // reports the actual mount state and it is down, recreate the pool to remount.
+    const networkTypes = new Set(["nfs", "nfs4", "cifs", "smbfs", "glusterfs", "s3"]);
+    if (networkTypes.has(existing.type ?? "") && existing.mounted === false) {
+      recordVdmLog(db, "warn", node.name, "storage", `Storage ${storage.name} registered but not mounted on ${node.name} — remounting`);
+      await fetchNode(node, `/api/internal/storage/pools/${encodeURIComponent(storage.name)}`, { method: "DELETE" });
+    } else {
+      return storage.name;
+    }
   }
 
   // Mount it by creating a storage pool on the node
@@ -2046,9 +2054,11 @@ app.get("/api/vdm/storage/:name/cluster-status", async (req, reply) => {
     nodes.map(async (node) => {
       if (node.status === "offline") return { node: node.name, nodeDisplayName: node.display_name ?? node.name, mounted: false, error: "Node offline" };
       try {
-        const pools = await fetchNode<Array<{ name: string }>>(node, "/api/internal/storage/pools");
-        const mounted = pools.some((p) => p.name === storage.name);
-        return { node: node.name, nodeDisplayName: node.display_name ?? node.name, mounted, error: null };
+        const pools = await fetchNode<Array<{ name: string; mounted?: boolean }>>(node, "/api/internal/storage/pools");
+        const pool = pools.find((p) => p.name === storage.name);
+        // New nodes report the actual mount state; old nodes only list pools.
+        const mounted = pool ? (pool.mounted !== undefined ? pool.mounted : true) : false;
+        return { node: node.name, nodeDisplayName: node.display_name ?? node.name, mounted, error: pool ? null : "Pool not registered on node" };
       } catch (err) {
         return { node: node.name, nodeDisplayName: node.display_name ?? node.name, mounted: false, error: err instanceof Error ? err.message : "Unknown error" };
       }

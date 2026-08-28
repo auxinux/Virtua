@@ -4850,12 +4850,23 @@ app.get("/api/internal/storage/pools", async (req, reply) => {
     fstype: string | null;
     mount_options: string | null;
   }>;
+  // Actual mount state (findmnt) — a registered pool can have a dead FUSE mount
+  // (e.g. rclone daemon died); VDM uses this to report/remount honestly.
+  let mountpoints = new Set<string>();
+  try {
+    const mounts = await callRunner<Array<{ mountpoint: string }>>("storage_mounts_list");
+    mountpoints = new Set((mounts ?? []).map((m) => m.mountpoint));
+  } catch {
+    // Runner unreachable: leave `mounted` undefined (unknown) for all pools.
+  }
   return Promise.all(pools.map(async (pool) => {
+    const actuallyMounted = mountpoints.size === 0 ? undefined : mountpoints.has(pool.path);
     try {
       const df = await callRunner<{ totalBytes: number; usedBytes: number; freeBytes: number }>("storage_pool_df", { path: pool.path });
       return {
         ...pool,
         content: JSON.parse(pool.content),
+        mounted: actuallyMounted,
         totalBytes: df.totalBytes,
         usedBytes: df.usedBytes,
         freeBytes: df.freeBytes,
@@ -4866,6 +4877,7 @@ app.get("/api/internal/storage/pools", async (req, reply) => {
       return {
         ...pool,
         content: JSON.parse(pool.content),
+        mounted: actuallyMounted,
         totalBytes: pool.total_bytes,
         usedBytes: pool.used_bytes,
         freeBytes: 0,
