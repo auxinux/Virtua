@@ -4992,7 +4992,7 @@ app.get("/api/internal/logs/recent", async (req, reply) => {
 
 app.get("/api/internal/network/bridges", async (req, reply) => {
   requireInternalNodeToken(req);
-  return callRunner("network_bridges");
+  return callRunner("network_bridges_list");
 });
 
 app.get("/api/internal/host/usb-devices", async (req, reply) => {
@@ -6105,7 +6105,7 @@ app.get("/api/nodes/:name/network/bridges", async (req, reply) => {
   const node = listDatacenterNodes().find((entry) => entry.name === name);
   if (!node) return reply.status(404).send({ error: "Node not found" });
   if (node.isLocal) {
-    return callRunner("network_bridges");
+    return callRunner("network_bridges_list");
   }
   return fetchRemoteNode(node, "/api/internal/network/bridges");
 });
