@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
 import { Sidebar } from "@/components/Layout/Sidebar";
 import { TopBar } from "@/components/Layout/TopBar";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const Login = lazy(() => import("@/pages/Login"));
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
@@ -77,6 +78,7 @@ export default function App() {
 
   return (
     <AppShell>
+      <ErrorBoundary>
       <Suspense fallback={<Spinner />}>
         {user?.mustChangePassword ? <Routes>
           <Route path="/settings" element={<SettingsPage />} />
@@ -100,6 +102,7 @@ export default function App() {
           <Route path="*" element={<Navigate to={user?.mustChangePassword ? "/settings" : "/dashboard"} replace />} />
         </Routes>}
       </Suspense>
+      </ErrorBoundary>
     </AppShell>
   );
 }

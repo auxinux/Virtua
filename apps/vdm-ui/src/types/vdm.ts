@@ -132,6 +132,13 @@ export interface VdmLxc {
   userId?: number | null;
 }
 
+export interface VdmDockerPort {
+  hostPort: number;
+  containerPort: number;
+  protocol: "tcp" | "udp";
+  hostIp?: string;
+}
+
 export interface VdmDocker {
   id: string;
   name: string;
@@ -139,7 +146,8 @@ export interface VdmDocker {
   state: ResourceState;
   status: string;
   created?: string;
-  ports?: string;
+  createdAt?: string;
+  ports?: VdmDockerPort[] | string;
   nodeName: string;
   nodeDisplayName: string;
   userId?: number | null;

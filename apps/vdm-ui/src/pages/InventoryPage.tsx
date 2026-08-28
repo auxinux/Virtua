@@ -459,6 +459,13 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
 }
 
 // ── Docker Detail Panel ────────────────────────────────────────────────────
+function formatDockerPorts(ports: VdmDocker["ports"]): string {
+  if (!ports) return "—";
+  if (typeof ports === "string") return ports;
+  if (!Array.isArray(ports) || ports.length === 0) return "—";
+  return ports.map((p) => `${p.hostIp ? `${p.hostIp}:` : ""}${p.hostPort}->${p.containerPort}/${p.protocol}`).join(", ");
+}
+
 function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId: string }) {
   const qc = useQueryClient();
   const [showLogs, setShowLogs] = useState(false);
@@ -506,7 +513,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
       {tab === "summary" && (
         <div className="vdm-card p-4 space-y-2">
           <h3 className="text-xs font-semibold uppercase text-vdm-textMuted">Container Info</h3>
-          {([["Image", ct.image], ["Status", ct.status], ["Created", ct.created ?? "—"], ["Ports", ct.ports ?? "—"]] as [string, string][]).map(([k, v]) => (
+          {([["Image", ct.image], ["Status", ct.status], ["Created", ct.createdAt ?? ct.created ?? "—"], ["Ports", formatDockerPorts(ct.ports as VdmDocker["ports"])]] as [string, string][]).map(([k, v]) => (
             <div key={k} className="flex justify-between text-xs">
               <span className="text-vdm-textMuted">{k}</span>
               <span className="text-vdm-text font-mono truncate max-w-48">{v}</span>
