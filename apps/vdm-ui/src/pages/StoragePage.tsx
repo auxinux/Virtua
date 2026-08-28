@@ -100,7 +100,7 @@ function AddStorageModal({ open, onClose, onSave, isPending }: {
       <div className="vdm-card w-full max-w-xl p-6 space-y-5 overflow-y-auto max-h-[90vh]">
         <div>
           <h3 className="text-base font-semibold text-vdm-text">Add Shared Storage</h3>
-          <p className="text-xs text-vdm-textMuted mt-0.5">NFS, SMB, or GlusterFS shares used by VDM for migration and backup operations.</p>
+          <p className="text-xs text-vdm-textMuted mt-0.5">NFS, SMB, GlusterFS, or S3 object storage used by VDM for migration and backup operations.</p>
         </div>
 
         {/* Name / Display Name */}
@@ -260,7 +260,7 @@ function AddStorageModal({ open, onClose, onSave, isPending }: {
 
         <div className="flex gap-2 justify-end pt-1">
           <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" disabled={!form.name || !form.source || !form.localMountPath || isPending} onClick={handleSave}>
+          <button className="vdm-btn-primary" disabled={!form.name || !form.localMountPath || isPending || (!isS3 && !form.source) || (isS3 && (!form.s3Bucket || !form.s3AccessKey || !form.s3SecretKey))} onClick={handleSave}>
             {isPending ? "Adding..." : "Add Storage"}
           </button>
         </div>
