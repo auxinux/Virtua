@@ -170,6 +170,7 @@ export async function handleStorage(action: string, params: unknown): Promise<un
     case "storage_raid_add": return addRaidMember(p.device as string, p.member as string);
     case "storage_raid_remove": return removeRaidMember(p.device as string, p.member as string);
     case "storage_pool_df": return getPoolDf(p.path as string);
+    case "storage_pool_alive": return isPoolAlive(p.path as string);
     case "storage_pool_mount": return mountPool(p);
     case "storage_pool_umount": return umountPool(p);
     default: throw new Error(`Unknown storage action: ${action}`);
@@ -514,6 +515,18 @@ async function getPoolDf(poolPath: string) {
   }
 }
 
+// A FUSE mount whose daemon died still shows up in `findmnt` (the kernel keeps
+// the entry), but any real access fails with ENOTCONN. `stat` is the reliable
+// liveness probe: it succeeds on a live mount and throws on a dead one.
+async function isPoolAlive(poolPath: string): Promise<{ alive: boolean }> {
+  try {
+    await fs.stat(poolPath);
+    return { alive: true };
+  } catch {
+    return { alive: false };
+  }
+}
+
 function fstabEscape(value: string): string {
   // fstab uses octal \0xx for tab, space, backslash, and special chars.
   return value
@@ -719,13 +732,15 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
     "--log-file", logPath, "--log-level", "INFO",
   ]);
 
-  // Verify the mount came up and is alive. Poll findmnt for a short window;
-  // a dead FUSE mount (rclone daemon crashed) reports ENOTCONN on any access.
+  // Verify the mount came up and is ALIVE. `findmnt` only proves the kernel
+  // entry exists — a daemon that dies right after mounting still leaves it.
+  // `stat` (real access) is the reliable probe: it throws ENOTCONN on a dead
+  // FUSE mount. Poll it for a short window.
   const deadline = Date.now() + 8000;
   let mounted = false;
   while (Date.now() < deadline) {
     try {
-      await execFileAsync("findmnt", ["-n", "-o", "TARGET", mountPath]);
+      await fs.stat(mountPath);
       mounted = true;
       break;
     } catch {
@@ -736,8 +751,8 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
     const logTail = await fs.readFile(logPath, "utf8").catch(() => "");
     const reason = logTail.trim().split("\n").slice(-3).join(" | ") || "rclone mount did not come up";
     // Clean up the dead attempt so a retry starts fresh (no stale FUSE entry).
-    await execFileAsync("fusermount3", ["-u", mountPath]).catch(() => {});
-    await execFileAsync("fusermount", ["-u", mountPath]).catch(() => {});
+    await execFileAsync("fusermount3", ["-uz", mountPath]).catch(() => {});
+    await execFileAsync("fusermount", ["-uz", mountPath]).catch(() => {});
     await fs.unlink(configPath).catch(() => {});
     throw new Error(`S3 mount failed: ${reason}`);
   }

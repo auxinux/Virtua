@@ -4850,23 +4850,23 @@ app.get("/api/internal/storage/pools", async (req, reply) => {
     fstype: string | null;
     mount_options: string | null;
   }>;
-  // Actual mount state (findmnt) — a registered pool can have a dead FUSE mount
-  // (e.g. rclone daemon died); VDM uses this to report/remount honestly.
-  let mountpoints = new Set<string>();
-  try {
-    const mounts = await callRunner<Array<{ mountpoint: string }>>("storage_mounts_list");
-    mountpoints = new Set((mounts ?? []).map((m) => m.mountpoint));
-  } catch {
-    // Runner unreachable: leave `mounted` undefined (unknown) for all pools.
-  }
+  // Actual mount state — a FUSE mount whose daemon died still shows up in
+  // `findmnt` (the kernel keeps the entry) but any real access fails with
+  // ENOTCONN. Probe liveness with `stat` (storage_pool_alive) instead, so a
+  // dead rclone mount is reported as unmounted and VDM can remount it.
   return Promise.all(pools.map(async (pool) => {
-    const actuallyMounted = mountpoints.size === 0 ? undefined : mountpoints.has(pool.path);
+    let alive: boolean | undefined;
+    try {
+      alive = (await callRunner<{ alive: boolean }>("storage_pool_alive", { path: pool.path })).alive;
+    } catch {
+      alive = undefined; // runner unreachable → unknown
+    }
     try {
       const df = await callRunner<{ totalBytes: number; usedBytes: number; freeBytes: number }>("storage_pool_df", { path: pool.path });
       return {
         ...pool,
         content: JSON.parse(pool.content),
-        mounted: actuallyMounted,
+        mounted: alive,
         totalBytes: df.totalBytes,
         usedBytes: df.usedBytes,
         freeBytes: df.freeBytes,
@@ -4877,7 +4877,7 @@ app.get("/api/internal/storage/pools", async (req, reply) => {
       return {
         ...pool,
         content: JSON.parse(pool.content),
-        mounted: actuallyMounted,
+        mounted: alive,
         totalBytes: pool.total_bytes,
         usedBytes: pool.used_bytes,
         freeBytes: 0,
