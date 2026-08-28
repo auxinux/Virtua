@@ -467,6 +467,15 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
   // Mount it by creating a storage pool on the node
   const nodeStorageType = storage.type === "smb" ? "cifs" : storage.type;
   const isS3 = nodeStorageType === "s3";
+  // S3 safety: vfs-cache-mode "off" mounts read-only (rclone forbids seek),
+  // which breaks any backup write (qemu-img seeks the output file). Backup
+  // pools must use at least "writes" — escalate transparently and log it.
+  const contents = JSON.parse(storage.content || "[]") as string[];
+  let s3VfsCacheMode = storage.s3_vfs_cache_mode ?? undefined;
+  if (isS3 && contents.includes("backup") && (!s3VfsCacheMode || s3VfsCacheMode === "off")) {
+    s3VfsCacheMode = "writes";
+    recordVdmLog(db, "warn", "vdm", "storage", `S3 storage ${storage.name}: VFS cache "off" cannot store backups — mounting with "writes" instead (edit the storage to change this)`);
+  }
   try {
     await fetchNode(node, "/api/internal/storage/pools", {
     method: "POST",
@@ -491,7 +500,7 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
       s3AccessKey: storage.s3_access_key ? decryptSecret(storage.s3_access_key) : undefined,
       s3SecretKey: storage.s3_secret_key ? decryptSecret(storage.s3_secret_key) : undefined,
       s3Provider: storage.s3_provider ?? undefined,
-      s3VfsCacheMode: storage.s3_vfs_cache_mode ?? undefined,
+      s3VfsCacheMode,
     }),
   });
   } catch (error) {

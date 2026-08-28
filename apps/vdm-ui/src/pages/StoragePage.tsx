@@ -53,7 +53,7 @@ const DEFAULT_FORM: StorageForm = {
   localMountPath: "/mnt/vdm-shared", smbUsername: "", smbPassword: "",
   smbDomain: "", smbVersion: "", nfsVersion: "",
   s3Endpoint: "", s3Bucket: "", s3Region: "", s3AccessKey: "", s3SecretKey: "",
-  s3Provider: "generic", s3VfsCacheMode: "off", notes: "",
+  s3Provider: "generic", s3VfsCacheMode: "writes", notes: "",
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -171,11 +171,12 @@ function AddStorageModal({ open, onClose, onSave, isPending }: {
               <div>
                 <label className="vdm-label">VFS Cache</label>
                 <select className="vdm-input" value={form.s3VfsCacheMode} onChange={(e) => set("s3VfsCacheMode", e.target.value)}>
-                  <option value="off">Off (network reads)</option>
+                  <option value="off">Off (read-only — no backups!)</option>
                   <option value="minimal">Minimal</option>
-                  <option value="writes">Writes</option>
+                  <option value="writes">Writes (recommended)</option>
                   <option value="full">Full</option>
                 </select>
+                <p className="text-xs text-vdm-textMuted mt-1">Off mounts the bucket read-only: backups and snapshots cannot be written. Use Writes (or Full) for backup storage.</p>
               </div>
               <div>
                 <label className="vdm-label">Access Key <span className="text-vdm-danger">*</span></label>
