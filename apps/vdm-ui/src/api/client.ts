@@ -36,8 +36,15 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
-    const message = err.error ?? `HTTP ${res.status}`;
+    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: unknown };
+    const raw = err.error;
+    const message = typeof raw === "string" && raw
+      ? raw
+      : Array.isArray(raw)
+        ? raw.map((i) => (i && typeof i === "object" && "message" in i
+          ? `${Array.isArray((i as { path?: unknown[] }).path) ? (i as { path: unknown[] }).path.join(".") + ": " : ""}${(i as { message?: unknown }).message ?? JSON.stringify(i)}`
+          : typeof i === "string" ? i : JSON.stringify(i))).join("; ") || `HTTP ${res.status}`
+        : raw ? JSON.stringify(raw) : `HTTP ${res.status}`;
     reportMutationError(method, message);
     throw new Error(message);
   }

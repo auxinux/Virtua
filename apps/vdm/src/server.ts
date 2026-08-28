@@ -450,6 +450,7 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
 
   // Mount it by creating a storage pool on the node
   const nodeStorageType = storage.type === "smb" ? "cifs" : storage.type;
+  const isS3 = nodeStorageType === "s3";
   await fetchNode(node, "/api/internal/storage/pools", {
     method: "POST",
     timeoutMs: 120_000,
@@ -458,8 +459,9 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
       path: storage.local_mount_path,
       type: nodeStorageType,
       content: JSON.parse(storage.content),
-      mountSource: storage.source,
-      fstype: nodeStorageType,
+      // S3 pools mount via rclone: no fstab source/fstype (rejected by the node schema).
+      mountSource: isS3 ? undefined : (storage.source ?? undefined),
+      fstype: isS3 ? undefined : nodeStorageType,
       mountOptions: storage.mount_options ?? undefined,
       smbDomain: storage.smb_domain ?? undefined,
       smbUsername: storage.smb_username ?? undefined,
@@ -643,7 +645,7 @@ if (CLUSTER_ID !== "standalone" && INSTANCE_ROLE === "active") {
 const updateInstanceHeartbeat = () => {
   db.prepare(`INSERT INTO vdm_instances (instance_id, cluster_id, role, leader_epoch, last_heartbeat, metadata)
     VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET role = excluded.role, last_heartbeat = excluded.last_heartbeat, metadata = excluded.metadata`)
-    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.49", pid: process.pid }));
+    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.50", pid: process.pid }));
 };
 updateInstanceHeartbeat();
 setInterval(updateInstanceHeartbeat, 10_000).unref();
@@ -689,7 +691,7 @@ app.get("/api/vdm/health", async (_req, reply) => {
   const unhealthy = nodes.some((row) => row.status === "offline") || recoveryRequired > 0;
   return reply.status(unhealthy ? 503 : 200).send({
     ok: !unhealthy,
-    version: "0.7.49",
+    version: "0.7.50",
     role: INSTANCE_ROLE,
     clusterId: CLUSTER_ID,
     database: "sqlite",

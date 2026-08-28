@@ -2755,7 +2755,7 @@ app.patch("/api/templates/:id", async (req, reply) => {
   const row = getTemplateRow((req.params as { id: string }).id);
   if (!row) return reply.status(404).send({ error: "Template not found" });
   const parsed = UpdateTemplateSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const p = parsed.data;
   db.prepare(`UPDATE templates SET
       name = COALESCE(?, name),
@@ -3093,7 +3093,7 @@ function provisionResourceTask(
 app.post("/api/resources", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = CreateResourceSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   try {
     const task = provisionResourceTask(parsed.data, {
       userId: req.session.userId!, username: req.session.username ?? "unknown", role: req.session.role!, ip: getClientIp(req),
@@ -3129,7 +3129,7 @@ app.get("/api/internal/templates/:id", async (req, reply) => {
 app.post("/api/internal/resources", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = CreateResourceSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   try {
     const actorName = `${(req.headers["x-auxinux-actor"] ?? "vdm")}`;
     const task = provisionResourceTask(parsed.data, { userId: 0, username: actorName, role: "ADMIN", ip: getClientIp(req) }, false);
@@ -4912,7 +4912,7 @@ app.post("/api/internal/storage/pools/:name/content/checksum", async (req, reply
 app.post("/api/internal/storage/pools", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = CreateStoragePoolSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return createLocalStoragePool({
     name: parsed.data.name,
     path: parsed.data.path,
@@ -4980,7 +4980,7 @@ app.get("/api/internal/docker/networks", async (req, reply) => {
 app.post("/api/internal/vms", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = CreateVmSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const result = await callRunner("qemu_create", await prepareVmCreatePayload(parsed.data));
   db.prepare("INSERT INTO qemu_vms (vm_name, user_id, description, tags, node_name) VALUES (?, NULL, ?, ?, ?)")
     .run(parsed.data.name, parsed.data.description ?? null, JSON.stringify(parsed.data.tags ?? []), getLocalNodeName());
@@ -4990,7 +4990,7 @@ app.post("/api/internal/vms", async (req, reply) => {
 app.post("/api/internal/lxc", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = CreateLxcSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const result = await callRunner("lxc_create", lxcPayloadWithRepos(parsed.data));
   db.prepare("INSERT INTO lxc_containers (container_name, user_id, description, node_name) VALUES (?, NULL, ?, ?)")
     .run(parsed.data.name, parsed.data.description ?? null, getLocalNodeName());
@@ -5000,7 +5000,7 @@ app.post("/api/internal/lxc", async (req, reply) => {
 app.post("/api/internal/docker/containers", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = RunDockerSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const dockerPayload = await prepareDockerRunPayload(parsed.data);
   const result = await callRunner<{ ok: boolean; id: string }>("docker_run", dockerPayload);
   db.prepare("INSERT OR IGNORE INTO docker_containers (container_id, container_name, image, user_id, node_name) VALUES (?, ?, ?, NULL, ?)")
@@ -5109,7 +5109,7 @@ app.post("/api/internal/vms/:name/snapshot/create", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = CreateSnapshotSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const result = await callRunner("qemu_snapshot_create", { name, snapName: parsed.data.name, description: parsed.data.description }, 15 * 60_000);
   db.prepare("INSERT INTO snapshots (resource_type, resource_name, snapshot_name, description, created_by) VALUES ('vm', ?, ?, ?, NULL)")
     .run(name, parsed.data.name, parsed.data.description ?? null);
@@ -5134,7 +5134,7 @@ app.post("/api/internal/vms/:name/backup", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = BackupVmSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(parsed.data.storagePool) as { path: string } | undefined;
   if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
   const filename = `${name}-${new Date().toISOString().replace(/[:.]/g, "-")}.${parsed.data.format === "tar.gz" ? "tar.zst" : "qcow2"}`;
@@ -5153,7 +5153,7 @@ app.put("/api/internal/vms/:name/config", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = UpdateVmConfigSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   if (
     parsed.data.vcpus !== undefined ||
     parsed.data.memoryMb !== undefined ||
@@ -5205,7 +5205,7 @@ app.post("/api/internal/vms/:name/usb/attach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("qemu_usb_attach", { name, ...parsed.data });
 });
 
@@ -5213,7 +5213,7 @@ app.post("/api/internal/vms/:name/usb/detach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("qemu_usb_detach", { name, ...parsed.data });
 });
 
@@ -5331,7 +5331,7 @@ app.post("/api/internal/lxc/:name/backup", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = BackupLxcSchema.safeParse({ format: "tar.gz", ...((req.body as Record<string, unknown>) ?? {}) });
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(parsed.data.storagePool) as { path: string } | undefined;
   if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
   const filename = `lxc-${name}-${new Date().toISOString().replace(/[:.]/g, "-")}.tar.zst`;
@@ -5350,7 +5350,7 @@ app.put("/api/internal/lxc/:name/config", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = UpdateLxcConfigSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   let lxcForwardTargetIp: string | undefined;
   if (parsed.data.portForwards) {
     const info = await callRunner<{ ipAddress?: string }>("lxc_info", { name }).catch(() => ({ ipAddress: undefined }));
@@ -5388,7 +5388,7 @@ app.post("/api/internal/lxc/:name/usb/attach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("lxc_usb_attach", { name, ...parsed.data });
 });
 
@@ -5396,7 +5396,7 @@ app.post("/api/internal/lxc/:name/usb/detach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("lxc_usb_detach", { name, ...parsed.data });
 });
 
@@ -5404,7 +5404,7 @@ app.post("/api/internal/lxc/:name/gpu/attach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = GpuDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("lxc_gpu_attach", { name, ...parsed.data });
 });
 
@@ -5412,7 +5412,7 @@ app.post("/api/internal/lxc/:name/gpu/detach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = GpuDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("lxc_gpu_detach", { name, ...parsed.data });
 });
 
@@ -5426,14 +5426,14 @@ app.post("/api/internal/lxc/:name/networks", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = LxcNicSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("lxc_net_add", { name, ...parsed.data });
 });
 app.put("/api/internal/lxc/:name/networks/:index", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name, index } = req.params as { name: string; index: string };
   const parsed = LxcNicSchema.partial().safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("lxc_net_update", { name, index: parseInt(index, 10), ...parsed.data });
 });
 app.delete("/api/internal/lxc/:name/networks/:index", async (req, reply) => {
@@ -5512,7 +5512,7 @@ app.post("/api/internal/docker/containers/:id/exec", async (req, reply) => {
   requireInternalNodeToken(req);
   const { id } = req.params as { id: string };
   const parsed = DockerExecSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_exec", { id, ...parsed.data });
 });
 
@@ -5520,7 +5520,7 @@ app.put("/api/internal/docker/containers/:id/config", async (req, reply) => {
   requireInternalNodeToken(req);
   const { id } = req.params as { id: string };
   const parsed = UpdateDockerConfigSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_update_config", { id, ...parsed.data });
 });
 
@@ -5528,7 +5528,7 @@ app.put("/api/internal/docker/containers/:id/recreate", async (req, reply) => {
   requireInternalNodeToken(req);
   const { id } = req.params as { id: string };
   const parsed = RecreateDockerSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_recreate", { id, ...parsed.data });
 });
 
@@ -5546,7 +5546,7 @@ app.post("/api/internal/docker/containers/:id/networks", async (req, reply) => {
   requireInternalNodeToken(req);
   const { id } = req.params as { id: string };
   const parsed = DockerConnectNetworkSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_network_connect", { id, ...parsed.data });
 });
 app.delete("/api/internal/docker/containers/:id/networks/:network", async (req, reply) => {
@@ -5584,7 +5584,7 @@ app.get("/api/internal/docker/compose", async (req, reply) => {
 app.post("/api/internal/docker/compose", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = ComposeProjectSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
   return callRunner("docker_compose_save", parsed.data, 60_000);
 });
@@ -5599,7 +5599,7 @@ app.put("/api/internal/docker/compose/:name", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const parsed = ComposeProjectSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
   return callRunner("docker_compose_save", { name, composeYaml: parsed.data.composeYaml }, 60_000);
 });
@@ -5652,7 +5652,7 @@ app.get("/api/internal/docker/volumes", async (req, reply) => {
 app.post("/api/internal/docker/volumes", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = DockerVolumeCreateSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_volume_create", parsed.data);
 });
 
@@ -5666,7 +5666,7 @@ app.delete("/api/internal/docker/volumes/:name", async (req, reply) => {
 app.post("/api/internal/docker/prune", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = DockerPruneSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_prune", parsed.data);
 });
 
@@ -5768,7 +5768,7 @@ app.get("/api/nodes", async (req, reply) => {
 app.post("/api/nodes", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = CreateDatacenterNodeSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
 
   const name = parsed.data.name.trim();
   db.prepare(`
@@ -6093,7 +6093,7 @@ app.put("/api/nodes/:name", async (req, reply) => {
   requireAdmin(req, reply);
   const { name } = req.params as { name: string };
   const parsed = UpdateDatacenterNodeSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const existing = listDatacenterNodes().find((entry) => entry.name === name);
   if (!existing) return reply.status(404).send({ error: "Node not found" });
   if (existing.isLocal && parsed.data.role === "secondary") {
@@ -6345,7 +6345,7 @@ app.get("/api/vms", async (req, reply) => {
 app.post("/api/vms", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = CreateVmSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const targetNodeName = `${(req.query as { node?: string }).node ?? ""}`.trim() || getLocalNodeName();
   const targetNode = listDatacenterNodes().find((entry) => entry.name === targetNodeName);
   if (!targetNode || !targetNode.enabled) return reply.status(404).send({ error: "Target node not found" });
@@ -6464,7 +6464,7 @@ app.put("/api/vms/:name/config", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "modify");
   const parsed = UpdateVmConfigSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
 
   const permCheck = checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_modify");
   if (!permCheck.ok) return replyQuotaError(reply, permCheck);
@@ -6527,7 +6527,7 @@ app.post("/api/vms/:name/disk/attach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "modify");
   const parsed = AttachDiskSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const permCheck = checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_modify");
   if (!permCheck.ok) return replyQuotaError(reply, permCheck);
   let storagePath: string | undefined;
@@ -6596,7 +6596,7 @@ app.post("/api/vms/:name/network/attach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "modify");
   const parsed = AttachNetworkSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "vm.network.attach", label: `Attach network to VM ${name}`, resourceType: "vm", resourceName: name, message: `Bridge: ${parsed.data.bridge ?? "default"}` });
   return runInstantTask(task, ip, () => callRunner("qemu_attach_network", { name, ...parsed.data }));
@@ -6607,7 +6607,7 @@ app.put("/api/vms/:name/network/:mac", async (req, reply) => {
   const { name, mac } = req.params as { name: string; mac: string };
   requireResourcePermission(req, "vm", name, "modify");
   const parsed = UpdateNetworkSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "vm.network.update", label: `Update network ${mac} on VM ${name}`, resourceType: "vm", resourceName: name, message: "Updating network adapter" });
   return runInstantTask(task, ip, () => callRunner("qemu_update_network", { name, mac, newMac: parsed.data.mac, bridge: parsed.data.bridge, model: parsed.data.model }));
@@ -6732,7 +6732,7 @@ app.post("/api/vms/:name/usb/attach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "modify");
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = `${parsed.data.vendorId}:${parsed.data.productId}`;
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "config", action: "vm.usb.attach", label: `Attach USB ${label} to VM ${name}`, resourceType: "vm", resourceName: name, message: "Attaching USB device" });
@@ -6749,7 +6749,7 @@ app.post("/api/vms/:name/usb/detach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "modify");
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = `${parsed.data.vendorId}:${parsed.data.productId}`;
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "config", action: "vm.usb.detach", label: `Detach USB ${label} from VM ${name}`, resourceType: "vm", resourceName: name, message: "Detaching USB device" });
@@ -6766,7 +6766,7 @@ app.post("/api/vms/:name/snapshot/create", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "snapshot");
   const parsed = CreateSnapshotSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const username = req.session.username ?? "unknown";
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, username, {
@@ -6867,7 +6867,7 @@ app.post("/api/vms/:name/backup", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "vm", name, "backup");
   const parsed = BackupVmSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", {
     kind: "vm-backup",
     action: "vm.backup.create",
@@ -7232,7 +7232,7 @@ app.get("/api/lxc", async (req, reply) => {
 app.post("/api/lxc", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = CreateLxcSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const targetNodeName = `${(req.query as { node?: string }).node ?? ""}`.trim() || getLocalNodeName();
   const targetNode = listDatacenterNodes().find((entry) => entry.name === targetNodeName);
   if (!targetNode || !targetNode.enabled) return reply.status(404).send({ error: "Target node not found" });
@@ -7343,7 +7343,7 @@ app.put("/api/lxc/:name/config", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "modify");
   const parsed = UpdateLxcConfigSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const node = await getResourceNodeAsync("lxc", name);
   if (node && !node.isLocal) {
     return fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}/config`, {
@@ -7390,7 +7390,7 @@ app.post("/api/lxc/:name/usb/attach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "modify");
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = `${parsed.data.vendorId}:${parsed.data.productId}`;
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "config", action: "lxc.usb.attach", label: `Attach USB ${label} to LXC ${name}`, resourceType: "lxc", resourceName: name, message: "Attaching USB device" });
@@ -7407,7 +7407,7 @@ app.post("/api/lxc/:name/usb/detach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "modify");
   const parsed = UsbDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = `${parsed.data.vendorId}:${parsed.data.productId}`;
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "config", action: "lxc.usb.detach", label: `Detach USB ${label} from LXC ${name}`, resourceType: "lxc", resourceName: name, message: "Detaching USB device" });
@@ -7424,7 +7424,7 @@ app.post("/api/lxc/:name/gpu/attach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "modify");
   const parsed = GpuDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = parsed.data.id === "dri" ? "/dev/dri" : "/dev/nvidia*";
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "config", action: "lxc.gpu.attach", label: `Attach GPU ${label} to LXC ${name}`, resourceType: "lxc", resourceName: name, message: "Attaching shared GPU device" });
@@ -7441,7 +7441,7 @@ app.post("/api/lxc/:name/gpu/detach", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "modify");
   const parsed = GpuDeviceAssignmentSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = parsed.data.id === "dri" ? "/dev/dri" : "/dev/nvidia*";
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "config", action: "lxc.gpu.detach", label: `Detach GPU ${label} from LXC ${name}`, resourceType: "lxc", resourceName: name, message: "Detaching shared GPU device" });
@@ -7469,7 +7469,7 @@ app.post("/api/lxc/:name/networks", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "modify");
   const parsed = LxcNicSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const node = await getResourceNodeAsync("lxc", name);
   const result = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}/networks`, { method: "POST", body: JSON.stringify(parsed.data) })
@@ -7485,7 +7485,7 @@ app.put("/api/lxc/:name/networks/:index", async (req, reply) => {
   const idx = parseInt(index, 10);
   if (!Number.isInteger(idx) || idx < 0) return reply.status(400).send({ error: "Invalid interface index" });
   const parsed = LxcNicSchema.partial().safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const node = await getResourceNodeAsync("lxc", name);
   const result = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}/networks/${idx}`, { method: "PUT", body: JSON.stringify(parsed.data) })
@@ -7636,7 +7636,7 @@ app.post("/api/lxc/:name/backup", async (req, reply) => {
   const { name } = req.params as { name: string };
   requireResourcePermission(req, "lxc", name, "backup");
   const parsed = BackupLxcSchema.safeParse({ format: "tar.gz", ...((req.body as Record<string, unknown>) ?? {}) });
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", {
     kind: "lxc-backup",
     action: "lxc.backup.create",
@@ -7761,7 +7761,7 @@ app.get("/api/docker/containers", async (req, reply) => {
 app.post("/api/docker/containers", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = RunDockerSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const targetNodeName = `${(req.query as { node?: string }).node ?? ""}`.trim() || getLocalNodeName();
   const targetNode = listDatacenterNodes().find((entry) => entry.name === targetNodeName);
   if (!targetNode || !targetNode.enabled) return reply.status(404).send({ error: "Target node not found" });
@@ -7806,7 +7806,7 @@ app.put("/api/docker/containers/:id/config", async (req, reply) => {
   const { id } = req.params as { id: string };
   requireResourcePermission(req, "docker", id, "modify");
   const parsed = UpdateDockerConfigSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "docker.config.update", label: `Update container config ${id.slice(0, 12)}`, resourceType: "docker", resourceName: id, message: "Updating configuration" });
   return runInstantTask(task, ip, async () => {
@@ -7827,7 +7827,7 @@ app.put("/api/docker/containers/:id/recreate", async (req, reply) => {
   const { id } = req.params as { id: string };
   requireResourcePermission(req, "docker", id, "modify");
   const parsed = RecreateDockerSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "docker.recreate", label: `Edit container ${id.slice(0, 12)}`, resourceType: "docker", resourceName: id, message: "Recreating container" });
   return runInstantTask(task, ip, async () => {
@@ -7896,7 +7896,7 @@ app.post("/api/docker/containers/:id/networks", async (req, reply) => {
   const { id } = req.params as { id: string };
   requireResourcePermission(req, "docker", id, "modify");
   const parsed = DockerConnectNetworkSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const node = await getResourceNodeAsync("docker", id);
   const result = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/networks`, { method: "POST", body: JSON.stringify(parsed.data) })
@@ -8020,7 +8020,7 @@ app.get("/api/docker/compose", async (req, reply) => {
 app.post("/api/docker/compose", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = ComposeProjectSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
   return callRunner("docker_compose_save", parsed.data, 60_000);
 });
@@ -8035,7 +8035,7 @@ app.put("/api/docker/compose/:name", async (req, reply) => {
   requireAuth(req, reply);
   const { name } = req.params as { name: string };
   const parsed = ComposeProjectSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   if (!parsed.data.composeYaml) return reply.status(400).send({ error: "composeYaml is required" });
   return callRunner("docker_compose_save", { name, composeYaml: parsed.data.composeYaml }, 60_000);
 });
@@ -8083,7 +8083,7 @@ app.get("/api/docker/compose/:name/logs", async (req, reply) => {
 app.post("/api/docker/compose/deploy", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = ComposeDeploySchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_compose_up", parsed.data, 300_000);
 });
 
@@ -8096,7 +8096,7 @@ app.get("/api/docker/volumes", async (req, reply) => {
 app.post("/api/docker/volumes", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = DockerVolumeCreateSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_volume_create", parsed.data);
 });
 
@@ -8112,7 +8112,7 @@ app.post("/api/docker/containers/:id/exec", async (req, reply) => {
   const { id } = req.params as { id: string };
   requireResourcePermission(req, "docker", id, "console");
   const parsed = DockerExecSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const node = await getResourceNodeAsync("docker", id);
   return node && !node.isLocal
     ? fetchRemoteNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/exec`, { method: "POST", body: JSON.stringify(parsed.data) })
@@ -8123,7 +8123,7 @@ app.post("/api/docker/containers/:id/exec", async (req, reply) => {
 app.post("/api/docker/prune", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = DockerPruneSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   return callRunner("docker_prune", parsed.data, 300_000);
 });
 
@@ -8140,7 +8140,7 @@ app.get("/api/docker/networks", async (req, reply) => {
 app.post("/api/docker/networks", async (req, reply) => {
   requireAuth(req, reply);
   const parsed = CreateDockerNetworkSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "create", action: "docker.network.create", label: `Create Docker network ${parsed.data.name}`, resourceType: "docker", resourceName: parsed.data.name, message: "Creating network" });
   return runInstantTask(task, ip, () => callRunner("docker_network_create", parsed.data));
@@ -8188,7 +8188,7 @@ app.post("/api/storage/disks/:dev/format", async (req, reply) => {
   requireAdmin(req, reply);
   const { dev } = req.params as { dev: string };
   const parsed = FormatDiskSchema.safeParse({ ...req.body as object, device: `/dev/${dev}` });
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "storage.disk.format", label: `Format disk /dev/${dev}`, resourceType: "storage", resourceName: `/dev/${dev}`, message: `Formatting as ${parsed.data.fstype ?? "ext4"}` });
   return runInstantTask(task, ip, () => callRunner("storage_disk_format", parsed.data));
@@ -8210,7 +8210,7 @@ app.get("/api/storage/raid", async (req, reply) => {
 app.post("/api/storage/raid", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = CreateRaidSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "create", action: "storage.raid.create", label: `Create RAID ${parsed.data.level} array`, resourceType: "storage", resourceName: parsed.data.name, message: `Level: ${parsed.data.level}, devices: ${parsed.data.devices.join(", ")}` });
   return runInstantTask(task, ip, async () => {
@@ -8304,7 +8304,7 @@ app.get("/api/storage/pools", async (req, reply) => {
 app.post("/api/storage/pools", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = CreateStoragePoolSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "create", action: "storage.pool.create", label: `Create storage pool ${parsed.data.name}`, resourceType: "storage", resourceName: parsed.data.name, message: `Type: ${parsed.data.type}, path: ${parsed.data.path}` });
   return runInstantTask(task, ip, async () => {
@@ -8675,7 +8675,7 @@ app.get("/api/firewall/rules", async (req, reply) => {
 app.put("/api/firewall/settings", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = FirewallSettingsSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "firewall.settings.update", label: "Update firewall settings", resourceType: "firewall", resourceName: "host", message: `Enabled: ${parsed.data.enabled}` });
   return runInstantTask(task, ip, async () => {
@@ -8701,7 +8701,7 @@ app.post("/api/firewall/sync", async (req, reply) => {
 app.post("/api/firewall/rules", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = FirewallRuleSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const label = `${parsed.data.protocol}/${parsed.data.hostPort}`;
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "firewall.rule.create", label: `Create firewall rule ${label}`, resourceType: "firewall", resourceName: label, message: parsed.data.description ?? parsed.data.relation ?? label });
@@ -8733,7 +8733,7 @@ app.post("/api/firewall/rules", async (req, reply) => {
 app.put("/api/firewall/rules/:id", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = FirewallRuleSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const id = parseInt((req.params as { id: string }).id, 10);
   const ip = getClientIp(req);
   const label = `${parsed.data.protocol}/${parsed.data.hostPort}`;
@@ -8786,7 +8786,7 @@ app.get("/api/network/bridges", async (req, reply) => {
 app.post("/api/network/bridges", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = CreateBridgeSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "create", action: "network.bridge.create", label: `Create bridge ${parsed.data.name}`, resourceType: "network", resourceName: parsed.data.name, message: `Creating network bridge` });
   return runInstantTask(task, ip, () => callRunner("network_bridge_create", parsed.data));
@@ -8865,7 +8865,7 @@ app.get("/api/users", async (req, reply) => {
 app.post("/api/users", async (req, reply) => {
   requireAdmin(req, reply);
   const parsed = CreateUserSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(parsed.data.username);
   if (existing) return reply.status(409).send({ error: "Username already exists" });
   const hash = await argon2.hash(parsed.data.password);
@@ -8919,7 +8919,7 @@ app.put("/api/users/:id", async (req, reply) => {
   const { id } = req.params as { id: string };
   const userId = parseInt(id, 10);
   const parsed = UpdateUserSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   db.prepare(`
     UPDATE users
     SET
@@ -8992,7 +8992,7 @@ app.put("/api/users/:id/limits", async (req, reply) => {
   const { id } = req.params as { id: string };
   const userId = parseInt(id);
   const parsed = UpdateUserLimitsSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
 
   const existing = db.prepare("SELECT user_id FROM user_limits WHERE user_id = ?").get(userId);
   if (!existing) {
@@ -9093,7 +9093,7 @@ app.put("/api/resources/:resourceType/:resourceName/acl/:userId", async (req, re
   const parsed = UpdateUserResourceAclSchema.safeParse({
     entries: [{ ...((req.body as Record<string, unknown>) ?? {}), resourceType, resourceName }],
   });
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const entry = parsed.data.entries[0];
 
   const anyEnabled =
@@ -9191,7 +9191,7 @@ app.put("/api/users/:id/acl", async (req, reply) => {
   const { id } = req.params as { id: string };
   const userId = parseInt(id, 10);
   const parsed = UpdateUserResourceAclSchema.safeParse(req.body);
-  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
 
   const replace = db.prepare(`
     INSERT INTO user_resource_acl (

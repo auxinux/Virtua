@@ -42,6 +42,23 @@ function retryable(method: string, error: unknown): boolean {
   return error.failure === "timeout" || error.failure === "network" || (error.statusCode !== undefined && error.statusCode >= 500);
 }
 
+function formatNodeError(raw: unknown, status: number): string {
+  if (typeof raw === "string" && raw) return raw;
+  if (Array.isArray(raw)) {
+    return raw.map((i) => {
+      if (i && typeof i === "object" && "message" in i) {
+        const issue = i as { path?: unknown[]; message?: unknown };
+        const path = Array.isArray(issue.path) ? issue.path.join(".") : "";
+        const msg = typeof issue.message === "string" ? issue.message : JSON.stringify(i);
+        return path ? `${path}: ${msg}` : msg;
+      }
+      return typeof i === "string" ? i : JSON.stringify(i);
+    }).join("; ") || `HTTP ${status}`;
+  }
+  if (raw && typeof raw === "object") return JSON.stringify(raw);
+  return `HTTP ${status}`;
+}
+
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -65,9 +82,9 @@ export async function fetchNode<T>(node: VdmNodeRow, pathname: string, init?: Re
       const { timeoutMs: _timeoutMs, retries: _retries, ...fetchInit } = init ?? {};
       const res = await fetch(`${base}${pathname}`, { ...fetchInit, method, headers, signal: controller.signal });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+        const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: unknown };
         const failure = res.status === 401 || res.status === 403 ? "unauthorized" : "http";
-        throw new NodeRequestError(err.error ?? `HTTP ${res.status}`, node.name, failure, res.status);
+        throw new NodeRequestError(formatNodeError(err.error, res.status), node.name, failure, res.status);
       }
       try {
         return await res.json() as T;
