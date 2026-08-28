@@ -4943,6 +4943,38 @@ app.post("/api/internal/storage/pools/:name/content/checksum", async (req, reply
   return { algorithm: "sha256", checksum: hash.digest("hex"), sizeBytes: item.size };
 });
 
+// Download a pool content file as a binary stream (cross-node transfer).
+app.get("/api/internal/storage/pools/:name/content/download", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { itemPath } = req.query as { itemPath?: string };
+  if (!itemPath) return reply.status(400).send({ error: "itemPath is required" });
+  const { item } = await resolvePoolContentItem(name, itemPath);
+  if (item.synthetic) return reply.status(400).send({ error: "Synthetic items cannot be downloaded" });
+  const stat = await fs.promises.stat(item.path);
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header("Content-Length", stat.size);
+  reply.header("Content-Disposition", `attachment; filename="${path.basename(item.path)}"`);
+  return reply.send(fs.createReadStream(item.path));
+});
+
+// Upload a file into a pool's backups dir as a binary stream (cross-node transfer).
+app.post("/api/internal/storage/pools/:name/content/upload", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { filename } = req.query as { filename?: string };
+  if (!filename) return reply.status(400).send({ error: "filename is required" });
+  const safeName = sanitizeManagedFilename(filename);
+  const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(name) as { path: string } | undefined;
+  if (!pool) return reply.status(404).send({ error: "Pool not found" });
+  const destDir = path.join(pool.path, "backups");
+  await fs.promises.mkdir(destDir, { recursive: true });
+  const destPath = path.join(destDir, safeName);
+  await pipeline(req.raw, fs.createWriteStream(destPath));
+  const stat = await fs.promises.stat(destPath);
+  return { ok: true, filename: safeName, sizeBytes: stat.size, path: destPath };
+});
+
 app.post("/api/internal/storage/pools", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = CreateStoragePoolSchema.safeParse(req.body);

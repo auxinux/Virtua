@@ -522,6 +522,54 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
   return storage.name;
 }
 
+// ── Cross-node binary transfer (for migration/duplication to local storage) ─
+// Streams a file from one node's pool to another node's pool without routing
+// the bytes through the VDM process. Uses the node's internal token directly.
+async function transferFileBetweenNodes(
+  sourceNode: VdmNodeRow,
+  sourcePool: string,
+  sourcePath: string,
+  targetNode: VdmNodeRow,
+  targetPool: string,
+  filename: string,
+): Promise<{ filename: string; sizeBytes: number }> {
+  const base = sourceNode.api_url.replace(/\/+$/, "");
+  const url = `${base}/api/internal/storage/pools/${encodeURIComponent(sourcePool)}/content/download?itemPath=${encodeURIComponent(sourcePath)}`;
+  const res = await fetch(url, {
+    headers: { "x-auxinux-node-token": decryptSecret(sourceNode.auth_token) },
+  });
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+    throw new Error(`Download from ${sourceNode.name} failed: ${err.error ?? res.statusText}`);
+  }
+
+  const targetBase = targetNode.api_url.replace(/\/+$/, "");
+  const uploadUrl = `${targetBase}/api/internal/storage/pools/${encodeURIComponent(targetPool)}/content/upload?filename=${encodeURIComponent(filename)}`;
+  const uploadRes = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "x-auxinux-node-token": decryptSecret(targetNode.auth_token),
+      "content-type": "application/octet-stream",
+    },
+    body: res.body as unknown as BodyInit,
+    // @ts-expect-error duplex is required for streaming request bodies in undici
+    duplex: "half",
+  });
+  if (!uploadRes.ok) {
+    const err = await uploadRes.json().catch(() => ({ error: uploadRes.statusText })) as { error?: string };
+    throw new Error(`Upload to ${targetNode.name} failed: ${err.error ?? uploadRes.statusText}`);
+  }
+  return await uploadRes.json() as { filename: string; sizeBytes: number };
+}
+
+// Resolve a pool's filesystem path on a node (for local-storage transfers).
+async function getNodePoolPath(node: VdmNodeRow, poolName: string): Promise<string> {
+  const pools = await fetchNode<Array<{ name: string; path: string }>>(node, "/api/internal/storage/pools");
+  const pool = pools.find((p) => p.name === poolName);
+  if (!pool) throw new Error(`Pool ${poolName} not found on ${node.name}`);
+  return pool.path;
+}
+
 function getOrCreateBackupRepository(storageName: string): VdmBackupRepositoryRow {
   const storage = db.prepare("SELECT name, display_name FROM vdm_shared_storage WHERE name = ? AND enabled = 1").get(storageName) as { name: string; display_name: string | null } | undefined;
   if (!storage) throw Object.assign(new Error("Enabled shared storage not found"), { statusCode: 404 });
@@ -1292,24 +1340,71 @@ app.post("/api/vdm/vms/:node/:name/clone", async (req, reply) => {
   return reply.status(202).send(mapTaskRow(task));
 });
 
-// Migrate VM (offline, via shared storage)
+// Migrate VM (offline, via shared storage OR direct copy to target's local storage)
 app.post("/api/vdm/vms/:node/:name/migrate", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: sourceNodeName, name } = req.params as { node: string; name: string };
-  const { targetNode: targetNodeName, sharedStorageName, deleteSource = true } = req.body as { targetNode: string; sharedStorageName: string; deleteSource?: boolean };
+  const { targetNode: targetNodeName, sharedStorageName, targetStoragePool, deleteSource = true } = req.body as { targetNode: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource?: boolean };
   if (!targetNodeName) return reply.status(400).send({ error: "targetNode required" });
-  if (!sharedStorageName) return reply.status(400).send({ error: "sharedStorageName required — VDM migration requires shared network storage (NFS/SMB)" });
+  if (!sharedStorageName && !targetStoragePool) return reply.status(400).send({ error: "sharedStorageName or targetStoragePool required" });
   if (sourceNodeName === targetNodeName) return reply.status(400).send({ error: "Source and target nodes must be different" });
-
-  const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
-  if (!storage) return reply.status(404).send({ error: "Shared storage not found" });
 
   const sourceNode = getEnabledNode(sourceNodeName);
   const targetNode = getEnabledNode(targetNodeName);
-  const task = createTask({ kind: "migrate", label: `Migrate VM ${name}: ${sourceNodeName} → ${targetNodeName}`, sourceNode: sourceNodeName, targetNode: targetNodeName, resourceType: "vm", resourceName: name, createdBy: req.session.username });
+  const useLocalCopy = !!targetStoragePool;
+  const task = createTask({ kind: "migrate", label: `Migrate VM ${name}: ${sourceNodeName} → ${targetNodeName}${useLocalCopy ? " (local copy)" : ""}`, sourceNode: sourceNodeName, targetNode: targetNodeName, resourceType: "vm", resourceName: name, createdBy: req.session.username });
 
   void (async () => {
     try {
+      if (useLocalCopy) {
+        // Direct copy: backup on source's local pool, stream to target's local pool, restore.
+        updateTask(task.id, "running", 10, "Backing up VM on source node (local pool)...");
+        const sourcePoolPath = await getNodePoolPath(sourceNode, "local");
+        const targetPoolPath = await getNodePoolPath(targetNode, targetStoragePool);
+        const backupResult = await fetchNode<{ filename: string; sizeBytes: number }>(sourceNode, `/api/internal/vms/${encodeURIComponent(name)}/backup`, {
+          method: "POST",
+          timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+          body: JSON.stringify({ storagePool: "local", format: "tar.gz", compress: false }),
+        });
+
+        updateTask(task.id, "running", 40, "Transferring backup to target node...");
+        const transferred = await transferFileBetweenNodes(
+          sourceNode, "local", `${sourcePoolPath}/backups/${backupResult.filename}`,
+          targetNode, targetStoragePool, backupResult.filename,
+        );
+
+        updateTask(task.id, "running", 70, "Restoring VM on target node...");
+        await fetchNode(targetNode, `/api/internal/vms/${encodeURIComponent(name)}/restore-backup`, {
+          method: "POST",
+          timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+          body: JSON.stringify({
+            sourcePath: `${targetPoolPath}/backups/${transferred.filename}`,
+            storagePool: targetStoragePool,
+            name,
+          }),
+        });
+
+        updateTask(task.id, "running", 85, "Validating restored VM on target node...");
+        await validateRestoredResource(targetNode, "vm", name);
+
+        if (deleteSource) {
+          updateTask(task.id, "running", 95, "Removing VM from source node...");
+          try {
+            await fetchNode(sourceNode, `/api/internal/vms/${encodeURIComponent(name)}?deleteDisks=true`, { method: "DELETE" });
+          } catch (error) {
+            updateTask(task.id, "completed-with-warning", 100, `VM restored on ${targetNodeName}, but source cleanup failed`, error instanceof Error ? error.message : "Source cleanup failed", { targetNode: targetNodeName, sourceRetained: true });
+            return;
+          }
+        }
+
+        updateTask(task.id, "completed", 100, `Migration complete. VM ${name} is now on ${targetNodeName} (local copy)`);
+        return;
+      }
+
+      // Shared-storage migration (existing path)
+      const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
+      if (!storage) throw new Error("Shared storage not found");
+
       updateTask(task.id, "running", 5, "Mounting shared storage on source node...");
       const sourcePoolName = await ensureStorageMountedOnNode(sourceNode, storage);
 
@@ -1322,7 +1417,7 @@ app.post("/api/vdm/vms/:node/:name/migrate", async (req, reply) => {
         timeoutMs: LONG_OPERATION_TIMEOUT_MS,
         body: JSON.stringify({ storagePool: sourcePoolName, format: "tar.gz", compress: false }),
       });
-      const repository = getOrCreateBackupRepository(sharedStorageName);
+      const repository = getOrCreateBackupRepository(sharedStorageName!);
       await recordBackupItem({ repository, taskId: task.id, resourceType: "vm", resourceName: name, sourceNode, filename: backupResult.filename, sizeBytes: backupResult.sizeBytes, format: "tar.gz", compression: "none" });
 
       updateTask(task.id, "running", 55, "Restoring VM on target node...");
@@ -1578,20 +1673,65 @@ app.post("/api/vdm/lxc/:node/:name/backup", async (req, reply) => {
 app.post("/api/vdm/lxc/:node/:name/migrate", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: sourceNodeName, name } = req.params as { node: string; name: string };
-  const { targetNode: targetNodeName, sharedStorageName, deleteSource = true } = req.body as { targetNode: string; sharedStorageName: string; deleteSource?: boolean };
+  const { targetNode: targetNodeName, sharedStorageName, targetStoragePool, deleteSource = true } = req.body as { targetNode: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource?: boolean };
   if (!targetNodeName) return reply.status(400).send({ error: "targetNode required" });
-  if (!sharedStorageName) return reply.status(400).send({ error: "sharedStorageName required" });
+  if (!sharedStorageName && !targetStoragePool) return reply.status(400).send({ error: "sharedStorageName or targetStoragePool required" });
   if (sourceNodeName === targetNodeName) return reply.status(400).send({ error: "Source and target nodes must be different" });
-
-  const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
-  if (!storage) return reply.status(404).send({ error: "Shared storage not found" });
 
   const sourceNode = getEnabledNode(sourceNodeName);
   const targetNode = getEnabledNode(targetNodeName);
-  const task = createTask({ kind: "migrate", label: `Migrate LXC ${name}: ${sourceNodeName} → ${targetNodeName}`, sourceNode: sourceNodeName, targetNode: targetNodeName, resourceType: "lxc", resourceName: name, createdBy: req.session.username });
+  const useLocalCopy = !!targetStoragePool;
+  const task = createTask({ kind: "migrate", label: `Migrate LXC ${name}: ${sourceNodeName} → ${targetNodeName}${useLocalCopy ? " (local copy)" : ""}`, sourceNode: sourceNodeName, targetNode: targetNodeName, resourceType: "lxc", resourceName: name, createdBy: req.session.username });
 
   void (async () => {
     try {
+      if (useLocalCopy) {
+        updateTask(task.id, "running", 10, "Backing up LXC on source node (local pool)...");
+        const sourcePoolPath = await getNodePoolPath(sourceNode, "local");
+        const targetPoolPath = await getNodePoolPath(targetNode, targetStoragePool);
+        const backupResult = await fetchNode<{ filename: string; sizeBytes: number }>(sourceNode, `/api/internal/lxc/${encodeURIComponent(name)}/backup`, {
+          method: "POST",
+          timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+          body: JSON.stringify({ storagePool: "local", compress: false }),
+        });
+
+        updateTask(task.id, "running", 40, "Transferring backup to target node...");
+        const transferred = await transferFileBetweenNodes(
+          sourceNode, "local", `${sourcePoolPath}/backups/${backupResult.filename}`,
+          targetNode, targetStoragePool, backupResult.filename,
+        );
+
+        updateTask(task.id, "running", 70, "Restoring LXC on target node...");
+        await fetchNode(targetNode, `/api/internal/lxc/${encodeURIComponent(name)}/restore-backup`, {
+          method: "POST",
+          timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+          body: JSON.stringify({
+            sourcePath: `${targetPoolPath}/backups/${transferred.filename}`,
+            storagePool: targetStoragePool,
+            name,
+          }),
+        });
+
+        updateTask(task.id, "running", 85, "Validating restored LXC on target node...");
+        await validateRestoredResource(targetNode, "lxc", name);
+
+        if (deleteSource) {
+          updateTask(task.id, "running", 95, "Removing from source...");
+          try {
+            await fetchNode(sourceNode, `/api/internal/lxc/${encodeURIComponent(name)}`, { method: "DELETE" });
+          } catch (error) {
+            updateTask(task.id, "completed-with-warning", 100, `LXC restored on ${targetNodeName}, but source cleanup failed`, error instanceof Error ? error.message : "Source cleanup failed", { targetNode: targetNodeName, sourceRetained: true });
+            return;
+          }
+        }
+
+        updateTask(task.id, "completed", 100, `LXC ${name} migrated to ${targetNodeName} (local copy)`);
+        return;
+      }
+
+      const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
+      if (!storage) throw new Error("Shared storage not found");
+
       updateTask(task.id, "running", 5, "Mounting shared storage on source...");
       const sourcePool = await ensureStorageMountedOnNode(sourceNode, storage);
       updateTask(task.id, "running", 15, "Mounting shared storage on target...");
@@ -1603,7 +1743,7 @@ app.post("/api/vdm/lxc/:node/:name/migrate", async (req, reply) => {
         timeoutMs: LONG_OPERATION_TIMEOUT_MS,
         body: JSON.stringify({ storagePool: sourcePool, compress: false }),
       });
-      const repository = getOrCreateBackupRepository(sharedStorageName);
+      const repository = getOrCreateBackupRepository(sharedStorageName!);
       await recordBackupItem({ repository, taskId: task.id, resourceType: "lxc", resourceName: name, sourceNode, filename: backupResult.filename, sizeBytes: backupResult.sizeBytes, format: "tar.gz", compression: "none" });
 
       updateTask(task.id, "running", 60, "Restoring on target...");

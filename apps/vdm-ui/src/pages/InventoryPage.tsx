@@ -70,20 +70,19 @@ function ActionButton({ label, icon, onClick, variant = "ghost", disabled }: { l
 function MigrateModal({ open, onClose, resourceType, resourceName, sourceNode, nodes, storages, onSubmit }: {
   open: boolean; onClose: () => void; resourceType: string; resourceName: string;
   sourceNode: string; nodes: VdmNode[]; storages: VdmSharedStorage[];
-  onSubmit: (targetNode: string, sharedStorageName: string, deleteSource: boolean) => void;
+  onSubmit: (targetNode: string, sharedStorageName: string | undefined, targetStoragePool: string | undefined, deleteSource: boolean) => void;
 }) {
   const [targetNode, setTargetNode] = useState("");
+  const [mode, setMode] = useState<"shared" | "local">("shared");
   const [storName, setStorName] = useState("");
   const [deleteSource, setDeleteSource] = useState(true);
 
   if (!open) return null;
+  const canSubmit = targetNode && (mode === "local" ? true : !!storName);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="vdm-card w-full max-w-md p-5 space-y-4">
         <h3 className="text-base font-semibold text-vdm-text">Migrate {resourceType}: {resourceName}</h3>
-        <p className="text-xs text-vdm-textMuted bg-vdm-warning/10 border border-vdm-warning/30 rounded px-3 py-2">
-          Migration requires shared network storage (NFS/SMB) mounted on both source and target nodes.
-        </p>
         <div>
           <label className="vdm-label">Target Node</label>
           <select className="vdm-input" value={targetNode} onChange={(e) => setTargetNode(e.target.value)}>
@@ -93,21 +92,44 @@ function MigrateModal({ open, onClose, resourceType, resourceName, sourceNode, n
             ))}
           </select>
         </div>
+
+        {/* Transfer mode */}
         <div>
-          <label className="vdm-label">Shared Storage (for migration data)</label>
-          <select className="vdm-input" value={storName} onChange={(e) => setStorName(e.target.value)}>
-            <option value="">Select shared storage...</option>
-            {storages.map((s) => <option key={s.name} value={s.name}>{s.displayName} ({s.type}: {s.source})</option>)}
-          </select>
-          {storages.length === 0 && <p className="text-xs text-vdm-danger mt-1">⚠ No shared storage configured. Add NFS/SMB storage first.</p>}
+          <label className="vdm-label">Transfer method</label>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setMode("shared")}
+              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${mode === "shared" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}>
+              Shared storage
+            </button>
+            <button type="button" onClick={() => setMode("local")}
+              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${mode === "local" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}>
+              Local copy (direct)
+            </button>
+          </div>
         </div>
+
+        {mode === "shared" ? (
+          <div>
+            <label className="vdm-label">Shared Storage (for migration data)</label>
+            <select className="vdm-input" value={storName} onChange={(e) => setStorName(e.target.value)}>
+              <option value="">Select shared storage...</option>
+              {storages.map((s) => <option key={s.name} value={s.name}>{s.displayName} ({s.type}: {s.source})</option>)}
+            </select>
+            {storages.length === 0 && <p className="text-xs text-vdm-danger mt-1">⚠ No shared storage configured. Use "Local copy" instead.</p>}
+          </div>
+        ) : (
+          <p className="text-xs text-vdm-textMuted bg-vdm-accent/8 border border-vdm-accent/25 rounded px-3 py-2">
+            Copies the {resourceType} data directly to the target node's <span className="font-mono">local</span> storage pool (streamed node-to-node, no shared storage required).
+          </p>
+        )}
+
         <label className="flex items-center gap-2 text-sm text-vdm-text cursor-pointer">
           <input type="checkbox" checked={deleteSource} onChange={(e) => setDeleteSource(e.target.checked)} className="rounded" />
           Delete from source after migration
         </label>
         <div className="flex gap-2 justify-end">
           <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" onClick={() => { if (targetNode && storName) { onSubmit(targetNode, storName, deleteSource); onClose(); } }} disabled={!targetNode || !storName}>
+          <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(targetNode, mode === "shared" ? storName : undefined, mode === "local" ? "local" : undefined, deleteSource); onClose(); } }} disabled={!canSubmit}>
             Start Migration
           </button>
         </div>
@@ -218,7 +240,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-vm-snaps", nodeName, vmName] }),
   });
   const migrateMut = useMutation({
-    mutationFn: (p: { targetNode: string; sharedStorageName: string; deleteSource: boolean }) =>
+    mutationFn: (p: { targetNode: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource: boolean }) =>
       api.post<VdmTask>(`/api/vdm/vms/${encodeURIComponent(nodeName)}/${encodeURIComponent(vmName)}/migrate`, p),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-tasks-recent"] }); navigate("/tasks"); },
   });
@@ -361,7 +383,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
       {/* Modals */}
       <MigrateModal open={showMigrate} onClose={() => setShowMigrate(false)} resourceType="VM" resourceName={vm.name} sourceNode={nodeName}
         nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
-        onSubmit={(t, s, d) => migrateMut.mutate({ targetNode: t, sharedStorageName: s, deleteSource: d })} />
+        onSubmit={(t, s, p, d) => migrateMut.mutate({ targetNode: t, sharedStorageName: s, targetStoragePool: p, deleteSource: d })} />
       <CloneModal open={showClone} onClose={() => setShowClone(false)} resourceName={vm.name} onSubmit={(n) => cloneMut.mutate(n)} />
       <BackupModal open={showBackup} onClose={() => setShowBackup(false)} resourceName={vm.name} storages={storagesQuery.data ?? []} onSubmit={(s) => backupMut.mutate(s)} />
       <LogsModal open={showLogs} onClose={() => setShowLogs(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} />
@@ -396,7 +418,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-lxc", nodeName, ctName] }),
   });
   const migrateMut = useMutation({
-    mutationFn: (p: { targetNode: string; sharedStorageName: string; deleteSource: boolean }) =>
+    mutationFn: (p: { targetNode: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource: boolean }) =>
       api.post(`/api/vdm/lxc/${encodeURIComponent(nodeName)}/${encodeURIComponent(ctName)}/migrate`, p),
     onSuccess: () => navigate("/tasks"),
   });
@@ -450,7 +472,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
 
       <MigrateModal open={showMigrate} onClose={() => setShowMigrate(false)} resourceType="LXC" resourceName={ct.name} sourceNode={nodeName}
         nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
-        onSubmit={(t, s, d) => migrateMut.mutate({ targetNode: t, sharedStorageName: s, deleteSource: d })} />
+        onSubmit={(t, s, p, d) => migrateMut.mutate({ targetNode: t, sharedStorageName: s, targetStoragePool: p, deleteSource: d })} />
       <BackupModal open={showBackup} onClose={() => setShowBackup(false)} resourceName={ct.name} storages={storagesQuery.data ?? []} onSubmit={(s) => backupMut.mutate(s)} />
       <LogsModal open={showLogs} onClose={() => setShowLogs(false)} type="lxc" node={nodeName} name={ct.name} title={ct.name} />
       <ConsoleModal open={showConsole} onClose={() => setShowConsole(false)} type="lxc" node={nodeName} name={ct.name} title={ct.name} mode="term" />
