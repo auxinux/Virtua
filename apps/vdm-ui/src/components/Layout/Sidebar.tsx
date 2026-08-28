@@ -231,7 +231,7 @@ export function Sidebar() {
               {storages.map((s) => (
                 <NavLink
                   key={s.name}
-                  to="/storage"
+                  to={`/storage/${encodeURIComponent(s.name)}`}
                   className="flex items-center gap-1.5 px-2 py-1.5 rounded text-xs text-vdm-textMuted hover:text-vdm-text hover:bg-vdm-surfaceHover transition-colors"
                 >
                   <Icon path={ICONS.storage} className="w-3 h-3" />

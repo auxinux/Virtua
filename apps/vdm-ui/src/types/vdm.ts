@@ -207,6 +207,20 @@ export interface VdmStorageNodeStatus {
   error: string | null;
 }
 
+export interface VdmStorageContentItem {
+  name: string;
+  type: string;
+  size: number;
+  path: string;
+  createdAt?: string | null;
+  linkedResourceType?: string;
+  linkedResourceName?: string;
+  relation?: string;
+  synthetic?: boolean;
+  isLinked?: boolean;
+  deletable?: boolean;
+}
+
 export interface VdmTask {
   id: string;
   kind: TaskKind;

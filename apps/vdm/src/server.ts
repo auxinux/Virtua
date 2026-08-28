@@ -2084,12 +2084,13 @@ app.get("/api/vdm/storage/:name/content", async (req, reply) => {
 
   // Ask any online node for content (they all see the same share)
   const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 AND status = 'online' ORDER BY name ASC LIMIT 1").all() as VdmNodeRow[];
-  if (nodes.length === 0) return { files: [] };
+  if (nodes.length === 0) return [];
   const node = nodes[0];
   try {
-    return await fetchNode(node, `/api/internal/storage/pools/${encodeURIComponent(name)}/content`);
+    const content = await fetchNode<Array<{ name: string; type: string; size: number; path: string; createdAt?: string | null; linkedResourceType?: string; linkedResourceName?: string; relation?: string; synthetic?: boolean; isLinked?: boolean; deletable?: boolean }>>(node, `/api/internal/storage/pools/${encodeURIComponent(name)}/content`);
+    return Array.isArray(content) ? content : [];
   } catch {
-    return { files: [] };
+    return [];
   }
 });
 

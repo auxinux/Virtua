@@ -1,8 +1,9 @@
 import { useState } from "react";
+import { useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
-import type { VdmSharedStorage, VdmNode, VdmStorageNodeStatus } from "@/types/vdm";
+import type { VdmSharedStorage, VdmNode, VdmStorageNodeStatus, VdmStorageContentItem } from "@/types/vdm";
 
 // ── Icon ────────────────────────────────────────────────────────────────────
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
@@ -57,6 +58,13 @@ const DEFAULT_FORM: StorageForm = {
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+function formatBytes(bytes: number): string {
+  if (!bytes) return "—";
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(0)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+}
+
 function typeLabel(type: string): string {
   if (type === "nfs") return "NFS";
   if (type === "smb" || type === "cifs") return "SMB/CIFS";
@@ -346,12 +354,63 @@ function ClusterStatusPanel({ storage, onMountAll, onMountOne, mountingAll, moun
   );
 }
 
+// ── Storage Content Panel (browse files) ────────────────────────────────────
+function StorageContentPanel({ storage }: { storage: VdmSharedStorage }) {
+  const contentQuery = useQuery<VdmStorageContentItem[]>({
+    queryKey: ["vdm-storage-content", storage.name],
+    queryFn: () => api.get(`/api/vdm/storage/${encodeURIComponent(storage.name)}/content`),
+    refetchInterval: 30_000,
+  });
+
+  const items = contentQuery.data ?? [];
+  const typeBadge = (t: string) => {
+    const map: Record<string, string> = {
+      backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green",
+      vm_disk: "pill-green", disk: "pill-green", archive: "pill-gray", file: "pill-gray",
+    };
+    return map[t] ?? "pill-gray";
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-vdm-border bg-vdm-bg/50 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-vdm-border/50">
+        <span className="text-xs font-semibold text-vdm-textMuted uppercase tracking-wider">Contents</span>
+        {contentQuery.isFetching && <div className="w-3 h-3 border border-vdm-accent border-t-transparent rounded-full animate-spin" />}
+      </div>
+      {contentQuery.isLoading ? (
+        <div className="px-3 py-4 flex justify-center"><div className="w-5 h-5 border-2 border-vdm-accent border-t-transparent rounded-full animate-spin" /></div>
+      ) : items.length === 0 ? (
+        <div className="px-3 py-4 text-xs text-vdm-textMuted text-center">No files in this storage.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="vdm-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Linked to</th><th>Modified</th></tr></thead>
+            <tbody>
+              {items.map((it) => (
+                <tr key={it.path} className="hover:bg-vdm-bg/40">
+                  <td className="font-mono text-xs text-vdm-text truncate max-w-56" title={it.path}>{it.name}</td>
+                  <td><span className={`rounded-md border border-vdm-border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${typeBadge(it.type)}`}>{it.type}</span></td>
+                  <td className="text-xs text-vdm-textMuted">{formatBytes(it.size)}</td>
+                  <td className="text-xs text-vdm-textMuted">
+                    {it.linkedResourceName ? `${it.linkedResourceType ?? ""} ${it.linkedResourceName}` : it.relation ?? "—"}
+                  </td>
+                  <td className="text-xs text-vdm-textMuted">{it.createdAt ? new Date(it.createdAt).toLocaleString() : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Storage Row ──────────────────────────────────────────────────────────────
-function StorageRow({ stor, isAdmin, onDelete }: {
-  stor: VdmSharedStorage; isAdmin: boolean; onDelete: () => void;
+function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
+  stor: VdmSharedStorage; isAdmin: boolean; onDelete: () => void; initiallyExpanded?: boolean;
 }) {
   const qc = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(!!initiallyExpanded);
   const [mountingAll, setMountingAll] = useState(false);
   const [mountingNode, setMountingNode] = useState<string | null>(null);
 
@@ -427,13 +486,16 @@ function StorageRow({ stor, isAdmin, onDelete }: {
 
       {/* Cluster panel */}
       {expanded && (
-        <ClusterStatusPanel
-          storage={stor}
-          onMountAll={handleMountAll}
-          onMountOne={handleMountOne}
-          mountingAll={mountingAll}
-          mountingNode={mountingNode}
-        />
+        <>
+          <ClusterStatusPanel
+            storage={stor}
+            onMountAll={handleMountAll}
+            onMountOne={handleMountOne}
+            mountingAll={mountingAll}
+            mountingNode={mountingNode}
+          />
+          <StorageContentPanel storage={stor} />
+        </>
       )}
     </div>
   );
@@ -443,6 +505,7 @@ function StorageRow({ stor, isAdmin, onDelete }: {
 export default function StoragePage() {
   const { isAdmin } = useVdmAuth();
   const qc = useQueryClient();
+  const { name: selectedName } = useParams<{ name?: string }>();
   const [showAdd, setShowAdd] = useState(false);
 
   const storagesQuery = useQuery<VdmSharedStorage[]>({
@@ -539,6 +602,7 @@ export default function StoragePage() {
               key={stor.id}
               stor={stor}
               isAdmin={isAdmin}
+              initiallyExpanded={selectedName ? stor.name === decodeURIComponent(selectedName) : undefined}
               onDelete={() => {
                 if (confirm(`Remove storage "${stor.displayName}"? This will not unmount it from nodes.`)) {
                   deleteMut.mutate(stor.name);

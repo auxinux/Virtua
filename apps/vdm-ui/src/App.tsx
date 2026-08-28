@@ -95,6 +95,7 @@ export default function App() {
           <Route path="/docker/compose" element={<DockerComposePage />} />
           <Route path="/docker/volumes" element={<DockerVolumesPage />} />
           <Route path="/storage" element={<StoragePage />} />
+          <Route path="/storage/:name" element={<StoragePage />} />
           <Route path="/tasks" element={<TasksPage />} />
           <Route path="/backups" element={<BackupsPage />} />
           <Route path="/logs" element={<LogsPage />} />
