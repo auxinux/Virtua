@@ -6,7 +6,7 @@ Provides: virtua
 Section: admin
 Priority: optional
 Homepage: https://auxinux.ca
-Depends: bash, coreutils, curl, ca-certificates, gnupg, sudo, systemd-sysv, lsb-release
+Depends: bash, coreutils, curl, ca-certificates, gnupg, sudo, systemd-sysv, lsb-release, rclone, fuse3
 Recommends: virtuaos-cli, qemu-system-x86, libvirt-daemon-system, lxc, bridge-utils, iptables, nftables
 Description: AuxiNux Virtua Control — web hypervisor panel for Debian 13
  AuxiNux Virtua Control is a self-hosted web panel to manage KVM/QEMU virtual

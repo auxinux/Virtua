@@ -68,6 +68,34 @@ async function clearStaleFuseMount(poolPath: string): Promise<void> {
   }
 }
 
+/** Kill any rclone daemon still running for this pool's config. A previous
+ * daemon that half-died (endpoint down, stuck reconnecting) can hold the FUSE
+ * connection open and make the new `rclone mount` hang; SIGTERM it before
+ * remounting so the fresh daemon owns the mountpoint cleanly. */
+async function killStaleRcloneDaemon(remoteName: string): Promise<void> {
+  await execWithTimeout("pkill", ["-f", `rclone.*${remoteName}`], 5_000).catch(() => {});
+  // Give the daemon a moment to tear down its FUSE connection.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+
+/** Race a promise against a wall-clock timeout. Raw fs syscalls (mkdir/stat)
+ * on a wedged FUSE connection block in uninterruptible sleep and can't be
+ * killed the way execFile children can — this bounds them so the runner never
+ * hits the API's 120s timeout while the kernel syscall stays stuck. */
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Serialize mount/umount operations per mountpoint. The 60s reconciliation
  * and a manual mount/unmount can overlap on the same path; without a lock the
  * second caller lazily unmounts what the first just mounted (or vice versa),
@@ -86,7 +114,9 @@ async function withPoolOpLock<T>(poolPath: string, fn: () => Promise<T>): Promis
 }
 
 async function ensureLibvirtPoolAccess(poolPath: string): Promise<void> {
-  await fs.mkdir(poolPath, { recursive: true });
+  // Bound the mkdir: on a wedged FUSE connection the syscall can block in
+  // uninterruptible sleep and pin the runner for the full 120s API timeout.
+  await withTimeout(fs.mkdir(poolPath, { recursive: true }), 15_000, `mkdir ${poolPath}`);
   const dataDir = process.env.AUXINUX_DATA_DIR ?? "/var/lib/auxinuxvirtual";
   if (poolPath === dataDir || poolPath.startsWith(`${dataDir}${path.sep}`)) {
     await fs.chmod(dataDir, 0o711).catch(() => {});
@@ -809,16 +839,41 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
   // remounted between the first clear and now.
   await execWithTimeout("fusermount3", ["-uz", mountPath], 10_000).catch(() => {});
   await execWithTimeout("fusermount", ["-uz", mountPath], 10_000).catch(() => {});
+
+  // Network timeouts so an unreachable endpoint / bad credentials fail FAST
+  // instead of rclone retrying for minutes and pinning the runner until the
+  // API's 120s timeout ("Runner timeout for action: storage_pool_mount").
+  const netTimeoutArgs = ["--contimeout", "10s", "--timeout", "30s", "--low-level-retries", "1"];
+
+  // A half-dead daemon from a previous attempt holds the FUSE connection open
+  // and makes the new mount hang — kill it so the fresh daemon owns the path.
+  await killStaleRcloneDaemon(remoteName);
+
+  // Pre-flight: verify the S3 backend actually answers BEFORE attempting the
+  // mount. `rclone mount --daemon` can hang the whole runner call when the
+  // endpoint is down; this surfaces the real reason in a few seconds instead.
+  try {
+    await execWithTimeout("rclone", [
+      "--config", configPath, ...netTimeoutArgs,
+      "lsd", `${remoteName}:${bucket}`, "--max-depth", "1",
+    ], 25_000);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await fs.unlink(configPath).catch(() => {});
+    throw new Error(`S3 backend unreachable or credentials invalid: ${reason}`);
+  }
+
   const cacheArg = vfsCache === "off" ? ["--vfs-cache-mode=off"] : [`--vfs-cache-mode=${vfsCache}`];
   // Run rclone mount in background (daemon) so it survives the runner call.
-  // --daemon returns immediately and MASKS failures (bad credentials, unreachable
-  // endpoint, dead FUSE), so we MUST verify the mount actually holds below.
-  await execFileAsync("rclone", [
+  // --daemon MASKS failures (bad credentials, unreachable endpoint, dead FUSE),
+  // so we verify the mount actually holds below — and we bound the exec so the
+  // runner never waits the full 120s on a stuck FUSE.
+  await execWithTimeout("rclone", [
     "--config", configPath, "mount", `${remoteName}:${bucket}`,
-    mountPath, "--daemon", ...cacheArg,
+    mountPath, "--daemon", ...cacheArg, ...netTimeoutArgs,
     "--allow-other", "--dir-cache-time", "10m",
     "--log-file", logPath, "--log-level", "INFO",
-  ]);
+  ], 45_000);
 
   // Verify the mount came up and is ALIVE. Reuse the same liveness probe as
   // isPoolAlive: it must be a real mountpoint (findmnt) AND readable (readdir),
