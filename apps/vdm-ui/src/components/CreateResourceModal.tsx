@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/api/client";
-import type { VdmNode } from "@/types/vdm";
+import type { VdmNode, VdmSharedStorage, VdmNodePool } from "@/types/vdm";
 
 type CreateType = "vm" | "lxc" | "docker";
 
@@ -24,6 +24,11 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
   const [name, setName] = useState("");
   const [error, setError] = useState("");
 
+  // Storage: local node pool OR shared storage
+  const [storageKind, setStorageKind] = useState<"local" | "shared">("local");
+  const [storagePool, setStoragePool] = useState("");
+  const [sharedStorageName, setSharedStorageName] = useState("");
+
   // Common resources
   const [cpu, setCpu] = useState(type === "docker" ? 1 : 2);
   const [memory, setMemory] = useState(type === "lxc" ? 1024 : type === "docker" ? 512 : 2048);
@@ -31,7 +36,6 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
   const [bridge, setBridge] = useState("");
 
   // VM
-  const [storagePool, setStoragePool] = useState("");
   const [osType, setOsType] = useState("linux");
   const [isoFile, setIsoFile] = useState("");
   // LXC
@@ -47,7 +51,8 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
   }, [open, onlineNodes, node]);
 
   // Per-node catalogs (only fetched for the relevant type)
-  const pools = useQuery<PoolEntry[]>({ queryKey: ["vdm-node-pools", node], queryFn: () => api.get(`/api/vdm/nodes/${node}/storage`), enabled: open && !!node && type === "vm" });
+  const pools = useQuery<VdmNodePool[]>({ queryKey: ["vdm-node-pools", node], queryFn: () => api.get(`/api/vdm/nodes/${node}/storage`), enabled: open && !!node });
+  const storagesQuery = useQuery<VdmSharedStorage[]>({ queryKey: ["vdm-storage"], queryFn: () => api.get("/api/vdm/storage"), enabled: open });
   const isos = useQuery<IsoEntry[]>({ queryKey: ["vdm-node-isos", node], queryFn: () => api.get(`/api/vdm/nodes/${node}/isos`), enabled: open && !!node && type === "vm" });
   const templates = useQuery<TemplateEntry[]>({ queryKey: ["vdm-node-templates", node], queryFn: () => api.get(`/api/vdm/nodes/${node}/lxc-templates`), enabled: open && !!node && type === "lxc" });
   const images = useQuery<ImageEntry[]>({ queryKey: ["vdm-node-images", node], queryFn: () => api.get(`/api/vdm/nodes/${node}/docker-images`), enabled: open && !!node && type === "docker" });
@@ -58,10 +63,12 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
     mutationFn: () => {
       let body: Record<string, unknown>;
       if (type === "vm") {
-        if (!storagePool) throw new Error("Select a storage pool");
+        if (storageKind === "local" && !storagePool) throw new Error("Select a storage pool");
+        if (storageKind === "shared" && !sharedStorageName) throw new Error("Select a shared storage");
         body = {
           name, vcpus: cpu, memoryMb: memory, diskGb: disk,
-          storagePool, os: osType || "linux",
+          os: osType || "linux",
+          ...(storageKind === "local" ? { storagePool } : { sharedStorageName }),
           ...(isoFile ? { isoFile } : {}),
           ...(bridge ? { bridge } : {}),
         };
@@ -69,15 +76,21 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
         const tpl = (templates.data ?? []).find((t) => t.name === templateName);
         if (!tpl) throw new Error("Select a template");
         if (password.length < 6) throw new Error("Password must be at least 6 characters");
+        if (storageKind === "local" && !storagePool) throw new Error("Select a storage pool");
+        if (storageKind === "shared" && !sharedStorageName) throw new Error("Select a shared storage");
         body = {
           name, dist: tpl.dist, release: tpl.release, arch: tpl.arch, variant: tpl.variant,
           cpuCores: cpu, memoryMb: memory, diskGb: disk, password,
+          ...(storageKind === "local" ? { storagePool } : { sharedStorageName }),
           ...(bridge ? { bridge } : {}),
         };
       } else {
         if (!image.trim()) throw new Error("An image is required");
+        if (storageKind === "local" && !storagePool) throw new Error("Select a storage pool");
+        if (storageKind === "shared" && !sharedStorageName) throw new Error("Select a shared storage");
         body = {
           name, image: image.trim(),
+          ...(storageKind === "local" ? { storagePool } : { sharedStorageName }),
           ...(cpu ? { cpuLimit: cpu } : {}),
           ...(memory ? { memoryMb: memory } : {}),
           ...(dockerNet ? { network: dockerNet } : {}),
@@ -115,16 +128,35 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
           <input className="vdm-input font-mono" value={name} onChange={(e) => setName(e.target.value)} placeholder={type === "docker" ? "my-app" : "my-machine"} />
         </div>
 
+        {/* Storage: local node pool OR shared storage */}
+        <div>
+          <label className="vdm-label">Storage</label>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setStorageKind("local")}
+              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${storageKind === "local" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}>
+              Local storage
+            </button>
+            <button type="button" onClick={() => setStorageKind("shared")}
+              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${storageKind === "shared" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}>
+              Shared storage
+            </button>
+          </div>
+          {storageKind === "local" ? (
+            <select className="vdm-input mt-2" value={storagePool} onChange={(e) => setStoragePool(e.target.value)}>
+              <option value="">Select local pool…</option>
+              {(pools.data ?? []).filter((p) => p.mounted !== false).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+            </select>
+          ) : (
+            <select className="vdm-input mt-2" value={sharedStorageName} onChange={(e) => setSharedStorageName(e.target.value)}>
+              <option value="">Select shared storage…</option>
+              {(storagesQuery.data ?? []).map((s) => <option key={s.name} value={s.name}>{s.displayName} ({s.type})</option>)}
+            </select>
+          )}
+        </div>
+
         {type === "vm" && (
           <>
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="vdm-label">Storage pool</label>
-                <select className="vdm-input" value={storagePool} onChange={(e) => setStoragePool(e.target.value)}>
-                  <option value="">Select…</option>
-                  {(pools.data ?? []).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-                </select>
-              </div>
               <div>
                 <label className="vdm-label">OS type</label>
                 <input className="vdm-input" value={osType} onChange={(e) => setOsType(e.target.value)} placeholder="linux" />

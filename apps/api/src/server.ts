@@ -4305,6 +4305,15 @@ app.get("/api/tasks/:id", async (req, reply) => {
   return sanitizeTask(task);
 });
 
+// Internal task status (VDM polls this after proxying a node-side task).
+app.get("/api/internal/tasks/:id", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { id } = req.params as { id: string };
+  const task = getTaskRecord(id);
+  if (!task) return reply.status(404).send({ error: "Task not found" });
+  return sanitizeTask(task);
+});
+
 app.get("/api/tasks", async (req, reply) => {
   requireAuth(req, reply);
   const { limit = 50, since, mine } = req.query as { limit?: number; since?: string; mine?: string };
@@ -5042,11 +5051,20 @@ app.get("/api/internal/storage/isos/:filename/download", async (req, reply) => {
 // Receive a managed ISO as a binary stream (cross-node copy target).
 app.post("/api/internal/storage/isos/upload", async (req, reply) => {
   requireInternalNodeToken(req);
-  const { filename } = req.query as { filename?: string };
+  const { filename, storagePool } = req.query as { filename?: string; storagePool?: string };
   if (!filename) return reply.status(400).send({ error: "filename is required" });
   const safeName = sanitizeManagedFilename(filename);
   if (!isAllowedManagedFile(safeName, "iso")) return reply.status(400).send({ error: "Unsupported ISO extension" });
-  const destDir = getManagedStorageDir("iso");
+  // Optional target pool (local or shared). Defaults to the managed ISO dir.
+  let destDir = getManagedStorageDir("iso");
+  let poolName: string | undefined;
+  if (storagePool) {
+    const pool = resolveManagedStoragePool(storagePool);
+    if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
+    if (!pool.content.includes("iso")) return reply.status(400).send({ error: "Storage pool does not allow ISO files" });
+    destDir = pool.path;
+    poolName = storagePool;
+  }
   await fs.promises.mkdir(destDir, { recursive: true });
   const destPath = path.join(destDir, safeName);
   const tempPath = `${destPath}.part-${randomUUID()}`;
@@ -5058,8 +5076,96 @@ app.post("/api/internal/storage/isos/upload", async (req, reply) => {
   }
   await ensureLibvirtManagedFileAccess(destPath, "iso");
   const stat = await fs.promises.stat(destPath);
-  db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 0, NULL)").run(safeName, safeName, stat.size);
-  return { ok: true, filename: safeName, sizeBytes: stat.size };
+  db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 0, ?)").run(safeName, safeName, stat.size, poolName ?? null);
+  return { ok: true, filename: safeName, sizeBytes: stat.size, storagePool: poolName ?? null };
+});
+
+// Download a managed file from a URL into a pool (VDM proxy target).
+app.post("/api/internal/storage/isos/from-url", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { url, displayName, type, storagePool } = req.body as { url?: string; displayName?: string; type?: string; storagePool?: string };
+  if (!url) return reply.status(400).send({ error: "url is required" });
+  const fileType = resolveManagedFileType(type);
+  const task = createTask(0, "vdm", {
+    kind: "url-download", action: "storage.download.url",
+    label: `Download ${displayName || url}`, resourceType: fileType,
+    resourceName: displayName || url, message: "Downloading file", detail: displayName || url,
+  });
+  const ip = getClientIp(req);
+  void saveManagedDownloadWithProgress(task.id, url, fileType, displayName, storagePool?.trim() || undefined)
+    .then((download) => {
+      db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, ?, ?, 0, 0, ?)").run(
+        download.filename, displayName || download.filename, fileType, download.sizeBytes, storagePool?.trim() || null,
+      );
+      updateTask(task.id, { status: "completed", progressPercent: 100, bytesCurrent: download.sizeBytes, bytesTotal: download.sizeBytes, message: "Download completed", detail: download.filename, result: { ...download, type: fileType } });
+      const completed = getTaskRecord(task.id);
+      if (completed) writeTaskAudit(completed, ip);
+    })
+    .catch((error) => {
+      updateTask(task.id, { status: "failed", error: error instanceof Error ? error.message : "Download failed", message: "Download failed" });
+      const failed = getTaskRecord(task.id);
+      if (failed) writeTaskAudit(failed, ip);
+    });
+  return sanitizeTask(task);
+});
+
+// Remote depot catalog (VDM proxy target).
+app.get("/api/internal/templates/depot", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { refresh } = req.query as { refresh?: string };
+  if (refresh) depotCache = null;
+  try {
+    return { base: getTemplateDepotBase(), items: await listTemplateDepot() };
+  } catch (err) {
+    return reply.status(502).send({ error: err instanceof Error ? err.message : "Depot unreachable" });
+  }
+});
+
+// Import a depot item into a pool (VDM proxy target).
+app.post("/api/internal/templates/depot/import", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { id, storagePool, visibility } = req.body as { id?: string; storagePool?: string; visibility?: string };
+  if (!id) return reply.status(400).send({ error: "id required" });
+  const catalog = await listTemplateDepot().catch(() => [] as DepotItem[]);
+  const item = catalog.find((entry) => entry.id === id);
+  if (!item) return reply.status(404).send({ error: "Depot item not found" });
+  if (item.alreadyImported) return reply.status(409).send({ error: "Already imported" });
+  let targetDir = item.type === "iso" ? ISOS_DIR : VM_TEMPLATES_DIR;
+  let poolName: string | undefined;
+  if (storagePool) {
+    const pool = resolveManagedStoragePool(storagePool);
+    if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
+    if (!pool.content.includes(item.type === "iso" ? "iso" : "template")) {
+      return reply.status(400).send({ error: "Storage pool does not allow this template type" });
+    }
+    targetDir = pool.path;
+    poolName = storagePool;
+  }
+  await fs.promises.mkdir(targetDir, { recursive: true });
+  const destPath = path.join(targetDir, sanitizeManagedFilename(item.filename));
+  if (fs.existsSync(destPath)) return reply.status(409).send({ error: "A file with this name already exists" });
+  const ip = getClientIp(req);
+  const task = createTask(0, "vdm", {
+    kind: "url-download", action: "template.depot.import", label: `Import ${item.name} from depot`,
+    resourceType: "template", resourceName: item.filename, message: "Downloading from depot", detail: item.filename,
+  });
+  void runTrackedTask(task, ip, async ({ update }) => {
+    const tmpPath = path.join(targetDir, `.depot-${randomUUID()}`);
+    try {
+      await withUrlDownloadSlot(task.id, () => downloadUrlToFileWithProgress(task.id, item.url, tmpPath));
+      await fs.promises.rename(tmpPath, destPath);
+    } catch (err) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
+    const stat = await fs.promises.stat(destPath);
+    db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, ?, ?, 0, ?, ?)").run(
+      item.filename, item.name, item.type === "iso" ? "iso" : "lxc_template", stat.size,
+      visibility === "public" ? 1 : 0, poolName ?? null,
+    );
+    update({ progressPercent: 100, message: "Import complete", result: { filename: item.filename, sizeBytes: stat.size } });
+  });
+  return sanitizeTask(task);
 });
 
 // Recent local warn/error entries for the VDM central LOGS page.

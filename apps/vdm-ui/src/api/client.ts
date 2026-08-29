@@ -58,4 +58,29 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
+  /** Multipart upload (FormData). Returns the parsed JSON body. */
+  upload: async <T>(path: string, form: FormData): Promise<T> => {
+    if (!csrfToken) await fetchCsrf();
+    const headers: Record<string, string> = {};
+    if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+    const res = await fetch(path, { method: "POST", headers, credentials: "include", body: form });
+    if (res.status === 403) {
+      const data = await res.json().catch(() => ({})) as { error?: string };
+      if (data.error?.includes("CSRF")) {
+        csrfToken = null;
+        return api.upload<T>(path, form);
+      }
+      const message = data.error ?? "Forbidden";
+      reportMutationError("POST", message);
+      throw new Error(message);
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: unknown };
+      const message = typeof err.error === "string" && err.error ? err.error : `HTTP ${res.status}`;
+      reportMutationError("POST", message);
+      throw new Error(message);
+    }
+    if (res.status === 204) return undefined as T;
+    return res.json() as Promise<T>;
+  },
 };

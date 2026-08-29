@@ -3,6 +3,7 @@ import fastifyCookie from "@fastify/cookie";
 import fastifySession from "@fastify/session";
 import fastifyCsrf from "@fastify/csrf-protection";
 import fastifyRateLimit from "@fastify/rate-limit";
+import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import * as argon2 from "argon2";
 import { validatePassword } from "@auxinux/shared";
@@ -166,6 +167,7 @@ await app.register(fastifySession, {
 });
 await app.register(fastifyCsrf, { sessionPlugin: "@fastify/session" });
 await app.register(fastifyRateLimit, { global: true, max: 300, timeWindow: "1 minute" });
+await app.register(fastifyMultipart, { limits: { fileSize: 8 * 1024 * 1024 * 1024 } });
 
 // Serve VDM UI static files if dist exists
 if (fs.existsSync(UI_DIST_DIR)) {
@@ -521,6 +523,18 @@ async function ensureStorageMountedOnNode(node: VdmNodeRow, storage: VdmSharedSt
     throw error;
   }
   return storage.name;
+}
+
+// Resolve the storage pool for a create operation: if a shared storage is
+// requested, mount it on the node and return the mounted pool name; otherwise
+// return the local pool (default "local").
+async function resolveCreateStoragePool(node: VdmNodeRow, storagePool?: string, sharedStorageName?: string): Promise<string> {
+  if (sharedStorageName) {
+    const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
+    if (!storage) throw new Error("Shared storage not found");
+    return ensureStorageMountedOnNode(node, storage);
+  }
+  return storagePool ?? "local";
 }
 
 // ── Automatic shared-storage mount reconciliation ──────────────────────────
@@ -1185,7 +1199,7 @@ app.get("/api/vdm/isos", async (req, reply) => {
 // Copy an ISO from one node to another (task-tracked, streamed node-to-node).
 app.post("/api/vdm/isos/copy", async (req, reply) => {
   requireAdmin(req, reply);
-  const { sourceNode: sourceNodeName, filename, targetNode: targetNodeName } = req.body as { sourceNode: string; filename: string; targetNode: string };
+  const { sourceNode: sourceNodeName, filename, targetNode: targetNodeName, targetStoragePool, sharedStorageName } = req.body as { sourceNode: string; filename: string; targetNode: string; targetStoragePool?: string; sharedStorageName?: string };
   if (!sourceNodeName || !filename || !targetNodeName) return reply.status(400).send({ error: "sourceNode, filename and targetNode are required" });
   if (sourceNodeName === targetNodeName) return reply.status(400).send({ error: "Source and target nodes must be different" });
 
@@ -1197,6 +1211,18 @@ app.post("/api/vdm/isos/copy", async (req, reply) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error("ISO copy timeout")), LONG_OPERATION_TIMEOUT_MS);
     try {
+      // Resolve the target pool: either a shared storage (mounted on the target
+      // node) or a local pool on the target node.
+      let targetPool: string | undefined;
+      if (sharedStorageName) {
+        const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
+        if (!storage) throw new Error("Shared storage not found");
+        updateTask(task.id, "running", 10, `Mounting shared storage ${sharedStorageName} on ${targetNodeName}...`);
+        targetPool = await ensureStorageMountedOnNode(targetNode, storage);
+      } else {
+        targetPool = targetStoragePool ?? "local";
+      }
+
       updateTask(task.id, "running", 30, "Downloading ISO from source node...");
       const base = sourceNode.api_url.replace(/\/+$/, "");
       const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download`;
@@ -1210,9 +1236,9 @@ app.post("/api/vdm/isos/copy", async (req, reply) => {
       }
       const expectedSize = Number(res.headers.get("content-length") ?? 0);
 
-      updateTask(task.id, "running", 60, "Uploading ISO to target node...");
+      updateTask(task.id, "running", 60, `Uploading ISO to ${targetPool} on ${targetNodeName}...`);
       const targetBase = targetNode.api_url.replace(/\/+$/, "");
-      const uploadUrl = `${targetBase}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}`;
+      const uploadUrl = `${targetBase}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}&storagePool=${encodeURIComponent(targetPool)}`;
       const uploadRes = await fetch(uploadUrl, {
         method: "POST",
         headers: {
@@ -1232,7 +1258,7 @@ app.post("/api/vdm/isos/copy", async (req, reply) => {
       if (expectedSize > 0 && uploaded.sizeBytes !== expectedSize) {
         throw new Error(`Transfer size mismatch: expected ${expectedSize} bytes, received ${uploaded.sizeBytes}`);
       }
-      updateTask(task.id, "completed", 100, `ISO ${filename} copied to ${targetNodeName}`, undefined, { targetNode: targetNodeName });
+      updateTask(task.id, "completed", 100, `ISO ${filename} copied to ${targetNodeName} (${targetPool})`, undefined, { targetNode: targetNodeName, storagePool: targetPool });
     } catch (err) {
       updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "ISO copy failed");
     } finally {
@@ -1258,6 +1284,150 @@ app.get("/api/vdm/nodes/:name/isos/:filename/download", async (req, reply) => {
   reply.header("Content-Length", res.headers.get("content-length") ?? undefined);
   reply.header("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
   return reply.send(res.body as unknown as NodeJS.ReadableStream);
+});
+
+// ── Managed-file helpers (mirror of the node's api helpers) ────────────────
+type VdmManagedFileType = "iso" | "lxc_template" | "docker_image" | "vm_disk";
+function vdmSanitizeManagedFilename(input: string) {
+  return path.basename(input).replace(/[^\w.+-]/g, "_");
+}
+function vdmResolveManagedFileType(raw?: string): VdmManagedFileType {
+  if (raw === "lxc_template" || raw === "docker_image" || raw === "iso" || raw === "vm_disk") return raw;
+  return "iso";
+}
+function vdmIsAllowedManagedFile(filename: string, type: VdmManagedFileType) {
+  const lower = filename.toLowerCase();
+  if (type === "iso") return lower.endsWith(".iso") || lower.endsWith(".img");
+  if (type === "lxc_template") return lower.endsWith(".tar.gz") || lower.endsWith(".tar.xz") || lower.endsWith(".tar.zst") || lower.endsWith(".tar");
+  if (type === "vm_disk") return lower.endsWith(".qcow2") || lower.endsWith(".img") || lower.endsWith(".raw") || lower.endsWith(".vmdk") || lower.endsWith(".vhd") || lower.endsWith(".vhdx");
+  return lower.endsWith(".tar");
+}
+
+// Upload a managed file (ISO/template) to a node's pool (multipart proxy).
+app.post("/api/vdm/nodes/:name/storage/isos/upload", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { name } = req.params as { name: string };
+  const node = getEnabledNode(name);
+  const data = await req.file();
+  if (!data) return reply.status(400).send({ error: "No file" });
+  const fileType = vdmResolveManagedFileType((data.fields.type as { value?: string } | undefined)?.value);
+  const storagePool = (data.fields.storagePool as { value?: string } | undefined)?.value?.trim() || undefined;
+  const filename = vdmSanitizeManagedFilename(data.filename);
+  if (!vdmIsAllowedManagedFile(filename, fileType)) {
+    await data.file.resume();
+    return reply.status(400).send({ error: `Unsupported file type for ${fileType}` });
+  }
+  const task = createTask({ kind: "upload", label: `Upload ${filename} to ${name}`, targetNode: name, resourceType: fileType, resourceName: filename, createdBy: req.session.username });
+  void (async () => {
+    try {
+      updateTask(task.id, "running", 20, "Uploading file to node...");
+      const base = node.api_url.replace(/\/+$/, "");
+      const uploadUrl = `${base}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}${storagePool ? `&storagePool=${encodeURIComponent(storagePool)}` : ""}`;
+      const uploadRes = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          "x-auxinux-node-token": decryptSecret(node.auth_token),
+          "content-type": "application/octet-stream",
+        },
+        body: data.file as unknown as BodyInit,
+        // @ts-expect-error duplex is required for streaming request bodies in undici
+        duplex: "half",
+      });
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json().catch(() => ({ error: uploadRes.statusText })) as { error?: string };
+        throw new Error(`Upload to ${name} failed: ${err.error ?? uploadRes.statusText}`);
+      }
+      const uploaded = await uploadRes.json() as { filename: string; sizeBytes: number };
+      updateTask(task.id, "completed", 100, `Upload complete: ${uploaded.filename}`, undefined, uploaded);
+    } catch (err) {
+      updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Upload failed");
+    }
+  })();
+  return reply.status(202).send(mapTaskRow(task));
+});
+
+// Download a managed file from a URL into a node's pool (VDM proxy).
+app.post("/api/vdm/nodes/:name/storage/isos/from-url", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { name } = req.params as { name: string };
+  const node = getEnabledNode(name);
+  const body = req.body as { url?: string; displayName?: string; type?: string; storagePool?: string };
+  if (!body.url) return reply.status(400).send({ error: "url is required" });
+  const task = createTask({ kind: "url-download", label: `Download ${body.displayName || body.url} to ${name}`, targetNode: name, resourceType: vdmResolveManagedFileType(body.type), resourceName: body.displayName || body.url, createdBy: req.session.username });
+  void (async () => {
+    try {
+      updateTask(task.id, "running", 20, "Downloading from URL on node...");
+      const base = node.api_url.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/internal/storage/isos/from-url`, {
+        method: "POST",
+        headers: { "x-auxinux-node-token": decryptSecret(node.auth_token), "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+        throw new Error(`Download on ${name} failed: ${err.error ?? res.statusText}`);
+      }
+      const nodeTask = await res.json() as { id: string };
+      updateTask(task.id, "running", 50, "Downloading file on node...");
+      // Poll the node task until it completes.
+      const deadline = Date.now() + LONG_OPERATION_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        const status = await tryFetchNode<{ status: string; error?: string; result?: unknown }>(node, `/api/internal/tasks/${nodeTask.id}`, { status: "running" });
+        if (status?.status === "completed") { updateTask(task.id, "completed", 100, "Download complete", undefined, status.result); return; }
+        if (status?.status === "failed") throw new Error(status.error || "Download failed on node");
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      throw new Error("Download timed out on node");
+    } catch (err) {
+      updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Download failed");
+    }
+  })();
+  return reply.status(202).send(mapTaskRow(task));
+});
+
+// Remote depot catalog (aggregated via first online node).
+app.get("/api/vdm/templates/depot", async (req, reply) => {
+  requireAuth(req, reply);
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 AND status = 'online' ORDER BY name ASC LIMIT 1").all() as VdmNodeRow[];
+  if (nodes.length === 0) return { base: "", items: [] };
+  return tryFetchNode(nodes[0], "/api/internal/templates/depot", { base: "", items: [] });
+});
+
+// Import a depot item into a node's pool (VDM proxy).
+app.post("/api/vdm/templates/depot/import", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, id, storagePool, visibility } = req.body as { node: string; id: string; storagePool?: string; visibility?: string };
+  if (!nodeName || !id) return reply.status(400).send({ error: "node and id are required" });
+  const node = getEnabledNode(nodeName);
+  const task = createTask({ kind: "url-download", label: `Import ${id} from depot to ${nodeName}`, targetNode: nodeName, resourceType: "template", resourceName: id, createdBy: req.session.username });
+  void (async () => {
+    try {
+      updateTask(task.id, "running", 20, "Importing from depot on node...");
+      const base = node.api_url.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/internal/templates/depot/import`, {
+        method: "POST",
+        headers: { "x-auxinux-node-token": decryptSecret(node.auth_token), "content-type": "application/json" },
+        body: JSON.stringify({ id, storagePool, visibility }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+        throw new Error(`Import on ${nodeName} failed: ${err.error ?? res.statusText}`);
+      }
+      const nodeTask = await res.json() as { id: string };
+      updateTask(task.id, "running", 50, "Importing file on node...");
+      const deadline = Date.now() + LONG_OPERATION_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        const status = await tryFetchNode<{ status: string; error?: string; result?: unknown }>(node, `/api/internal/tasks/${nodeTask.id}`, { status: "running" });
+        if (status?.status === "completed") { updateTask(task.id, "completed", 100, "Import complete", undefined, status.result); return; }
+        if (status?.status === "failed") throw new Error(status.error || "Import failed on node");
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      throw new Error("Import timed out on node");
+    } catch (err) {
+      updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Import failed");
+    }
+  })();
+  return reply.status(202).send(mapTaskRow(task));
 });
 
 app.get("/api/vdm/nodes/:name/lxc-templates", async (req, reply) => {
@@ -1663,12 +1833,15 @@ app.post("/api/vdm/vms/:node", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: nodeName } = req.params as { node: string };
   const node = getEnabledNode(nodeName);
-  const body = req.body as { name?: string };
+  const body = req.body as { name?: string; storagePool?: string; sharedStorageName?: string };
   const task = createTask({ kind: "create", label: `Create VM ${body?.name ?? ""} on ${nodeName}`, targetNode: nodeName, resourceType: "vm", resourceName: body?.name, createdBy: req.session.username });
   void (async () => {
     try {
       updateTask(task.id, "running", 20, "Creating virtual machine...");
-      const result = await fetchNode(node, "/api/internal/vms", { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(req.body) });
+      const storagePool = await resolveCreateStoragePool(node, body.storagePool, body.sharedStorageName);
+      const payload: Record<string, unknown> = { ...(req.body as Record<string, unknown>), storagePool };
+      delete payload.sharedStorageName;
+      const result = await fetchNode(node, "/api/internal/vms", { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(payload) });
       updateTask(task.id, "completed", 100, "VM created", undefined, result);
     } catch (err) {
       updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Create failed");
@@ -1987,12 +2160,15 @@ app.post("/api/vdm/lxc/:node", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: nodeName } = req.params as { node: string };
   const node = getEnabledNode(nodeName);
-  const body = req.body as { name?: string };
+  const body = req.body as { name?: string; storagePool?: string; sharedStorageName?: string };
   const task = createTask({ kind: "create", label: `Create LXC ${body?.name ?? ""} on ${nodeName}`, targetNode: nodeName, resourceType: "lxc", resourceName: body?.name, createdBy: req.session.username });
   void (async () => {
     try {
       updateTask(task.id, "running", 20, "Creating container...");
-      const result = await fetchNode(node, "/api/internal/lxc", { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(req.body) });
+      const storagePool = await resolveCreateStoragePool(node, body.storagePool, body.sharedStorageName);
+      const payload: Record<string, unknown> = { ...(req.body as Record<string, unknown>), storagePool };
+      delete payload.sharedStorageName;
+      const result = await fetchNode(node, "/api/internal/lxc", { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(payload) });
       updateTask(task.id, "completed", 100, "Container created", undefined, result);
     } catch (err) {
       updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Create failed");
@@ -2178,12 +2354,15 @@ app.post("/api/vdm/docker/:node", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: nodeName } = req.params as { node: string };
   const node = getEnabledNode(nodeName);
-  const body = req.body as { name?: string };
+  const body = req.body as { name?: string; storagePool?: string; sharedStorageName?: string };
   const task = createTask({ kind: "create", label: `Create container ${body?.name ?? ""} on ${nodeName}`, targetNode: nodeName, resourceType: "docker", resourceName: body?.name, createdBy: req.session.username });
   void (async () => {
     try {
       updateTask(task.id, "running", 20, "Pulling image and creating container...");
-      const result = await fetchNode(node, "/api/internal/docker/containers", { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(req.body) });
+      const storagePool = await resolveCreateStoragePool(node, body.storagePool, body.sharedStorageName);
+      const payload: Record<string, unknown> = { ...(req.body as Record<string, unknown>), storagePool };
+      delete payload.sharedStorageName;
+      const result = await fetchNode(node, "/api/internal/docker/containers", { method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(payload) });
       updateTask(task.id, "completed", 100, "Container created", undefined, result);
     } catch (err) {
       updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Create failed");
