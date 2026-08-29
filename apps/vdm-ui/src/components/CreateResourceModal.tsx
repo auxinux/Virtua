@@ -144,7 +144,11 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
           {storageKind === "local" ? (
             <select className="vdm-input mt-2" value={storagePool} onChange={(e) => setStoragePool(e.target.value)}>
               <option value="">Select local pool…</option>
-              {(pools.data ?? []).filter((p) => p.mounted !== false).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+              {(pools.data ?? []).filter((p) => {
+                const networkTypes = new Set(["nfs", "nfs4", "cifs", "smbfs", "glusterfs", "s3"]);
+                if (!networkTypes.has(p.type ?? "")) return true;
+                return p.mounted !== false;
+              }).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
             </select>
           ) : (
             <select className="vdm-input mt-2" value={sharedStorageName} onChange={(e) => setSharedStorageName(e.target.value)}>

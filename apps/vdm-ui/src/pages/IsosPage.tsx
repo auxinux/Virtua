@@ -63,7 +63,13 @@ function StoragePicker({ node, nodes, storages, value, onChange }: {
     queryFn: () => api.get(`/api/vdm/nodes/${encodeURIComponent(node)}/storage`),
     enabled: !!node,
   });
-  const pools = (poolsQuery.data ?? []).filter((p) => p.mounted !== false);
+  const pools = (poolsQuery.data ?? []).filter((p) => {
+    // Local directory pools are always available; only network/FUSE pools
+    // (nfs/cifs/s3/glusterfs) are filtered by their mount state.
+    const networkTypes = new Set(["nfs", "nfs4", "cifs", "smbfs", "glusterfs", "s3"]);
+    if (!networkTypes.has(p.type ?? "")) return true;
+    return p.mounted !== false;
+  });
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-2 gap-2">
