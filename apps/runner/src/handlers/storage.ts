@@ -26,6 +26,65 @@ async function getLibvirtQemuGroup(): Promise<number | null> {
   return libvirtQemuGroup;
 }
 
+/** execFile bounded by a wall-clock timeout. A FUSE mount whose connection is
+ * stuck (daemon gone, kernel connection not aborted yet) can hang otherwise
+ * innocuous commands — `umount`, `fusermount`, `df`, `findmnt`, even reading
+ * /proc/self/mountinfo — indefinitely, which would pin the privileged runner
+ * until the API's 120s call timeout. */
+function execWithTimeout(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = execFile(cmd, args, (error, stdout, stderr) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve({ stdout: String(stdout), stderr: String(stderr) });
+    });
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new Error(`${cmd} timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+  });
+}
+
+/** True when a syscall failed because the FUSE transport is gone. */
+function isNotConnectedError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOTCONN" || code === "ESTALE" || code === "EIO" || code === "EHOSTDOWN";
+}
+
+/** Release any stale FUSE mountpoint before touching the path. Every
+ * filesystem operation — even `mkdir` — on a dead FUSE mountpoint fails with
+ * ENOTCONN ("socket is not connected"), and hangs forever when the kernel
+ * FUSE connection has not been aborted yet. A lazy unmount (-uz) releases the
+ * mountpoint and aborts the connection in both cases, which is what makes a
+ * reconciliation remount possible after the rclone daemon died. */
+async function clearStaleFuseMount(poolPath: string): Promise<void> {
+  for (const cmd of ["fusermount3", "fusermount"]) {
+    await execWithTimeout(cmd, ["-uz", poolPath], 10_000).catch(() => {});
+  }
+}
+
+/** Serialize mount/umount operations per mountpoint. The 60s reconciliation
+ * and a manual mount/unmount can overlap on the same path; without a lock the
+ * second caller lazily unmounts what the first just mounted (or vice versa),
+ * which manifests as endless mount-fail loops in the logs. */
+const poolOpLocks = new Map<string, Promise<unknown>>();
+async function withPoolOpLock<T>(poolPath: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(poolPath);
+  const previous = poolOpLocks.get(key) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  const tracked = next.catch(() => {});
+  poolOpLocks.set(key, tracked);
+  tracked.finally(() => {
+    if (poolOpLocks.get(key) === tracked) poolOpLocks.delete(key);
+  });
+  return next;
+}
+
 async function ensureLibvirtPoolAccess(poolPath: string): Promise<void> {
   await fs.mkdir(poolPath, { recursive: true });
   const dataDir = process.env.AUXINUX_DATA_DIR ?? "/var/lib/auxinuxvirtual";
@@ -505,8 +564,9 @@ async function getPoolDf(poolPath: string) {
   // A dead FUSE mount (rclone daemon crashed) makes `df` fail with ENOTCONN
   // ("Transport endpoint is not connected"). Report zeros instead of throwing,
   // so a dead mount surfaces as 0 bytes rather than a 500 on every status poll.
+  // Bounded: on a stuck kernel FUSE connection `df` itself can hang forever.
   try {
-    const { stdout } = await execFileAsync("df", ["-B1", "--output=size,used,avail", poolPath]);
+    const { stdout } = await execWithTimeout("df", ["-B1", "--output=size,used,avail", poolPath], 5_000);
     const lines = stdout.trim().split("\n");
     if (lines.length < 2) return { totalBytes: 0, usedBytes: 0, freeBytes: 0 };
     const parts = lines[1].trim().split(/\s+/);
@@ -527,7 +587,9 @@ async function getPoolDf(poolPath: string) {
 async function isPoolAlive(poolPath: string): Promise<{ alive: boolean }> {
   return probePoolAlive(poolPath, {
     isMountpoint: async (candidate) => {
-      await execFileAsync("findmnt", ["-n", "-o", "TARGET", candidate]);
+      // `findmnt` reads kernel mount state, but on a stuck FUSE connection even
+      // reading mountinfo can hang — bound it so the probe never pins the runner.
+      await execWithTimeout("findmnt", ["-n", "-o", "TARGET", candidate], 5_000);
       return true;
     },
     readDirectory: (candidate) => fs.readdir(candidate),
@@ -565,8 +627,14 @@ function injectMountOption(options: string, key: string, value: string): string 
 }
 
 async function mountPool(p: Record<string, unknown>) {
-  const name = p.name as string | undefined;
   const mountPath = validateMountPath(p.path, "path");
+  // Serialize mount/umount per mountpoint: the VDM reconciliation loop and
+  // manual actions can otherwise interleave and unmount each other's work.
+  return withPoolOpLock(mountPath, () => mountPoolLocked(p, mountPath));
+}
+
+async function mountPoolLocked(p: Record<string, unknown>, mountPath: string) {
+  const name = p.name as string | undefined;
   const rawType = (p.type as string | undefined) ?? "directory";
   if (!["directory", "nfs", "nfs4", "cifs", "smbfs", "glusterfs", "s3"].includes(rawType)) {
     throw new Error(`Invalid pool type: ${rawType}`);
@@ -720,15 +788,27 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
   await fs.writeFile(configPath, `${lines.join("\n")}\n`, { mode: 0o600 });
 
   // rclone mount exposes the bucket as a FUSE filesystem at the mount path.
-  await ensureLibvirtPoolAccess(mountPath);
+  // Clear any stale FUSE entry from a previous dead mount BEFORE touching the
+  // path: any filesystem operation on a dead FUSE mountpoint — including the
+  // mkdir in ensureLibvirtPoolAccess — fails with ENOTCONN (or hangs) and was
+  // the reason reconciliation remounts failed in a loop on the same error.
+  await clearStaleFuseMount(mountPath);
+  try {
+    await ensureLibvirtPoolAccess(mountPath);
+  } catch (error) {
+    if (!isNotConnectedError(error)) throw error;
+    // The lazy unmount raced a stuck kernel connection; release and retry once.
+    await clearStaleFuseMount(mountPath);
+    await ensureLibvirtPoolAccess(mountPath);
+  }
   // `--allow-other` requires `user_allow_other` in /etc/fuse.conf, otherwise the
   // rclone daemon dies right after mounting (mount registered, then ENOTCONN on
   // any access). Ensure it is present so the mount survives.
   await ensureFuseAllowOther();
-  // Clear any stale FUSE entry from a previous dead mount before mounting, so a
-  // remount after a crash doesn't fail on a zombie mountpoint.
-  await execFileAsync("fusermount3", ["-uz", mountPath]).catch(() => {});
-  await execFileAsync("fusermount", ["-uz", mountPath]).catch(() => {});
+  // Defensive second pass: the liveness probe or a concurrent caller may have
+  // remounted between the first clear and now.
+  await execWithTimeout("fusermount3", ["-uz", mountPath], 10_000).catch(() => {});
+  await execWithTimeout("fusermount", ["-uz", mountPath], 10_000).catch(() => {});
   const cacheArg = vfsCache === "off" ? ["--vfs-cache-mode=off"] : [`--vfs-cache-mode=${vfsCache}`];
   // Run rclone mount in background (daemon) so it survives the runner call.
   // --daemon returns immediately and MASKS failures (bad credentials, unreachable
@@ -767,17 +847,23 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
 
 async function umountPool(p: Record<string, unknown>) {
   const poolPath = validateMountPath(p.path, "path");
+  return withPoolOpLock(poolPath, () => umountPoolLocked(p, poolPath));
+}
+
+async function umountPoolLocked(p: Record<string, unknown>, poolPath: string) {
   const poolName = p.name as string | undefined;
   // S3 / rclone mounts also expose a FUSE mountpoint; unmount it with fusermount/rclone.
   // A DEAD FUSE mount (rclone daemon crashed) reports ENOTCONN and refuses a normal
   // unmount — use lazy unmount (-l / -uz) so the stale mountpoint is released and a
   // later remount can succeed instead of looping on a zombie FUSE entry.
-  await execFileAsync("umount", [poolPath]).catch(() => {});
-  await execFileAsync("umount", ["-l", poolPath]).catch(() => {});
-  await execFileAsync("fusermount3", ["-u", poolPath]).catch(() => {});
-  await execFileAsync("fusermount3", ["-uz", poolPath]).catch(() => {});
-  await execFileAsync("fusermount", ["-u", poolPath]).catch(() => {});
-  await execFileAsync("fusermount", ["-uz", poolPath]).catch(() => {});
+  // Every unmount attempt is bounded: a stuck kernel FUSE connection can hang
+  // even a lazy unmount, and we must not pin the runner for the 120s call timeout.
+  await execWithTimeout("umount", [poolPath], 10_000).catch(() => {});
+  await execWithTimeout("umount", ["-l", poolPath], 10_000).catch(() => {});
+  await execWithTimeout("fusermount3", ["-u", poolPath], 10_000).catch(() => {});
+  await execWithTimeout("fusermount3", ["-uz", poolPath], 10_000).catch(() => {});
+  await execWithTimeout("fusermount", ["-u", poolPath], 10_000).catch(() => {});
+  await execWithTimeout("fusermount", ["-uz", poolPath], 10_000).catch(() => {});
   const fstab = await fs.readFile("/etc/fstab", "utf8").catch(() => "");
   const escapedMountPath = fstabEscape(poolPath);
   const filtered = fstab.split("\n").filter((line) => {

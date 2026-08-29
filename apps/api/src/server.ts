@@ -909,6 +909,11 @@ app.setErrorHandler((error, req, reply) => {
   const message = error instanceof Error ? error.message : "Internal Server Error";
   const isProduction = process.env.NODE_ENV === "production";
   const isAdmin = req.session?.role === "ADMIN";
+  // Node-to-node callers authenticate with the shared node token, not a
+  // session — VDM must see the REAL failure reason (rclone log tail, mount
+  // error…) to log it and heal, otherwise every 5xx surfaces as a masked
+  // "Internal error (ID: …)" in the VDM logs and the root cause is invisible.
+  const isInternalNodeCall = `${req.headers["x-auxinux-node-token"] ?? ""}`.trim().length > 0;
 
   // 4xx errors carry intentional user-facing feedback (validation, auth,
   // permission denied) — pass them through verbatim. Only 5xx errors are
@@ -928,7 +933,7 @@ app.setErrorHandler((error, req, reply) => {
   recordNodeError("error", classifyNodeCategory(req.url ?? ""), `${req.method} ${req.url} — ${message}`.slice(0, 2000));
 
   let clientMessage: string;
-  if (!isProduction || isAdmin) {
+  if (!isProduction || isAdmin || isInternalNodeCall) {
     clientMessage = message;
   } else {
     clientMessage = `Internal error (ID: ${errorId}). Ask an admin to check the API logs for this ID.`;

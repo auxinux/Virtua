@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/cli",
-  "version": "0.7.60",
+  "version": "0.7.61",
   "type": "module",
   "bin": {
     "virtua": "./dist/cli.js"

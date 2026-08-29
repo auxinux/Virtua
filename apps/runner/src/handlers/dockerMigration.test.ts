@@ -27,6 +27,26 @@ describe("buildDockerMigrationManifest", () => {
     });
   });
 
+  it("normalizes wildcard hostIp instead of failing IPv4 validation", () => {
+    const manifest = buildDockerMigrationManifest({
+      name: "web",
+      ports: [
+        { hostPort: 3000, containerPort: 3000, protocol: "tcp", hostIp: "::" },
+        { hostPort: 3000, containerPort: 3000, protocol: "tcp", hostIp: "0.0.0.0" },
+        { hostPort: 8443, containerPort: 443, protocol: "tcp", hostIp: "192.168.1.5" },
+      ],
+      mounts: [],
+      state: "running",
+    }, "web-migrated");
+
+    // Dual-stack wildcards collapse to ONE wildcard publish (no hostIp); the
+    // explicit IPv4 binding is preserved verbatim.
+    expect(manifest.ports).toEqual([
+      { hostPort: 3000, containerPort: 3000, protocol: "tcp", hostIp: undefined },
+      { hostPort: 8443, containerPort: 443, protocol: "tcp", hostIp: "192.168.1.5" },
+    ]);
+  });
+
   it("refuses mounted data instead of silently losing it", () => {
     expect(() => buildDockerMigrationManifest({
       name: "db",
