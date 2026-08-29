@@ -9,6 +9,8 @@ import * as readline from "readline";
 import pc from "picocolors";
 import Table from "cli-table3";
 import ora from "ora";
+import argon2 from "argon2";
+import Database from "better-sqlite3";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 type ResourceKind = "vm" | "lxc" | "docker";
@@ -164,6 +166,9 @@ function printHelp() {
       ["virtua list", "Toutes les machines (VM + LXC + Docker)"],
       ["virtua gui", "Interface graphique terminal (dialog)"],
       ["virtua setlang EN|FR", "Changer la langue"],
+      ["sudo virtua admin list", "Lister les comptes (root requis)"],
+      ["sudo virtua admin reset [user]", "Réinitialiser le mot de passe (root requis)"],
+      ["sudo virtua admin create [user]", "Créer un compte admin (root requis)"],
     ]},
     { title: "MACHINES (vm | lxc | docker)", cmds: [
       ["virtua <type> list", "Lister les machines"],
@@ -190,6 +195,9 @@ function printHelp() {
       ["virtua list", "All machines (VM + LXC + Docker)"],
       ["virtua gui", "Graphical terminal UI (dialog)"],
       ["virtua setlang EN|FR", "Change language"],
+      ["sudo virtua admin list", "List accounts (root required)"],
+      ["sudo virtua admin reset [user]", "Reset password (root required)"],
+      ["sudo virtua admin create [user]", "Create an admin account (root required)"],
     ]},
     { title: "MACHINES (vm | lxc | docker)", cmds: [
       ["virtua <type> list", "List machines"],
@@ -655,6 +663,133 @@ function handleKernel(raw = false) {
   console.log(`\n${pc.bold("Kernel")}\n`);
   kv(L("Current", "Actuel"), release);
   console.log("");
+}
+
+// ── Admin (local DB access — requires root) ─────────────────────────────────
+const ADMIN_DB_PATH = process.env.AUXINUX_DB ?? "/var/lib/auxinux/db/auxinux.sqlite";
+
+function requireRootForAdmin() {
+  if (!isRootUser()) {
+    throw new Error(L(
+      "This command requires root. Run: sudo virtua admin <action>",
+      "Cette commande requiert root. Exécutez : sudo virtua admin <action>",
+    ));
+  }
+}
+
+function openAdminDb() {
+  if (!fs.existsSync(ADMIN_DB_PATH)) {
+    throw new Error(L(
+      `Database not found at ${ADMIN_DB_PATH}. Is Virtua installed on this host?`,
+      `Base de données introuvable à ${ADMIN_DB_PATH}. Virtua est-il installé sur cet hôte ?`,
+    ));
+  }
+  return new Database(ADMIN_DB_PATH, { readonly: false });
+}
+
+function listAdminUsers() {
+  requireRootForAdmin();
+  const db = openAdminDb();
+  try {
+    const rows = db.prepare("SELECT id, username, role, display_name, must_change_password, suspended FROM users ORDER BY id").all() as Array<{
+      id: number; username: string; role: string; display_name: string | null; must_change_password: number; suspended: number;
+    }>;
+    if (!rows.length) {
+      console.log(pc.yellow(L("No users found.", "Aucun utilisateur trouvé.")));
+      return;
+    }
+    printOutput(rows.map((r) => ({
+      id: r.id,
+      username: r.username,
+      role: r.role,
+      displayName: r.display_name ?? "",
+      mustChangePassword: r.must_change_password === 1,
+      suspended: r.suspended === 1,
+    })));
+  } finally {
+    db.close();
+  }
+}
+
+async function resetAdminPassword(username: string) {
+  requireRootForAdmin();
+  const target = username || "admin";
+  const db = openAdminDb();
+  try {
+    const row = db.prepare("SELECT id FROM users WHERE username = ?").get(target) as { id: number } | undefined;
+    if (!row) {
+      throw new Error(L(
+        `User "${target}" not found. Use: sudo virtua admin list`,
+        `Utilisateur "${target}" introuvable. Utilisez : sudo virtua admin list`,
+      ));
+    }
+    const password = await prompt(L("New password: ", "Nouveau mot de passe : "), true);
+    if (!password) throw new Error(L("Password cannot be empty.", "Le mot de passe ne peut pas être vide."));
+    if (password.length < 12) {
+      throw new Error(L(
+        "Password must be at least 12 characters, contain a letter and a digit.",
+        "Le mot de passe doit faire au moins 12 caractères, contenir une lettre et un chiffre.",
+      ));
+    }
+    const hash = await argon2.hash(password);
+    db.prepare("UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?").run(hash, row.id);
+    console.log(pc.green(L(
+      `Password for "${target}" reset. It must be changed at next login.`,
+      `Mot de passe de "${target}" réinitialisé. Il devra être changé à la prochaine connexion.`,
+    )));
+  } finally {
+    db.close();
+  }
+}
+
+async function createAdminUser(username: string) {
+  requireRootForAdmin();
+  const target = username || "admin";
+  const db = openAdminDb();
+  try {
+    const existing = db.prepare("SELECT id FROM users WHERE username = ?").get(target) as { id: number } | undefined;
+    if (existing) {
+      throw new Error(L(
+        `User "${target}" already exists. Use: sudo virtua admin reset <username>`,
+        `L'utilisateur "${target}" existe déjà. Utilisez : sudo virtua admin reset <username>`,
+      ));
+    }
+    const password = await prompt(L("New password: ", "Nouveau mot de passe : "), true);
+    if (!password || password.length < 12) {
+      throw new Error(L(
+        "Password must be at least 12 characters, contain a letter and a digit.",
+        "Le mot de passe doit faire au moins 12 caractères, contenir une lettre et un chiffre.",
+      ));
+    }
+    const hash = await argon2.hash(password);
+    db.prepare("INSERT INTO users (username, password_hash, role, display_name, must_change_password) VALUES (?, ?, 'ADMIN', ?, 0)").run(target, hash, target);
+    console.log(pc.green(L(
+      `Admin user "${target}" created.`,
+      `Utilisateur admin "${target}" créé.`,
+    )));
+  } finally {
+    db.close();
+  }
+}
+
+async function handleAdmin(args: string[]) {
+  const action = normalizeSubcommand(args[0]);
+  switch (action) {
+    case "list": case "ls": case "":
+      listAdminUsers();
+      return;
+    case "reset": case "adminreset":
+      await resetAdminPassword(args[1]);
+      return;
+    case "create": case "add":
+      await createAdminUser(args[1]);
+      return;
+    default:
+      throw new Error(L(
+        `Unknown admin action: ${action}. Available: list | reset <username> | create <username>`,
+        `Action admin inconnue : ${action}. Disponibles : list | reset <username> | create <username>`,
+      ));
+  }
 }
 
 async function handleLocalHealth() {
@@ -1207,6 +1342,9 @@ async function main() {
         return;
       case "version": case "-v":
         handleVersion();
+        return;
+      case "admin":
+        await handleAdmin(args.slice(1));
         return;
       case "vm": case "lxc": case "docker":
         if (shouldUseLocalRunner()) { await handleLocalResource(command, args.slice(1)); return; }
