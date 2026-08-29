@@ -1187,7 +1187,7 @@ app.get("/api/vdm/isos", async (req, reply) => {
   const results = await Promise.all(nodes.map(async (node) => {
     if (node.status !== "online") return [];
     try {
-      const isos = await tryFetchNode<Array<{ filename: string; displayName?: string; sizeBytes: number; createdAt?: string | null; storagePool?: string | null }>>(node, "/api/internal/storage/isos", []);
+      const isos = await tryFetchNode<Array<{ filename: string; displayName?: string; sizeBytes: number; createdAt?: string | null; storagePool?: string | null; type?: string }>>(node, "/api/internal/storage/isos", []);
       return isos.map((iso) => ({ ...iso, nodeName: node.name, nodeDisplayName: node.display_name ?? node.name }));
     } catch {
       return [];
@@ -1268,6 +1268,22 @@ app.post("/api/vdm/isos/copy", async (req, reply) => {
 
   return reply.status(202).send(mapTaskRow(task));
 });
+// Delete a managed ISO/template file on a node (VDM proxy).
+app.delete("/api/vdm/nodes/:name/storage/isos/:filename", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { name, filename } = req.params as { name: string; filename: string };
+  const { type } = req.query as { type?: string };
+  const node = getEnabledNode(name);
+  const base = node.api_url.replace(/\/+$/, "");
+  const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}${type ? `?type=${encodeURIComponent(type)}` : ""}`;
+  const res = await fetch(url, { method: "DELETE", headers: { "x-auxinux-node-token": decryptSecret(node.auth_token) } });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+    return reply.status(res.status).send({ error: err.error ?? res.statusText });
+  }
+  return res.json();
+});
+
 // Proxy-download an ISO from a node (browser has no node token).
 app.get("/api/vdm/nodes/:name/isos/:filename/download", async (req, reply) => {
   requireAuth(req, reply);

@@ -5033,7 +5033,9 @@ app.delete("/api/internal/storage/pools/:name", async (req, reply) => {
 
 app.get("/api/internal/storage/isos", async (req, reply) => {
   requireInternalNodeToken(req);
-  return (await listManagedFiles()).filter((entry) => entry.type === "iso");
+  // Return ALL managed files (ISO, LXC templates, docker images, VM disks) so
+  // VDM can manage them uniformly. The `type` field lets the UI group/filter.
+  return listManagedFiles();
 });
 
 // Stream a managed ISO file (cross-node copy / VDM download).
@@ -5078,6 +5080,32 @@ app.post("/api/internal/storage/isos/upload", async (req, reply) => {
   const stat = await fs.promises.stat(destPath);
   db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 0, ?)").run(safeName, safeName, stat.size, poolName ?? null);
   return { ok: true, filename: safeName, sizeBytes: stat.size, storagePool: poolName ?? null };
+});
+
+// Delete a managed ISO/template file (VDM proxy target).
+app.delete("/api/internal/storage/isos/:filename", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { filename } = req.params as { filename: string };
+  const fileType = resolveManagedFileType((req.query as { type?: string }).type);
+  const safeName = sanitizeManagedFilename(filename);
+  const fileRow = db.prepare("SELECT storage_pool FROM iso_files WHERE filename = ? AND type = ?").get(safeName, fileType) as { storage_pool: string | null } | undefined;
+  let managedDir = getManagedStorageDir(fileType);
+  if (fileRow?.storage_pool) {
+    const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(fileRow.storage_pool) as { path: string } | undefined;
+    if (pool) managedDir = pool.path;
+  }
+  const fullPath = path.join(managedDir, safeName);
+  const realPath = await fs.promises.realpath(fullPath).catch(() => null);
+  if (!realPath || !realPath.startsWith(managedDir)) return reply.status(400).send({ error: "Invalid path" });
+  if (fileType === "vm_disk") {
+    const attachedVm = await isManagedVmDiskAttached(realPath);
+    if (attachedVm) return reply.status(409).send({ error: `Disk image is attached to VM ${attachedVm}` });
+  }
+  await fs.promises.unlink(realPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  db.prepare("DELETE FROM iso_files WHERE filename = ? AND type = ?").run(safeName, fileType);
+  return { ok: true };
 });
 
 // Download a managed file from a URL into a pool (VDM proxy target).

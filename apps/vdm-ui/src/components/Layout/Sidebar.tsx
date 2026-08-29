@@ -159,6 +159,7 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
 export function Sidebar() {
   const [inventoryOpen, setInventoryOpen] = useState(true);
   const [storageOpen, setStorageOpen] = useState(false);
+  const [dockerOpen, setDockerOpen] = useState(false);
 
   const nodesQuery = useQuery({
     queryKey: ["vdm-nodes"],
@@ -225,9 +226,24 @@ export function Sidebar() {
           <p className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Resources</p>
           <NavItem to="/vms" icon={ICONS.vm} label="Virtual Machines" />
           <NavItem to="/lxc" icon={ICONS.container} label="LXC Containers" />
-          <NavItem to="/docker" icon={ICONS.docker} label="Docker" />
-          <NavItem to="/docker/compose" icon={ICONS.docker} label="Docker Compose" />
-          <NavItem to="/docker/volumes" icon={ICONS.storage} label="Docker Volumes" />
+          {/* Docker group (collapsible) */}
+          <div>
+            <button
+              onClick={() => setDockerOpen((v) => !v)}
+              className="flex items-center gap-2.5 w-full px-3 py-2 rounded text-sm text-vdm-textMuted hover:text-vdm-text hover:bg-vdm-surfaceHover transition-colors"
+            >
+              <Icon path={ICONS.docker} />
+              <span className="flex-1 text-left">Docker</span>
+              <Icon path={dockerOpen ? ICONS.chevronDown : ICONS.chevronRight} className="w-3 h-3 text-vdm-textMuted" />
+            </button>
+            {dockerOpen && (
+              <div className="ml-3 border-l border-vdm-border/40 pl-2 space-y-0.5">
+                <NavItem to="/docker" icon={ICONS.docker} label="Containers" />
+                <NavItem to="/docker/compose" icon={ICONS.docker} label="Compose" />
+                <NavItem to="/docker/volumes" icon={ICONS.storage} label="Volumes" />
+              </div>
+            )}
+          </div>
           <NavItem to="/isos" icon={ICONS.storage} label="ISO Library" />
         </div>
 

@@ -12,6 +12,7 @@ interface VdmIso {
   sizeBytes: number;
   createdAt?: string | null;
   storagePool?: string | null;
+  type?: string;
   nodeName: string;
   nodeDisplayName: string;
 }
@@ -43,6 +44,7 @@ const ICONS = {
   url: "M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244",
   catalog: "M2.25 12.75V12A2.25 2.25 0 0 1 4.5 9.75h15A2.25 2.25 0 0 1 21.75 12v.75m-8.69-6.44-2.12-2.12a1.5 1.5 0 0 0-1.061-.44H4.5A2.25 2.25 0 0 0 2.25 6v12a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9a2.25 2.25 0 0 0-2.25-2.25h-5.379a1.5 1.5 0 0 1-1.06-.44Z",
   close: "M6 18 18 6M6 6l12 12",
+  trash: "m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0",
 };
 
 function formatBytes(bytes: number): string {
@@ -284,6 +286,7 @@ export default function IsosPage() {
   const [showUrl, setShowUrl] = useState(false);
   const [showDepot, setShowDepot] = useState(false);
   const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
 
   const isosQuery = useQuery<VdmIso[]>({ queryKey: ["vdm-isos"], queryFn: () => api.get("/api/vdm/isos"), refetchInterval: 30_000 });
   const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
@@ -312,10 +315,19 @@ export default function IsosPage() {
     mutationFn: (p: { node: string; id: string; storagePool: string | undefined }) => api.post("/api/vdm/templates/depot/import", p),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-tasks-recent"] }); navigate("/tasks"); },
   });
+  const deleteMut = useMutation({
+    mutationFn: (p: { node: string; filename: string; type: string }) =>
+      api.delete(`/api/vdm/nodes/${encodeURIComponent(p.node)}/storage/isos/${encodeURIComponent(p.filename)}?type=${encodeURIComponent(p.type)}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-isos"] }); },
+  });
 
   const isos = isosQuery.data ?? [];
   const needle = search.trim().toLowerCase();
-  const filtered = needle ? isos.filter((iso) => `${iso.filename} ${iso.nodeDisplayName} ${iso.nodeName}`.toLowerCase().includes(needle)) : isos;
+  const filtered = isos.filter((iso) => {
+    if (typeFilter !== "all" && (iso.type ?? "iso") !== typeFilter) return false;
+    if (!needle) return true;
+    return `${iso.filename} ${iso.nodeDisplayName} ${iso.nodeName}`.toLowerCase().includes(needle);
+  });
   const downloadUrl = (iso: VdmIso) => `/api/vdm/nodes/${encodeURIComponent(iso.nodeName)}/isos/${encodeURIComponent(iso.filename)}/download`;
 
   return (
@@ -326,6 +338,13 @@ export default function IsosPage() {
           <p className="text-sm text-vdm-textMuted">{isos.length} file{isos.length !== 1 ? "s" : ""} across all nodes</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <select className="vdm-input w-40" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="all">All types</option>
+            <option value="iso">ISO</option>
+            <option value="lxc_template">LXC template</option>
+            <option value="docker_image">Docker image</option>
+            <option value="vm_disk">VM disk</option>
+          </select>
           <input className="vdm-input w-48" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />
           {isAdmin && (
             <>
@@ -350,16 +369,17 @@ export default function IsosPage() {
           <div className="p-10 text-center text-sm text-vdm-textMuted">No files found.</div>
         ) : (
           <table className="vdm-table">
-            <thead><tr><th>Name</th><th>Node</th><th>Size</th><th>Storage</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>Type</th><th>Node</th><th>Size</th><th>Storage</th><th></th></tr></thead>
             <tbody>
               {filtered.map((iso) => (
                 <tr key={`${iso.nodeName}:${iso.filename}`} className="hover:bg-vdm-bg/40">
                   <td>
                     <div className="flex items-center gap-2">
                       <Icon path={ICONS.iso} className="w-4 h-4 text-vdm-accent" />
-                      <span className="font-mono text-xs text-vdm-text truncate max-w-64" title={iso.filename}>{iso.filename}</span>
+                      <span className="font-mono text-xs text-vdm-text truncate max-w-56" title={iso.filename}>{iso.filename}</span>
                     </div>
                   </td>
+                  <td><span className="pill-gray text-[10px]">{iso.type ?? "iso"}</span></td>
                   <td className="text-sm text-vdm-textMuted">{iso.nodeDisplayName}</td>
                   <td className="text-xs text-vdm-textMuted">{formatBytes(iso.sizeBytes)}</td>
                   <td className="text-xs text-vdm-textMuted">{iso.storagePool ?? "local"}</td>
@@ -368,9 +388,18 @@ export default function IsosPage() {
                       <Icon path={ICONS.download} className="w-3.5 h-3.5" />Download
                     </a>
                     {isAdmin && (
-                      <button className="vdm-btn-ghost text-xs inline-flex items-center gap-1" onClick={() => setCopyTarget(iso)}>
-                        <Icon path={ICONS.copy} className="w-3.5 h-3.5" />Copy…
-                      </button>
+                      <>
+                        <button className="vdm-btn-ghost text-xs inline-flex items-center gap-1" onClick={() => setCopyTarget(iso)}>
+                          <Icon path={ICONS.copy} className="w-3.5 h-3.5" />Copy…
+                        </button>
+                        <button className="vdm-btn-danger text-xs inline-flex items-center gap-1" onClick={async () => {
+                          if (await confirm({ title: `Delete ${iso.filename}?`, message: "This file will be permanently removed from the node.", confirmLabel: "Delete" })) {
+                            deleteMut.mutate({ node: iso.nodeName, filename: iso.filename, type: iso.type ?? "iso" });
+                          }
+                        }}>
+                          <Icon path={ICONS.trash} className="w-3.5 h-3.5" />Delete
+                        </button>
+                      </>
                     )}
                   </td>
                 </tr>
