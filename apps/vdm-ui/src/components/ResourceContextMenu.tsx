@@ -133,7 +133,7 @@ export function ResourceContextMenu({ menu, onClose }: {
 
   return (
     <>
-      <ContextMenu state={menu} onClose={onClose} />
+      <ContextMenu state={{ x: menu.x, y: menu.y, entries }} onClose={onClose} />
       {confirmDialog}
       {promptDialog}
       {showMigrate && r.kind !== "docker" && (

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
+import { CreateResourceModal } from "@/components/CreateResourceModal";
 import type { VdmTask } from "@/types/vdm";
 
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
@@ -17,6 +18,8 @@ export function TopBar() {
   const { user, logout } = useVdmAuth();
   const navigate = useNavigate();
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [createType, setCreateType] = useState<"vm" | "lxc" | "docker" | null>(null);
 
   const tasksQuery = useQuery<VdmTask[]>({
     queryKey: ["vdm-tasks-running"],
@@ -64,6 +67,42 @@ export function TopBar() {
 
       <div className="flex-1" />
 
+      {/* Add resource */}
+      <div className="relative">
+        <button
+          onClick={() => setShowAddMenu((v) => !v)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-vdm-accent text-white text-sm font-medium hover:bg-vdm-accentHover transition-colors"
+        >
+          <Icon path="M12 4.5v15m7.5-7.5h-15" className="w-4 h-4" />
+          Add
+        </button>
+        {showAddMenu && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setShowAddMenu(false)} />
+            <div className="absolute right-0 top-full mt-1 w-52 bg-vdm-surface border border-vdm-border rounded-lg shadow-xl z-20 overflow-hidden">
+              <button
+                onClick={() => { setShowAddMenu(false); setCreateType("vm"); }}
+                className="w-full text-left px-3 py-2 text-sm text-vdm-text hover:bg-vdm-surfaceHover transition-colors"
+              >
+                Virtual Machine
+              </button>
+              <button
+                onClick={() => { setShowAddMenu(false); setCreateType("lxc"); }}
+                className="w-full text-left px-3 py-2 text-sm text-vdm-text hover:bg-vdm-surfaceHover transition-colors"
+              >
+                LXC Container
+              </button>
+              <button
+                onClick={() => { setShowAddMenu(false); setCreateType("docker"); }}
+                className="w-full text-left px-3 py-2 text-sm text-vdm-text hover:bg-vdm-surfaceHover transition-colors"
+              >
+                Docker Container
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
       {/* User menu */}
       <div className="relative">
         <button
@@ -102,6 +141,7 @@ export function TopBar() {
           </>
         )}
       </div>
+      {createType && <CreateResourceModal open onClose={() => setCreateType(null)} type={createType} />}
     </header>
   );
 }

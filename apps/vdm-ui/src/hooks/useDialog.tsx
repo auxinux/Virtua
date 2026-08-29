@@ -21,8 +21,8 @@ export function useConfirm() {
       message={state?.message}
       confirmLabel={state?.confirmLabel}
       tone={state?.tone ?? "danger"}
-      onConfirm={() => state?.resolve(true)}
-      onClose={() => state?.resolve(false)}
+      onConfirm={() => { state?.resolve(true); setState(null); }}
+      onClose={() => { state?.resolve(false); setState(null); }}
     />
   );
 
@@ -50,8 +50,8 @@ export function usePrompt() {
       label={state?.label}
       placeholder={state?.placeholder}
       confirmLabel={state?.confirmLabel}
-      onSubmit={(v) => state?.resolve(v)}
-      onClose={() => state?.resolve(null)}
+      onSubmit={(v) => { state?.resolve(v); setState(null); }}
+      onClose={() => { state?.resolve(null); setState(null); }}
     />
   );
 
