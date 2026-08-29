@@ -1,4 +1,4 @@
-import { execFile } from "child_process";
+import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs/promises";
 import * as path from "path";
@@ -93,6 +93,32 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/** Launch a daemon detached from the runner and DON'T wait for it. `rclone
+ * mount --daemon` does not return until the initial FUSE handshake (which does
+ * a network listing) completes; waiting on it and then killing the parent on a
+ * timeout leaves a half-mounted daemon (df shows the mount, but the runner
+ * already reported failure, so the pool is never registered). Detach + unref
+ * so the daemon outlives the runner call, then poll the mountpoint instead. */
+function spawnDetached(command: string, args: string[]): void {
+  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  child.unref();
+}
+
+/** True once the path is a real, readable mountpoint (findmnt + readdir). */
+async function isMountpointReadable(mountPath: string): Promise<boolean> {
+  try {
+    await execWithTimeout("findmnt", ["-n", "-o", "TARGET", mountPath], 5_000);
+  } catch {
+    return false;
+  }
+  try {
+    await withTimeout(fs.readdir(mountPath), 3_000, `readdir ${mountPath}`);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -864,36 +890,35 @@ async function mountS3Pool(args: { name?: string; mountPath: string; p: Record<s
   }
 
   const cacheArg = vfsCache === "off" ? ["--vfs-cache-mode=off"] : [`--vfs-cache-mode=${vfsCache}`];
-  // Run rclone mount in background (daemon) so it survives the runner call.
-  // --daemon MASKS failures (bad credentials, unreachable endpoint, dead FUSE),
-  // so we verify the mount actually holds below — and we bound the exec so the
-  // runner never waits the full 120s on a stuck FUSE.
-  await execWithTimeout("rclone", [
+  // Launch rclone mount DETACHED and do not wait on it. `rclone mount --daemon`
+  // blocks until the initial FUSE handshake (network listing) completes; on a
+  // slow S3 endpoint killing the parent on a timeout leaves a half-mounted
+  // daemon (df shows the mount but the pool is never registered). Instead we
+  // fire-and-forget the daemon, then poll the mountpoint for up to ~60s.
+  spawnDetached("rclone", [
     "--config", configPath, "mount", `${remoteName}:${bucket}`,
     mountPath, "--daemon", ...cacheArg, ...netTimeoutArgs,
     "--allow-other", "--dir-cache-time", "10m",
     "--log-file", logPath, "--log-level", "INFO",
-  ], 45_000);
+  ]);
 
-  // Verify the mount came up and is ALIVE. Reuse the same liveness probe as
-  // isPoolAlive: it must be a real mountpoint (findmnt) AND readable (readdir),
-  // so neither an empty directory nor a daemon that died right after mounting
-  // is mistaken for a healthy mount. Poll for a short window.
-  const deadline = Date.now() + 8000;
+  // Poll until the mountpoint is registered AND readable. The poll window is
+  // generous (slow OVH endpoints) but stays well under the API's 120s timeout.
+  const deadline = Date.now() + 60_000;
   let mounted = false;
   while (Date.now() < deadline) {
-    if ((await isPoolAlive(mountPath)).alive) {
+    if (await isMountpointReadable(mountPath)) {
       mounted = true;
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   if (!mounted) {
     const logTail = await fs.readFile(logPath, "utf8").catch(() => "");
-    const reason = logTail.trim().split("\n").slice(-3).join(" | ") || "rclone mount did not come up";
+    const reason = logTail.trim().split("\n").slice(-3).join(" | ") || "rclone mount did not come up within 60s";
     // Clean up the dead attempt so a retry starts fresh (no stale FUSE entry).
-    await execFileAsync("fusermount3", ["-uz", mountPath]).catch(() => {});
-    await execFileAsync("fusermount", ["-uz", mountPath]).catch(() => {});
+    await execWithTimeout("fusermount3", ["-uz", mountPath], 10_000).catch(() => {});
+    await execWithTimeout("fusermount", ["-uz", mountPath], 10_000).catch(() => {});
     await fs.unlink(configPath).catch(() => {});
     throw new Error(`S3 mount failed: ${reason}`);
   }
