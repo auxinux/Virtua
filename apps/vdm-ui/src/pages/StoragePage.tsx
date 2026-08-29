@@ -3,8 +3,9 @@ import { useParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
+import { useConfirm } from "@/hooks/useDialog";
 import { mountFailureMessage, type StorageMountResult } from "@/lib/storageMountResults";
-import type { VdmSharedStorage, VdmNode, VdmStorageNodeStatus, VdmStorageContentItem } from "@/types/vdm";
+import type { VdmSharedStorage, VdmNode, VdmStorageNodeStatus, VdmStorageContentItem, VdmNodePool } from "@/types/vdm";
 
 // ── Icon ────────────────────────────────────────────────────────────────────
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
@@ -406,6 +407,151 @@ function StorageContentPanel({ storage }: { storage: VdmSharedStorage }) {
   );
 }
 
+// ── Node Local Storage (per-node pools) ────────────────────────────────────
+function NodeStorageSection() {
+  const qc = useQueryClient();
+  const { isAdmin } = useVdmAuth();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
+  const [expandedPool, setExpandedPool] = useState<{ node: string; pool: string } | null>(null);
+
+  const nodes = (nodesQuery.data ?? []).filter((n) => n.status === "online");
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <h2 className="text-base font-semibold text-vdm-text">Node Local Storage</h2>
+        <span className="text-xs text-vdm-textMuted">{nodes.length} online node{nodes.length !== 1 ? "s" : ""}</span>
+      </div>
+      {nodes.length === 0 ? (
+        <p className="text-xs text-vdm-textMuted">No online nodes.</p>
+      ) : (
+        <div className="space-y-3">
+          {nodes.map((node) => (
+            <NodePoolsRow key={node.name} node={node} isAdmin={isAdmin}
+              expanded={expandedPool?.node === node.name ? expandedPool.pool : null}
+              onToggle={(pool) => setExpandedPool((cur) => cur?.node === node.name && cur.pool === pool ? null : { node: node.name, pool })}
+              onDeleteDone={() => qc.invalidateQueries({ queryKey: ["vdm-node-pool-content", expandedPool?.node, expandedPool?.pool] })}
+              confirm={confirm} />
+          ))}
+        </div>
+      )}
+      {confirmDialog}
+    </div>
+  );
+}
+
+function NodePoolsRow({ node, isAdmin, expanded, onToggle, onDeleteDone, confirm }: {
+  node: VdmNode; isAdmin: boolean; expanded: string | null;
+  onToggle: (pool: string) => void; onDeleteDone: () => void;
+  confirm: (opts: { title: string; message: React.ReactNode; confirmLabel?: string; tone?: "danger" | "primary" | "warning" }) => Promise<boolean>;
+}) {
+  const qc = useQueryClient();
+  const poolsQuery = useQuery<VdmNodePool[]>({
+    queryKey: ["vdm-node-pools", node.name],
+    queryFn: () => api.get(`/api/vdm/nodes/${encodeURIComponent(node.name)}/storage`),
+    refetchInterval: 30_000,
+  });
+  const pools = poolsQuery.data ?? [];
+
+  return (
+    <div className="vdm-card divide-y divide-vdm-border/50">
+      <div className="px-4 py-3 flex items-center gap-2">
+        <Icon path={ICONS.server} className="w-4 h-4 text-vdm-accent" />
+        <span className="font-medium text-vdm-text">{node.displayName}</span>
+        <span className="font-mono text-xs text-vdm-textMuted">{node.name}</span>
+        <span className="ml-auto text-xs text-vdm-textMuted">{pools.length} pool{pools.length !== 1 ? "s" : ""}</span>
+      </div>
+      {pools.length === 0 ? (
+        <p className="px-4 py-3 text-xs text-vdm-textMuted italic">No local storage pools.</p>
+      ) : pools.map((pool) => (
+        <div key={pool.name}>
+          <div className="px-4 py-3 flex items-center gap-3 hover:bg-vdm-bg/30 transition-colors">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-sm text-vdm-text">{pool.name}</span>
+                {pool.type && <span className="pill-gray text-[10px]">{pool.type}</span>}
+                {pool.mounted === false && <span className="pill-gray text-[10px]">not mounted</span>}
+              </div>
+              <p className="text-xs font-mono text-vdm-textMuted truncate">{pool.path ?? pool.mountSource ?? ""}</p>
+            </div>
+            {pool.capacity !== undefined && (
+              <span className="text-xs text-vdm-textMuted">{formatBytes(pool.capacity)}</span>
+            )}
+            <button className="vdm-btn-ghost text-xs" onClick={() => onToggle(pool.name)}>
+              {expanded === pool.name ? "Hide" : "Browse"}
+            </button>
+          </div>
+          {expanded === pool.name && (
+            <PoolContentPanel nodeName={node.name} poolName={pool.name} isAdmin={isAdmin} onDeleteDone={onDeleteDone} confirm={confirm} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PoolContentPanel({ nodeName, poolName, isAdmin, onDeleteDone, confirm }: {
+  nodeName: string; poolName: string; isAdmin: boolean; onDeleteDone: () => void;
+  confirm: (opts: { title: string; message: React.ReactNode; confirmLabel?: string; tone?: "danger" | "primary" | "warning" }) => Promise<boolean>;
+}) {
+  const qc = useQueryClient();
+  const contentQuery = useQuery<VdmStorageContentItem[]>({
+    queryKey: ["vdm-node-pool-content", nodeName, poolName],
+    queryFn: () => api.get(`/api/vdm/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(poolName)}/content`),
+    refetchInterval: 30_000,
+  });
+  const deleteMut = useMutation({
+    mutationFn: (itemPath: string) => api.post(`/api/vdm/nodes/${encodeURIComponent(nodeName)}/storage/${encodeURIComponent(poolName)}/content/delete`, { itemPath }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-node-pool-content", nodeName, poolName] }); onDeleteDone(); },
+  });
+  const items = contentQuery.data ?? [];
+
+  const typeBadge = (t: string) => {
+    const map: Record<string, string> = { backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green", vm_disk: "pill-green", disk: "pill-green", archive: "pill-gray", file: "pill-gray" };
+    return map[t] ?? "pill-gray";
+  };
+
+  return (
+    <div className="px-4 pb-3 pt-1 bg-vdm-bg/40 border-t border-vdm-border/40">
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-semibold text-vdm-textMuted uppercase tracking-wider">Contents</span>
+        {contentQuery.isFetching && <div className="w-3 h-3 border border-vdm-accent border-t-transparent rounded-full animate-spin" />}
+      </div>
+      {contentQuery.isLoading ? (
+        <div className="py-4 flex justify-center"><div className="w-5 h-5 border-2 border-vdm-accent border-t-transparent rounded-full animate-spin" /></div>
+      ) : items.length === 0 ? (
+        <p className="py-3 text-xs text-vdm-textMuted text-center">No files in this pool.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="vdm-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th>{isAdmin && <th></th>}</tr></thead>
+            <tbody>
+              {items.map((it) => (
+                <tr key={it.path} className="hover:bg-vdm-bg/40">
+                  <td className="font-mono text-xs text-vdm-text truncate max-w-56" title={it.path}>{it.name}</td>
+                  <td><span className={`rounded-md border border-vdm-border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${typeBadge(it.type)}`}>{it.type}</span></td>
+                  <td className="text-xs text-vdm-textMuted">{formatBytes(it.size)}</td>
+                  <td className="text-xs text-vdm-textMuted">{it.createdAt ? new Date(it.createdAt).toLocaleString() : "—"}</td>
+                  {isAdmin && (
+                    <td className="text-right">
+                      {it.deletable !== false && (
+                        <button className="vdm-btn-danger text-xs" onClick={async () => {
+                          if (await confirm({ title: `Delete ${it.name}?`, message: "This file will be permanently removed from the pool.", confirmLabel: "Delete" })) deleteMut.mutate(it.path);
+                        }}>Delete</button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Storage Row ──────────────────────────────────────────────────────────────
 function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
   stor: VdmSharedStorage; isAdmin: boolean; onDelete: () => void; initiallyExpanded?: boolean;
@@ -519,6 +665,7 @@ function StorageRow({ stor, isAdmin, onDelete, initiallyExpanded }: {
 export default function StoragePage() {
   const { isAdmin } = useVdmAuth();
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const { name: selectedName } = useParams<{ name?: string }>();
   const [showAdd, setShowAdd] = useState(false);
 
@@ -617,8 +764,8 @@ export default function StoragePage() {
               stor={stor}
               isAdmin={isAdmin}
               initiallyExpanded={selectedName ? stor.name === decodeURIComponent(selectedName) : undefined}
-              onDelete={() => {
-                if (confirm(`Remove storage "${stor.displayName}"? This will not unmount it from nodes.`)) {
+              onDelete={async () => {
+                if (await confirm({ title: `Remove storage "${stor.displayName}"?`, message: "This will not unmount it from nodes.", confirmLabel: "Remove" })) {
                   deleteMut.mutate(stor.name);
                 }
               }}
@@ -627,12 +774,16 @@ export default function StoragePage() {
         </div>
       )}
 
+      {/* Node local storage */}
+      <NodeStorageSection />
+
       <AddStorageModal
         open={showAdd}
         onClose={() => setShowAdd(false)}
         onSave={(data) => addMut.mutate(data)}
         isPending={addMut.isPending}
       />
+      {confirmDialog}
     </div>
   );
 }

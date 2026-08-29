@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
+import { useConfirm, usePrompt } from "@/hooks/useDialog";
 
 // =============================================================================
 //  Config editors + multi-NIC managers + LXC snapshots for the VDM detail panels
@@ -318,11 +319,13 @@ export function LxcSnapshots({ node, name }: { node: string; name: string }) {
   const create = useMutation({ mutationFn: (snapName: string) => api.post(`${base}/snapshot`, { snapName }), onSuccess: refresh });
   const rollback = useMutation({ mutationFn: (s: string) => api.post(`${base}/snapshot/${encodeURIComponent(s)}/rollback`) });
   const del = useMutation({ mutationFn: (s: string) => api.delete(`${base}/snapshot/${encodeURIComponent(s)}`), onSuccess: refresh });
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { prompt, dialog: promptDialog } = usePrompt();
 
   return (
     <div className="space-y-3">
       <div className="flex justify-end">
-        <button className="vdm-btn-primary" onClick={() => { const n = prompt("Snapshot name:"); if (n) create.mutate(n); }}>+ New Snapshot</button>
+        <button className="vdm-btn-primary" onClick={async () => { const n = await prompt({ title: "New snapshot", label: "Snapshot name", placeholder: "snapshot-name" }); if (n) create.mutate(n); }}>+ New Snapshot</button>
       </div>
       <div className="vdm-card divide-y divide-vdm-border/50">
         {(snaps.data ?? []).length === 0 ? (
@@ -331,11 +334,13 @@ export function LxcSnapshots({ node, name }: { node: string; name: string }) {
           <div key={s.name} className="flex items-center gap-3 px-4 py-3">
             <span className="font-mono text-sm text-vdm-text flex-1">{s.name}</span>
             <span className="text-xs text-vdm-textMuted">{s.createdAt ? new Date(s.createdAt).toLocaleString() : "—"}</span>
-            <button className="vdm-btn-warning text-xs" onClick={() => { if (confirm(`Rollback to ${s.name}?`)) rollback.mutate(s.name); }}>Rollback</button>
-            <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete snapshot ${s.name}?`)) del.mutate(s.name); }}>Delete</button>
+            <button className="vdm-btn-warning text-xs" onClick={async () => { if (await confirm({ title: `Rollback to ${s.name}?`, message: "The container state will be reverted to this snapshot.", confirmLabel: "Rollback", tone: "warning" })) rollback.mutate(s.name); }}>Rollback</button>
+            <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete snapshot ${s.name}?`, message: "This snapshot will be permanently removed.", confirmLabel: "Delete" })) del.mutate(s.name); }}>Delete</button>
           </div>
         ))}
       </div>
+      {confirmDialog}
+      {promptDialog}
     </div>
   );
 }

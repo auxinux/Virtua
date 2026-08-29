@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
+import { useConfirm } from "@/hooks/useDialog";
 import type { VdmUser as AuthUser } from "@/types/vdm";
 
 interface VdmSettings { vdmName?: string; allowSelfSigned?: boolean; }
@@ -48,6 +49,7 @@ function AddUserModal({ open, onClose, onSave }: { open: boolean; onClose: () =>
 export default function SettingsPage() {
   const { isAdmin, user } = useVdmAuth();
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [showAddUser, setShowAddUser] = useState(false);
   const [pwForm, setPwForm] = useState({ current: "", next: "", confirm: "" });
   const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -218,9 +220,9 @@ export default function SettingsPage() {
                   {haQuery.isLoading ? "Checking HA…" : haQuery.data?.enabled ? "HA active" : "HA inactive"}
                 </span>
                 {haQuery.data?.enabled ? (
-                  <button className="vdm-btn-danger" disabled={haMut.isPending} onClick={() => { if (confirm("Disable automatic VDM failover?")) haMut.mutate(false); }}>Disable HA</button>
+                  <button className="vdm-btn-danger" disabled={haMut.isPending} onClick={async () => { if (await confirm({ title: "Disable automatic VDM failover?", message: "Failover will no longer be automatic.", confirmLabel: "Disable HA" })) haMut.mutate(false); }}>Disable HA</button>
                 ) : (
-                  <button className="vdm-btn-primary" disabled={haMut.isPending || !haNode || !haPath} onClick={() => { if (confirm("Enable VDM HA after validating quorum, fencing and cluster storage?")) haMut.mutate(true); }}>Enable HA</button>
+                  <button className="vdm-btn-primary" disabled={haMut.isPending || !haNode || !haPath} onClick={async () => { if (await confirm({ title: "Enable VDM HA?", message: "Quorum, fencing and cluster storage will be validated before enabling.", confirmLabel: "Enable HA", tone: "primary" })) haMut.mutate(true); }}>Enable HA</button>
                 )}
               </div>
               {(haMut.error || haQuery.data?.error) && <p className="text-sm text-vdm-danger">{haMut.error instanceof Error ? haMut.error.message : haQuery.data?.error}</p>}
@@ -244,7 +246,7 @@ export default function SettingsPage() {
                   <span className="pill-gray capitalize text-xs">{u.role}</span>
                   <span className="text-xs text-vdm-textMuted hidden sm:block">{new Date(u.createdAt).toLocaleDateString()}</span>
                   {u.username !== user?.username && (
-                    <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete user ${u.username}?`)) deleteUserMut.mutate(u.id); }}>Delete</button>
+                    <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete user ${u.username}?`, message: "This user account will be permanently removed.", confirmLabel: "Delete" })) deleteUserMut.mutate(u.id); }}>Delete</button>
                   )}
                 </div>
               ))}
@@ -256,6 +258,7 @@ export default function SettingsPage() {
 
       {/* Version info */}
       <div className="text-xs text-vdm-textMuted px-1">AuxiNux VDM — v{__APP_VERSION__}</div>
+      {confirmDialog}
     </div>
   );
 }

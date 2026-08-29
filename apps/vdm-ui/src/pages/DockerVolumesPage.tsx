@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { VdmDockerVolume, VdmNode } from "@/types/vdm";
+import { useConfirm } from "@/hooks/useDialog";
 
 export default function DockerVolumesPage() {
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const [formNode, setFormNode] = useState("");
@@ -94,13 +96,14 @@ export default function DockerVolumesPage() {
                 <td className="text-xs">{v.driver}</td>
                 <td className="font-mono text-xs text-vdm-textMuted truncate max-w-56" title={v.mountpoint}>{v.mountpoint || "—"}</td>
                 <td>
-                  <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete volume ${v.name}? Data will be lost.`)) removeMut.mutate({ node: v.nodeName, name: v.name }); }}>Delete</button>
+                  <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete volume ${v.name}?`, message: "The volume data will be permanently lost.", confirmLabel: "Delete" })) removeMut.mutate({ node: v.nodeName, name: v.name }); }}>Delete</button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {confirmDialog}
     </div>
   );
 }

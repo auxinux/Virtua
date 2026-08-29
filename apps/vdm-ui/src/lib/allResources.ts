@@ -2,6 +2,7 @@ export interface AllResourceRow {
   key: string;
   type: "VM" | "LXC" | "Docker";
   name: string;
+  id: string; // resource identifier: VM/LXC name, Docker container id
   state: string;
   nodeName: string;
   nodeDisplayName: string;
@@ -19,6 +20,7 @@ export function buildAllResourceRows(vms: VmLike[], lxc: LxcLike[], docker: Dock
       key: `vm:${vm.nodeName}:${vm.name}`,
       type: "VM",
       name: vm.name,
+      id: vm.name,
       state: vm.state,
       nodeName: vm.nodeName,
       nodeDisplayName: vm.nodeDisplayName,
@@ -29,6 +31,7 @@ export function buildAllResourceRows(vms: VmLike[], lxc: LxcLike[], docker: Dock
       key: `lxc:${ct.nodeName}:${ct.name}`,
       type: "LXC",
       name: ct.name,
+      id: ct.name,
       state: ct.state,
       nodeName: ct.nodeName,
       nodeDisplayName: ct.nodeDisplayName,
@@ -39,6 +42,7 @@ export function buildAllResourceRows(vms: VmLike[], lxc: LxcLike[], docker: Dock
       key: `docker:${ct.nodeName}:${ct.id}`,
       type: "Docker",
       name: ct.name,
+      id: ct.id,
       state: ct.state,
       nodeName: ct.nodeName,
       nodeDisplayName: ct.nodeDisplayName,

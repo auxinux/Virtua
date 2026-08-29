@@ -767,7 +767,7 @@ if (CLUSTER_ID !== "standalone" && INSTANCE_ROLE === "active") {
 const updateInstanceHeartbeat = () => {
   db.prepare(`INSERT INTO vdm_instances (instance_id, cluster_id, role, leader_epoch, last_heartbeat, metadata)
     VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET role = excluded.role, last_heartbeat = excluded.last_heartbeat, metadata = excluded.metadata`)
-    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.63", pid: process.pid }));
+    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.64", pid: process.pid }));
 };
 updateInstanceHeartbeat();
 setInterval(updateInstanceHeartbeat, 10_000).unref();
@@ -825,7 +825,7 @@ app.get("/api/vdm/health", async (_req, reply) => {
   const unhealthy = nodes.some((row) => row.status === "offline") || recoveryRequired > 0;
   return reply.status(unhealthy ? 503 : 200).send({
     ok: !unhealthy,
-    version: "0.7.63",
+    version: "0.7.64",
     role: INSTANCE_ROLE,
     clusterId: CLUSTER_ID,
     database: "sqlite",
@@ -1140,12 +1140,126 @@ app.get("/api/vdm/nodes/:name/storage", async (req, reply) => {
   return fetchNode(node, "/api/internal/storage/pools");
 });
 
+// List files in a node's local storage pool
+app.get("/api/vdm/nodes/:name/storage/:pool/content", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name, pool } = req.params as { name: string; pool: string };
+  const node = getEnabledNode(name);
+  const content = await fetchNode<Array<{ name: string; type: string; size: number; path: string; createdAt?: string | null; linkedResourceType?: string; linkedResourceName?: string; relation?: string; synthetic?: boolean; isLinked?: boolean; deletable?: boolean }>>(node, `/api/internal/storage/pools/${encodeURIComponent(pool)}/content`);
+  return Array.isArray(content) ? content : [];
+});
+
+// Delete a file from a node's local storage pool
+app.post("/api/vdm/nodes/:name/storage/:pool/content/delete", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { name, pool } = req.params as { name: string; pool: string };
+  const node = getEnabledNode(name);
+  const { itemPath } = (req.body as { itemPath?: string }) ?? {};
+  if (!itemPath) return reply.status(400).send({ error: "itemPath required" });
+  return fetchNode(node, `/api/internal/storage/pools/${encodeURIComponent(pool)}/content/delete`, { method: "POST", body: JSON.stringify({ itemPath }) });
+});
+
 // ── Per-node catalogs (used by the create wizards) ──────────────────────────
 app.get("/api/vdm/nodes/:name/isos", async (req, reply) => {
   requireAuth(req, reply);
   const node = getEnabledNode((req.params as { name: string }).name);
   return tryFetchNode(node, "/api/internal/storage/isos", []);
 });
+
+// Aggregate ISOs across all enabled nodes (tagged with nodeName).
+app.get("/api/vdm/isos", async (req, reply) => {
+  requireAuth(req, reply);
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name ASC").all() as VdmNodeRow[];
+  const results = await Promise.all(nodes.map(async (node) => {
+    if (node.status !== "online") return [];
+    try {
+      const isos = await tryFetchNode<Array<{ filename: string; displayName?: string; sizeBytes: number; createdAt?: string | null; storagePool?: string | null }>>(node, "/api/internal/storage/isos", []);
+      return isos.map((iso) => ({ ...iso, nodeName: node.name, nodeDisplayName: node.display_name ?? node.name }));
+    } catch {
+      return [];
+    }
+  }));
+  return results.flat();
+});
+
+// Copy an ISO from one node to another (task-tracked, streamed node-to-node).
+app.post("/api/vdm/isos/copy", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { sourceNode: sourceNodeName, filename, targetNode: targetNodeName } = req.body as { sourceNode: string; filename: string; targetNode: string };
+  if (!sourceNodeName || !filename || !targetNodeName) return reply.status(400).send({ error: "sourceNode, filename and targetNode are required" });
+  if (sourceNodeName === targetNodeName) return reply.status(400).send({ error: "Source and target nodes must be different" });
+
+  const sourceNode = getEnabledNode(sourceNodeName);
+  const targetNode = getEnabledNode(targetNodeName);
+  const task = createTask({ kind: "clone", label: `Copy ISO ${filename}: ${sourceNodeName} → ${targetNodeName}`, sourceNode: sourceNodeName, targetNode: targetNodeName, resourceType: "iso", resourceName: filename, createdBy: req.session.username });
+
+  void (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error("ISO copy timeout")), LONG_OPERATION_TIMEOUT_MS);
+    try {
+      updateTask(task.id, "running", 30, "Downloading ISO from source node...");
+      const base = sourceNode.api_url.replace(/\/+$/, "");
+      const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download`;
+      const res = await fetch(url, {
+        headers: { "x-auxinux-node-token": decryptSecret(sourceNode.auth_token) },
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+        throw new Error(`Download from ${sourceNodeName} failed: ${err.error ?? res.statusText}`);
+      }
+      const expectedSize = Number(res.headers.get("content-length") ?? 0);
+
+      updateTask(task.id, "running", 60, "Uploading ISO to target node...");
+      const targetBase = targetNode.api_url.replace(/\/+$/, "");
+      const uploadUrl = `${targetBase}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}`;
+      const uploadRes = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          "x-auxinux-node-token": decryptSecret(targetNode.auth_token),
+          "content-type": "application/octet-stream",
+        },
+        body: res.body as unknown as BodyInit,
+        signal: controller.signal,
+        // @ts-expect-error duplex is required for streaming request bodies in undici
+        duplex: "half",
+      });
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json().catch(() => ({ error: uploadRes.statusText })) as { error?: string };
+        throw new Error(`Upload to ${targetNodeName} failed: ${err.error ?? uploadRes.statusText}`);
+      }
+      const uploaded = await uploadRes.json() as { filename: string; sizeBytes: number };
+      if (expectedSize > 0 && uploaded.sizeBytes !== expectedSize) {
+        throw new Error(`Transfer size mismatch: expected ${expectedSize} bytes, received ${uploaded.sizeBytes}`);
+      }
+      updateTask(task.id, "completed", 100, `ISO ${filename} copied to ${targetNodeName}`, undefined, { targetNode: targetNodeName });
+    } catch (err) {
+      updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "ISO copy failed");
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  return reply.status(202).send(mapTaskRow(task));
+});
+// Proxy-download an ISO from a node (browser has no node token).
+app.get("/api/vdm/nodes/:name/isos/:filename/download", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name, filename } = req.params as { name: string; filename: string };
+  const node = getEnabledNode(name);
+  const base = node.api_url.replace(/\/+$/, "");
+  const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download`;
+  const res = await fetch(url, { headers: { "x-auxinux-node-token": decryptSecret(node.auth_token) } });
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+    return reply.status(res.status).send({ error: err.error ?? res.statusText });
+  }
+  reply.header("Content-Type", res.headers.get("content-type") ?? "application/octet-stream");
+  reply.header("Content-Length", res.headers.get("content-length") ?? undefined);
+  reply.header("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+  return reply.send(res.body as unknown as NodeJS.ReadableStream);
+});
+
 app.get("/api/vdm/nodes/:name/lxc-templates", async (req, reply) => {
   requireAuth(req, reply);
   const node = getEnabledNode((req.params as { name: string }).name);
@@ -1343,27 +1457,77 @@ app.post("/api/vdm/vms/:node/:name/backup", async (req, reply) => {
 app.post("/api/vdm/vms/:node/:name/clone", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: nodeName, name } = req.params as { node: string; name: string };
-  const { newName, targetNode: targetNodeName } = req.body as { newName: string; targetNode?: string };
+  const { newName, targetNode: targetNodeName, targetStoragePool, sharedStorageName } = req.body as { newName: string; targetNode?: string; targetStoragePool?: string; sharedStorageName?: string };
   if (!newName) return reply.status(400).send({ error: "newName required" });
 
   const sourceNode = getEnabledNode(nodeName);
-  const task = createTask({ kind: "clone", label: `Clone VM ${name} → ${newName}`, sourceNode: nodeName, targetNode: targetNodeName ?? nodeName, resourceType: "vm", resourceName: name, createdBy: req.session.username });
+  const targetName = targetNodeName && targetNodeName !== nodeName ? targetNodeName : nodeName;
+  const isCrossNode = targetName !== nodeName;
+  const task = createTask({ kind: "clone", label: `Clone VM ${name} → ${newName}${isCrossNode ? ` on ${targetName}` : ""}`, sourceNode: nodeName, targetNode: targetName, resourceType: "vm", resourceName: name, createdBy: req.session.username });
 
   void (async () => {
     try {
-      if (!targetNodeName || targetNodeName === nodeName) {
-        // Same-node clone
+      if (!isCrossNode) {
+        // Same-node clone (targetNode omitted or equal to source).
         updateTask(task.id, "running", 20, "Cloning VM on same node...");
         const result = await fetchNode(sourceNode, `/api/internal/vms/${encodeURIComponent(name)}/clone`, {
           method: "POST",
           timeoutMs: LONG_OPERATION_TIMEOUT_MS,
-          body: JSON.stringify({ newName }),
+          body: JSON.stringify({ newName, ...(targetStoragePool && targetStoragePool !== "local" ? { storagePool: targetStoragePool } : {}) }),
         });
         updateTask(task.id, "completed", 100, "Clone complete", undefined, result);
-      } else {
-        // Cross-node clone via shared storage — requires shared storage
-        updateTask(task.id, "failed", 0, undefined, "Cross-node clone requires a shared storage — use backup+restore workflow");
+        return;
       }
+
+      // Cross-node clone. Same mechanics as migrate, but the source is kept and
+      // the copy is restored under a NEW name.
+      const targetNode = getEnabledNode(targetName);
+      const useLocalCopy = !sharedStorageName;
+      if (!useLocalCopy) {
+        const storage = db.prepare("SELECT * FROM vdm_shared_storage WHERE name = ?").get(sharedStorageName) as VdmSharedStorageRow | undefined;
+        if (!storage) throw new Error("Shared storage not found");
+        updateTask(task.id, "running", 5, "Mounting shared storage on source node...");
+        const sourcePoolName = await ensureStorageMountedOnNode(sourceNode, storage);
+        updateTask(task.id, "running", 15, "Mounting shared storage on target node...");
+        const targetPoolName = await ensureStorageMountedOnNode(targetNode, storage);
+        updateTask(task.id, "running", 20, "Creating backup on source node...");
+        const backupResult = await fetchNode<{ filename: string; sizeBytes: number }>(sourceNode, `/api/internal/vms/${encodeURIComponent(name)}/backup`, {
+          method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+          body: JSON.stringify({ storagePool: sourcePoolName, format: "tar.gz", compress: false }),
+        });
+        updateTask(task.id, "running", 55, "Restoring clone on target node...");
+        await fetchNode(targetNode, `/api/internal/vms/${encodeURIComponent(newName)}/restore-backup`, {
+          method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+          body: JSON.stringify({ sourcePath: `${storage.local_mount_path}/backups/${backupResult.filename}`, storagePool: targetPoolName, name: newName }),
+        });
+        updateTask(task.id, "running", 85, "Validating clone on target node...");
+        await validateRestoredResource(targetNode, "vm", newName);
+        updateTask(task.id, "completed", 100, `Clone complete. VM ${newName} created on ${targetName}`, undefined, { targetNode: targetName });
+        return;
+      }
+
+      // Local-copy cross-node clone: backup on source's local pool, stream to
+      // target's local pool, restore under the new name.
+      updateTask(task.id, "running", 10, "Backing up VM on source node (local pool)...");
+      const sourcePoolPath = await getNodePoolPath(sourceNode, "local");
+      const targetPoolPath = await getNodePoolPath(targetNode, targetStoragePool ?? "local");
+      const backupResult = await fetchNode<{ filename: string; sizeBytes: number }>(sourceNode, `/api/internal/vms/${encodeURIComponent(name)}/backup`, {
+        method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+        body: JSON.stringify({ storagePool: "local", format: "tar.gz", compress: false }),
+      });
+      updateTask(task.id, "running", 40, "Transferring backup to target node...");
+      const transferred = await transferFileBetweenNodes(
+        sourceNode, "local", `${sourcePoolPath}/backups/${backupResult.filename}`,
+        targetNode, targetStoragePool ?? "local", backupResult.filename,
+      );
+      updateTask(task.id, "running", 70, "Restoring clone on target node...");
+      await fetchNode(targetNode, `/api/internal/vms/${encodeURIComponent(newName)}/restore-backup`, {
+        method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS,
+        body: JSON.stringify({ sourcePath: `${targetPoolPath}/backups/${transferred.filename}`, storagePool: targetStoragePool ?? "local", name: newName }),
+      });
+      updateTask(task.id, "running", 85, "Validating clone on target node...");
+      await validateRestoredResource(targetNode, "vm", newName);
+      updateTask(task.id, "completed", 100, `Clone complete. VM ${newName} created on ${targetName} (local copy)`, undefined, { targetNode: targetName });
     } catch (err) {
       updateTask(task.id, "failed", 0, undefined, err instanceof Error ? err.message : "Clone failed");
     }

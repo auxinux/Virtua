@@ -5027,6 +5027,41 @@ app.get("/api/internal/storage/isos", async (req, reply) => {
   return (await listManagedFiles()).filter((entry) => entry.type === "iso");
 });
 
+// Stream a managed ISO file (cross-node copy / VDM download).
+app.get("/api/internal/storage/isos/:filename/download", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { filename } = req.params as { filename: string };
+  const resolvedPath = await resolveManagedFilePath(filename, "iso");
+  const stat = await fs.promises.stat(resolvedPath);
+  reply.header("Content-Type", "application/octet-stream");
+  reply.header("Content-Length", stat.size);
+  reply.header("Content-Disposition", `attachment; filename="${path.basename(resolvedPath)}"`);
+  return reply.send(fs.createReadStream(resolvedPath));
+});
+
+// Receive a managed ISO as a binary stream (cross-node copy target).
+app.post("/api/internal/storage/isos/upload", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { filename } = req.query as { filename?: string };
+  if (!filename) return reply.status(400).send({ error: "filename is required" });
+  const safeName = sanitizeManagedFilename(filename);
+  if (!isAllowedManagedFile(safeName, "iso")) return reply.status(400).send({ error: "Unsupported ISO extension" });
+  const destDir = getManagedStorageDir("iso");
+  await fs.promises.mkdir(destDir, { recursive: true });
+  const destPath = path.join(destDir, safeName);
+  const tempPath = `${destPath}.part-${randomUUID()}`;
+  try {
+    await pipeline(req.body as NodeJS.ReadableStream, fs.createWriteStream(tempPath, { flags: "wx" }));
+    await fs.promises.rename(tempPath, destPath);
+  } finally {
+    await fs.promises.unlink(tempPath).catch(() => {});
+  }
+  await ensureLibvirtManagedFileAccess(destPath, "iso");
+  const stat = await fs.promises.stat(destPath);
+  db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 0, NULL)").run(safeName, safeName, stat.size);
+  return { ok: true, filename: safeName, sizeBytes: stat.size };
+});
+
 // Recent local warn/error entries for the VDM central LOGS page.
 app.get("/api/internal/logs/recent", async (req, reply) => {
   requireInternalNodeToken(req);

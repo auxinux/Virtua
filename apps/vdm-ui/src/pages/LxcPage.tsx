@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { VdmLxc, VdmNode } from "@/types/vdm";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
+import { useConfirm } from "@/hooks/useDialog";
 
 function StateChip({ state }: { state: string }) {
   const map: Record<string, string> = { running: "pill-green", stopped: "pill-gray", paused: "pill-yellow" };
@@ -12,6 +13,7 @@ function StateChip({ state }: { state: string }) {
 
 export default function LxcPage() {
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [filterNode, setFilterNode] = useState("all");
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -87,7 +89,7 @@ export default function LxcPage() {
                       <button className="vdm-btn-ghost text-xs" onClick={() => actionMut.mutate({ node: ct.nodeName, name: ct.name, action: "restart" })}>Restart</button>
                     </>}
                     <Link to={`/inventory/lxc/${encodeURIComponent(ct.nodeName)}/${encodeURIComponent(ct.name)}`} className="vdm-btn-ghost text-xs">Details</Link>
-                    <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete container ${ct.name}?`)) deleteMut.mutate({ node: ct.nodeName, name: ct.name }); }}>Delete</button>
+                    <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete container ${ct.name}?`, message: "This container will be permanently removed.", confirmLabel: "Delete" })) deleteMut.mutate({ node: ct.nodeName, name: ct.name }); }}>Delete</button>
                   </div>
                 </td>
               </tr>
@@ -95,6 +97,7 @@ export default function LxcPage() {
           </tbody>
         </table>
       </div>
+      {confirmDialog}
     </div>
   );
 }

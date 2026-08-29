@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { VdmComposeProject, VdmComposeService, VdmNode } from "@/types/vdm";
+import { useConfirm } from "@/hooks/useDialog";
 
 interface ComposeDetail {
   name: string;
@@ -12,6 +13,7 @@ interface ComposeDetail {
 
 export default function DockerComposePage() {
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [selected, setSelected] = useState<{ node: string; name: string } | null>(null);
   const [editYaml, setEditYaml] = useState("");
   const [error, setError] = useState("");
@@ -168,7 +170,7 @@ export default function DockerComposePage() {
                   <button className="vdm-btn-primary text-xs" disabled={busy} onClick={() => runAction.mutate({ ...selected, action: "up" })}>Up</button>
                   <button className="vdm-btn-ghost text-xs" disabled={busy} onClick={() => runAction.mutate({ ...selected, action: "down" })}>Down</button>
                   <button className="vdm-btn-ghost text-xs" disabled={busy} onClick={() => runAction.mutate({ ...selected, action: "restart" })}>Restart</button>
-                  <button className="vdm-btn-danger text-xs" disabled={busy} onClick={() => { if (confirm(`Delete ${detail.name}?`)) remove.mutate(selected); }}>Delete</button>
+                  <button className="vdm-btn-danger text-xs" disabled={busy} onClick={async () => { if (await confirm({ title: `Delete ${detail.name}?`, message: "This removes the Compose project and its containers.", confirmLabel: "Delete" })) remove.mutate(selected); }}>Delete</button>
                 </div>
               </div>
 
@@ -222,6 +224,7 @@ export default function DockerComposePage() {
           )}
         </div>
       </div>
+      {confirmDialog}
     </div>
   );
 }

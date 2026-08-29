@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
+import { useConfirm } from "@/hooks/useDialog";
 import type { VdmBackupItem, VdmBackupJob, VdmBackupRepository, VdmNode } from "@/types/vdm";
 
 function bytes(value: number) {
@@ -127,6 +128,7 @@ function AddJobModal({ open, repositories, nodes, onClose, onAdd, isPending }: {
 export default function BackupsPage() {
   const { isAdmin } = useVdmAuth();
   const queryClient = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -263,7 +265,7 @@ export default function BackupsPage() {
                 <td className="space-x-2 whitespace-nowrap">
                   {isAdmin && <button className="vdm-btn-ghost text-xs" onClick={() => verify.mutate(item.id)}>Verify</button>}
                   {isAdmin && item.status === "available" && <button className="vdm-btn-primary text-xs" onClick={() => setRestoreTarget(item)}>Restore</button>}
-                  {isAdmin && <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete backup ${item.filename}?`)) deleteBackup.mutate(item.id); }}>Delete</button>}
+                  {isAdmin && <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete backup ${item.filename}?`, message: "This backup will be permanently removed.", confirmLabel: "Delete" })) deleteBackup.mutate(item.id); }}>Delete</button>}
                 </td>
               </tr>
             ))}
@@ -288,6 +290,7 @@ export default function BackupsPage() {
         onAdd={onAddJob}
         isPending={createJob.isPending}
       />
+      {confirmDialog}
     </div>
   );
 }

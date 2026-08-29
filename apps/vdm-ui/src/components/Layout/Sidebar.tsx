@@ -2,6 +2,8 @@ import { useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
+import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/ResourceContextMenu";
+import { type ContextMenuState } from "@/components/ui/ContextMenu";
 import type { VdmNode, VdmVm, VdmLxc, VdmDocker, VdmSharedStorage } from "@/types/vdm";
 
 // Icons as SVG strings
@@ -59,6 +61,7 @@ function NavItem({ to, icon, label, count }: { to: string; icon: string; label: 
 
 function NodeTreeItem({ node }: { node: VdmNode }) {
   const [open, setOpen] = useState(true);
+  const [ctxMenu, setCtxMenu] = useState<(ContextMenuState & { resource: ResourceMenuTarget }) | null>(null);
   const navigate = useNavigate();
 
   const vmsQuery = useQuery({
@@ -84,6 +87,12 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
   const lxc = lxcQuery.data ?? [];
   const docker = dockerQuery.data ?? [];
 
+  const openCtx = (e: React.MouseEvent, resource: ResourceMenuTarget) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({ x: e.clientX, y: e.clientY, entries: [], resource });
+  };
+
   return (
     <div className="select-none">
       <button
@@ -102,6 +111,7 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
             <button
               key={vm.name}
               onClick={() => navigate(`/inventory/vm/${node.name}/${encodeURIComponent(vm.name)}`)}
+              onContextMenu={(e) => openCtx(e, { kind: "vm", node: node.name, name: vm.name, displayName: vm.name, state: vm.state })}
               className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
             >
               <Icon path={ICONS.vm} className="w-3 h-3 flex-shrink-0 text-blue-400" />
@@ -113,6 +123,7 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
             <button
               key={ct.name}
               onClick={() => navigate(`/inventory/lxc/${node.name}/${encodeURIComponent(ct.name)}`)}
+              onContextMenu={(e) => openCtx(e, { kind: "lxc", node: node.name, name: ct.name, displayName: ct.name, state: ct.state })}
               className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
             >
               <Icon path={ICONS.container} className="w-3 h-3 flex-shrink-0 text-green-400" />
@@ -124,6 +135,7 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
             <button
               key={ct.id}
               onClick={() => navigate(`/inventory/docker/${node.name}/${encodeURIComponent(ct.id)}`)}
+              onContextMenu={(e) => openCtx(e, { kind: "docker", node: node.name, name: ct.id, displayName: ct.name, state: ct.state })}
               className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
             >
               <Icon path={ICONS.docker} className="w-3 h-3 flex-shrink-0 text-cyan-400" />
@@ -139,6 +151,7 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
           )}
         </div>
       )}
+      <ResourceContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
     </div>
   );
 }
@@ -215,6 +228,7 @@ export function Sidebar() {
           <NavItem to="/docker" icon={ICONS.docker} label="Docker" />
           <NavItem to="/docker/compose" icon={ICONS.docker} label="Docker Compose" />
           <NavItem to="/docker/volumes" icon={ICONS.storage} label="Docker Volumes" />
+          <NavItem to="/isos" icon={ICONS.storage} label="ISO Library" />
         </div>
 
         {/* Shared Storage */}

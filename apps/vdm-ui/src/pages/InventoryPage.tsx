@@ -2,11 +2,15 @@ import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
-import { buildAllResourceRows } from "@/lib/allResources";
+import { buildAllResourceRows, type AllResourceRow } from "@/lib/allResources";
 import type { VdmVm, VdmVmInfo, VdmVmStats, VdmLxc, VdmDocker, VdmNode, VdmSharedStorage, VdmSnapshot, VdmTask } from "@/types/vdm";
 import { LogsModal } from "@/components/LogsModal";
 import { ConsoleModal } from "@/components/ConsoleModal";
 import { VmConfigForm, LxcConfigForm, DockerConfigForm, DockerExec, LxcNetworks, DockerNetworks, LxcSnapshots } from "@/components/ResourcePanels";
+import { MigrateModal, CloneModal, BackupModal, DockerTransferModal } from "@/components/TransferModals";
+import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/ResourceContextMenu";
+import { ContextMenuState } from "@/components/ui/ContextMenu";
+import { useConfirm, usePrompt } from "@/hooks/useDialog";
 
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
   return (
@@ -67,131 +71,6 @@ function ActionButton({ label, icon, onClick, variant = "ghost", disabled }: { l
   );
 }
 
-// ── Migrate Modal ──────────────────────────────────────────────────────────
-function MigrateModal({ open, onClose, resourceType, resourceName, sourceNode, nodes, storages, onSubmit }: {
-  open: boolean; onClose: () => void; resourceType: string; resourceName: string;
-  sourceNode: string; nodes: VdmNode[]; storages: VdmSharedStorage[];
-  onSubmit: (targetNode: string, sharedStorageName: string | undefined, targetStoragePool: string | undefined, deleteSource: boolean) => void;
-}) {
-  const [targetNode, setTargetNode] = useState("");
-  const [mode, setMode] = useState<"shared" | "local">("shared");
-  const [storName, setStorName] = useState("");
-  const [deleteSource, setDeleteSource] = useState(true);
-
-  if (!open) return null;
-  const canSubmit = targetNode && (mode === "local" ? true : !!storName);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-md p-5 space-y-4">
-        <h3 className="text-base font-semibold text-vdm-text">Migrate {resourceType}: {resourceName}</h3>
-        <div>
-          <label className="vdm-label">Target Node</label>
-          <select className="vdm-input" value={targetNode} onChange={(e) => setTargetNode(e.target.value)}>
-            <option value="">Select node...</option>
-            {nodes.filter((n) => n.name !== sourceNode && n.status === "online").map((n) => (
-              <option key={n.name} value={n.name}>{n.displayName}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Transfer mode */}
-        <div>
-          <label className="vdm-label">Transfer method</label>
-          <div className="grid grid-cols-2 gap-2">
-            <button type="button" onClick={() => setMode("shared")}
-              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${mode === "shared" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}>
-              Shared storage
-            </button>
-            <button type="button" onClick={() => setMode("local")}
-              className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${mode === "local" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted hover:border-vdm-accent/50"}`}>
-              Local copy (direct)
-            </button>
-          </div>
-        </div>
-
-        {mode === "shared" ? (
-          <div>
-            <label className="vdm-label">Shared Storage (for migration data)</label>
-            <select className="vdm-input" value={storName} onChange={(e) => setStorName(e.target.value)}>
-              <option value="">Select shared storage...</option>
-              {storages.map((s) => <option key={s.name} value={s.name}>{s.displayName} ({s.type}: {s.source})</option>)}
-            </select>
-            {storages.length === 0 && <p className="text-xs text-vdm-danger mt-1">⚠ No shared storage configured. Use "Local copy" instead.</p>}
-          </div>
-        ) : (
-          <p className="text-xs text-vdm-textMuted bg-vdm-accent/8 border border-vdm-accent/25 rounded px-3 py-2">
-            Copies the {resourceType} data directly to the target node's <span className="font-mono">local</span> storage pool (streamed node-to-node, no shared storage required).
-          </p>
-        )}
-
-        <label className="flex items-center gap-2 text-sm text-vdm-text cursor-pointer">
-          <input type="checkbox" checked={deleteSource} onChange={(e) => setDeleteSource(e.target.checked)} className="rounded" />
-          Delete from source after migration
-        </label>
-        <div className="flex gap-2 justify-end">
-          <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(targetNode, mode === "shared" ? storName : undefined, mode === "local" ? "local" : undefined, deleteSource); onClose(); } }} disabled={!canSubmit}>
-            Start Migration
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Clone Modal ────────────────────────────────────────────────────────────
-function CloneModal({ open, onClose, resourceName, onSubmit }: {
-  open: boolean; onClose: () => void; resourceName: string; onSubmit: (newName: string) => void;
-}) {
-  const [newName, setNewName] = useState(`${resourceName}-clone`);
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-sm p-5 space-y-4">
-        <h3 className="text-base font-semibold text-vdm-text">Clone: {resourceName}</h3>
-        <div>
-          <label className="vdm-label">New Name</label>
-          <input className="vdm-input" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="clone-name" />
-        </div>
-        <div className="flex gap-2 justify-end">
-          <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" onClick={() => { if (newName) { onSubmit(newName); onClose(); } }}>Clone</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Backup Modal ───────────────────────────────────────────────────────────
-function BackupModal({ open, onClose, resourceName, storages, onSubmit }: {
-  open: boolean; onClose: () => void; resourceName: string; storages: VdmSharedStorage[];
-  onSubmit: (sharedStorageName: string) => void;
-}) {
-  const [storName, setStorName] = useState("");
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-sm p-5 space-y-4">
-        <h3 className="text-base font-semibold text-vdm-text">Backup: {resourceName}</h3>
-        <div>
-          <label className="vdm-label">Destination (Shared Storage)</label>
-          <select className="vdm-input" value={storName} onChange={(e) => setStorName(e.target.value)}>
-            <option value="">Select shared storage...</option>
-            {storages.map((s) => <option key={s.name} value={s.name}>{s.displayName} ({s.source})</option>)}
-          </select>
-          {storages.length === 0 && <p className="text-xs text-vdm-danger mt-1">⚠ No shared storage configured.</p>}
-        </div>
-        <div className="flex gap-2 justify-end">
-          <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" onClick={() => { if (storName) { onSubmit(storName); onClose(); } }} disabled={!storName}>
-            Start Backup
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── VM Detail Panel ────────────────────────────────────────────────────────
 function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
   const qc = useQueryClient();
@@ -205,6 +84,8 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
   const [showBackup, setShowBackup] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const navigate = useNavigate();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { prompt, dialog: promptDialog } = usePrompt();
 
   const vmQuery = useQuery<VdmVmInfo>({
     queryKey: ["vdm-vm", nodeName, vmName],
@@ -246,7 +127,8 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-tasks-recent"] }); navigate("/tasks"); },
   });
   const cloneMut = useMutation({
-    mutationFn: (newName: string) => api.post(`/api/vdm/vms/${encodeURIComponent(nodeName)}/${encodeURIComponent(vmName)}/clone`, { newName }),
+    mutationFn: (p: { newName: string; targetNode: string; targetStoragePool?: string; sharedStorageName?: string }) =>
+      api.post(`/api/vdm/vms/${encodeURIComponent(nodeName)}/${encodeURIComponent(vmName)}/clone`, p),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-tasks-recent"] }); navigate("/tasks"); },
   });
   const backupMut = useMutation({
@@ -280,7 +162,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
         {!isRunning && <ActionButton label="Power On" icon="M5.636 5.636a9 9 0 1 0 12.728 0M12 3v9" variant="success" onClick={() => actionMut.mutate("start")} />}
         {isRunning && <ActionButton label="Shutdown" icon="M5.25 7.5A2.25 2.25 0 0 1 7.5 5.25h9a2.25 2.25 0 0 1 2.25 2.25v9a2.25 2.25 0 0 1-2.25 2.25h-9a2.25 2.25 0 0 1-2.25-2.25v-9Z" variant="warning" onClick={() => actionMut.mutate("shutdown")} />}
         {isRunning && <ActionButton label="Reboot" icon="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" variant="ghost" onClick={() => actionMut.mutate("reboot")} />}
-        {isRunning && <ActionButton label="Force Off" icon="M5.25 7.5A2.25 2.25 0 0 1 7.5 5.25h9a2.25 2.25 0 0 1 2.25 2.25v9a2.25 2.25 0 0 1-2.25 2.25h-9a2.25 2.25 0 0 1-2.25-2.25v-9Z" variant="danger" onClick={() => { if (confirm(`Force off ${vm.name}?`)) actionMut.mutate("forceStop"); }} />}
+        {isRunning && <ActionButton label="Force Off" icon="M5.25 7.5A2.25 2.25 0 0 1 7.5 5.25h9a2.25 2.25 0 0 1 2.25 2.25v9a2.25 2.25 0 0 1-2.25 2.25h-9a2.25 2.25 0 0 1-2.25-2.25v-9Z" variant="danger" onClick={async () => { if (await confirm({ title: `Force off ${vm.name}?`, message: "This immediately cuts power to the VM. Unsaved data may be lost.", confirmLabel: "Force Off" })) actionMut.mutate("forceStop"); }} />}
         {isRunning && <ActionButton label="Suspend" icon="M15.75 5.25v13.5m-7.5-13.5v13.5" variant="ghost" onClick={() => actionMut.mutate("pause")} />}
         <div className="h-6 w-px bg-vdm-border self-center" />
         <ActionButton label="Migrate" icon="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" onClick={() => setShowMigrate(true)} />
@@ -362,8 +244,9 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
       {tab === "snapshots" && (
         <div className="space-y-3">
           <div className="flex justify-end">
-            <button className="vdm-btn-primary" onClick={() => {
-              const n = prompt("Snapshot name:"); if (n) snapMut.mutate(n);
+            <button className="vdm-btn-primary" onClick={async () => {
+              const n = await prompt({ title: "New snapshot", label: "Snapshot name", placeholder: "snapshot-name" });
+              if (n) snapMut.mutate(n);
             }}>+ New Snapshot</button>
           </div>
           <div className="vdm-card divide-y divide-vdm-border/50">
@@ -373,8 +256,8 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
               <div key={snap.name} className="flex items-center gap-3 px-4 py-3">
                 <span className="font-mono text-sm text-vdm-text flex-1">{snap.name}</span>
                 <span className="text-xs text-vdm-textMuted">{snap.createdAt ? new Date(snap.createdAt).toLocaleString() : "—"}</span>
-                <button className="vdm-btn-warning text-xs" onClick={() => { if (confirm(`Rollback to ${snap.name}?`)) rollbackMut.mutate(snap.name); }}>Rollback</button>
-                <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete snapshot ${snap.name}?`)) delSnapMut.mutate(snap.name); }}>Delete</button>
+                <button className="vdm-btn-warning text-xs" onClick={async () => { if (await confirm({ title: `Rollback to ${snap.name}?`, message: "The VM state will be reverted to this snapshot.", confirmLabel: "Rollback", tone: "warning" })) rollbackMut.mutate(snap.name); }}>Rollback</button>
+                <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete snapshot ${snap.name}?`, message: "This snapshot will be permanently removed.", confirmLabel: "Delete" })) delSnapMut.mutate(snap.name); }}>Delete</button>
               </div>
             ))}
           </div>
@@ -385,13 +268,17 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
       <MigrateModal open={showMigrate} onClose={() => setShowMigrate(false)} resourceType="VM" resourceName={vm.name} sourceNode={nodeName}
         nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
         onSubmit={(t, s, p, d) => migrateMut.mutate({ targetNode: t, sharedStorageName: s, targetStoragePool: p, deleteSource: d })} />
-      <CloneModal open={showClone} onClose={() => setShowClone(false)} resourceName={vm.name} onSubmit={(n) => cloneMut.mutate(n)} />
+      <CloneModal open={showClone} onClose={() => setShowClone(false)} resourceType="VM" resourceName={vm.name} sourceNode={nodeName}
+        nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
+        onSubmit={(n, t, p, s) => cloneMut.mutate({ newName: n, targetNode: t, targetStoragePool: p, sharedStorageName: s })} />
       <BackupModal open={showBackup} onClose={() => setShowBackup(false)} resourceName={vm.name} storages={storagesQuery.data ?? []} onSubmit={(s) => backupMut.mutate(s)} />
       <LogsModal open={showLogs} onClose={() => setShowLogs(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} />
       <ConsoleModal open={showConsole} onClose={() => setShowConsole(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} mode="term" />
       <ConsoleModal open={showVnc} onClose={() => setShowVnc(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} mode="vnc" />
       <ConsoleModal open={showSpice} onClose={() => setShowSpice(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} mode="spice" />
       <ConsoleModal open={showRdp} onClose={() => setShowRdp(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} mode="rdp" />
+      {confirmDialog}
+      {promptDialog}
     </div>
   );
 }
@@ -482,46 +369,6 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
 }
 
 // ── Docker Detail Panel ────────────────────────────────────────────────────
-function DockerTransferModal({ open, onClose, mode, currentName, sourceNode, nodes, storages, onSubmit }: {
-  open: boolean; onClose: () => void; mode: "migrate" | "duplicate"; currentName: string; sourceNode: string;
-  nodes: VdmNode[]; storages: VdmSharedStorage[];
-  onSubmit: (payload: { targetNode: string; targetName: string; sharedStorageName?: string; targetStoragePool?: string; deleteSource: boolean }) => void;
-}) {
-  const [targetNode, setTargetNode] = useState("");
-  const [targetName, setTargetName] = useState(mode === "migrate" ? currentName : `${currentName}-copy`);
-  const [transferMode, setTransferMode] = useState<"shared" | "local">("local");
-  const [storageName, setStorageName] = useState("");
-  if (!open) return null;
-  const ready = !!targetNode && !!targetName && (transferMode === "local" || !!storageName);
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-md p-5 space-y-4">
-        <h3 className="text-base font-semibold text-vdm-text">{mode === "migrate" ? "Migrate" : "Duplicate"} Docker: {currentName}</h3>
-        <div><label className="vdm-label">Target Node</label><select className="vdm-input" value={targetNode} onChange={(e) => setTargetNode(e.target.value)}>
-          <option value="">Select node...</option>
-          {nodes.filter((n) => n.name !== sourceNode && n.status === "online").map((n) => <option key={n.name} value={n.name}>{n.displayName}</option>)}
-        </select></div>
-        <div><label className="vdm-label">Target container name</label><input className="vdm-input font-mono" value={targetName} disabled={mode === "migrate"} onChange={(e) => setTargetName(e.target.value)} /></div>
-        <div><label className="vdm-label">Transfer method</label><div className="grid grid-cols-2 gap-2">
-          <button type="button" onClick={() => setTransferMode("local")} className={`rounded-lg border px-3 py-2 text-sm ${transferMode === "local" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted"}`}>Local copy</button>
-          <button type="button" onClick={() => setTransferMode("shared")} className={`rounded-lg border px-3 py-2 text-sm ${transferMode === "shared" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted"}`}>Shared storage</button>
-        </div></div>
-        {transferMode === "shared" && <div><label className="vdm-label">Shared storage</label><select className="vdm-input" value={storageName} onChange={(e) => setStorageName(e.target.value)}>
-          <option value="">Select storage...</option>{storages.map((s) => <option key={s.name} value={s.name}>{s.displayName}</option>)}
-        </select></div>}
-        <p className="text-xs text-vdm-warning bg-vdm-warning/10 border border-vdm-warning/30 rounded px-3 py-2">
-          The writable container layer and configuration are preserved. Containers with volumes or bind mounts are refused to prevent silent data loss.
-        </p>
-        <div className="flex justify-end gap-2"><button className="vdm-btn-ghost" onClick={onClose}>Cancel</button><button className="vdm-btn-primary" disabled={!ready} onClick={() => {
-          if (!ready) return;
-          onSubmit({ targetNode, targetName, sharedStorageName: transferMode === "shared" ? storageName : undefined, targetStoragePool: transferMode === "local" ? "local" : undefined, deleteSource: mode === "migrate" });
-          onClose();
-        }}>{mode === "migrate" ? "Start Migration" : "Start Duplication"}</button></div>
-      </div>
-    </div>
-  );
-}
-
 function formatDockerPorts(ports: VdmDocker["ports"]): string {
   if (!ports) return "—";
   if (typeof ports === "string") return ports;
@@ -613,6 +460,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
 // ── All Resources overview ──────────────────────────────────────────────────
 function AllResourcesView() {
   const [search, setSearch] = useState("");
+  const [ctxMenu, setCtxMenu] = useState<(ContextMenuState & { resource: ResourceMenuTarget }) | null>(null);
   const vmQuery = useQuery<VdmVm[]>({ queryKey: ["vdm-vms-all"], queryFn: () => api.get("/api/vdm/vms"), refetchInterval: 15_000 });
   const lxcQuery = useQuery<VdmLxc[]>({ queryKey: ["vdm-lxc-all"], queryFn: () => api.get("/api/vdm/lxc"), refetchInterval: 15_000 });
   const dockerQuery = useQuery<VdmDocker[]>({ queryKey: ["vdm-docker-all"], queryFn: () => api.get("/api/vdm/docker"), refetchInterval: 15_000 });
@@ -622,6 +470,18 @@ function AllResourcesView() {
   const filtered = needle
     ? rows.filter((row) => `${row.type} ${row.name} ${row.nodeName} ${row.nodeDisplayName} ${row.detail}`.toLowerCase().includes(needle))
     : rows;
+
+  const onContextMenu = (e: React.MouseEvent, row: AllResourceRow) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({
+      x: e.clientX, y: e.clientY, entries: [],
+      resource: {
+        kind: row.type === "VM" ? "vm" : row.type === "LXC" ? "lxc" : "docker",
+        node: row.nodeName, name: row.id, displayName: row.name, state: row.state,
+      },
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -649,7 +509,7 @@ function AllResourcesView() {
           <table className="vdm-table">
             <thead><tr><th>Name</th><th>Type</th><th>Node</th><th>State</th><th>Details</th></tr></thead>
             <tbody>{filtered.map((row) => (
-              <tr key={row.key} className="hover:bg-vdm-bg/40">
+              <tr key={row.key} className="hover:bg-vdm-bg/40 cursor-context-menu" onContextMenu={(e) => onContextMenu(e, row)}>
                 <td><Link className="font-medium text-vdm-accent hover:underline" to={row.href}>{row.name}</Link></td>
                 <td><span className="pill-gray">{row.type}</span></td>
                 <td className="text-sm text-vdm-textMuted">{row.nodeDisplayName}</td>
@@ -660,6 +520,7 @@ function AllResourcesView() {
           </table>
         )}
       </div>
+      <ResourceContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />
     </div>
   );
 }

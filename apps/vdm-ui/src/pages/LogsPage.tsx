@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
+import { useConfirm } from "@/hooks/useDialog";
 import { formatLogTs, localTimezoneLabel, type LogEntry, type LogsConfig } from "@/lib/time";
 
 const ICONS = {
@@ -30,6 +31,7 @@ function levelBadgeClass(level: string): string {
 export default function LogsPage() {
   const { isAdmin } = useVdmAuth();
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [level, setLevel] = useState<string>("");
   const [category, setCategory] = useState<string>("");
   const [source, setSource] = useState<string>("");
@@ -58,8 +60,8 @@ export default function LogsPage() {
   const nodeNames = Array.from(new Set(entries.map((e) => e.source)));
   const hasVdm = nodeNames.includes("vdm");
 
-  const clearLogs = () => {
-    if (confirm("Vider tout le journal LOGS ? Cette action est irréversible.")) {
+  const clearLogs = async () => {
+    if (await confirm({ title: "Vider tout le journal LOGS ?", message: "Cette action est irréversible.", confirmLabel: "Vider" })) {
       api.delete("/api/vdm/logs").then(() => qc.invalidateQueries({ queryKey: ["vdm-logs"] }));
     }
   };
@@ -133,6 +135,7 @@ export default function LogsPage() {
       {entries.length > 0 && (
         <p className="text-xs text-vdm-textMuted/70">{entries.length} entrée(s) affichée(s) · triées de la plus récente à la plus ancienne</p>
       )}
+      {confirmDialog}
     </div>
   );
 }

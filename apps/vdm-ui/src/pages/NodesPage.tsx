@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
+import { useConfirm } from "@/hooks/useDialog";
 import type { VdmJoinToken, VdmNode } from "@/types/vdm";
 
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
@@ -66,6 +67,7 @@ function StatusBadge({ status }: { status: string }) {
 export default function NodesPage() {
   const { isAdmin } = useVdmAuth();
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [showAdd, setShowAdd] = useState(false);
   const [editNode, setEditNode] = useState<(NodeForm & { nodeName: string }) | null>(null);
   const [joinTokenForm, setJoinTokenForm] = useState({ note: "", expiresInMinutes: 60 });
@@ -218,7 +220,7 @@ export default function NodesPage() {
                     <button className="vdm-btn-ghost text-xs" onClick={() => setEditNode({ nodeName: node.name, name: node.name, displayName: node.displayName, apiUrl: node.apiUrl, authToken: "" })}>
                       Edit
                     </button>
-                    <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Remove node ${node.displayName}?`)) deleteMut.mutate(node.name); }}>
+                    <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Remove node ${node.displayName}?`, message: "The node will be unregistered from this VDM cluster.", confirmLabel: "Remove" })) deleteMut.mutate(node.name); }}>
                       Remove
                     </button>
                   </>
@@ -234,6 +236,7 @@ export default function NodesPage() {
         <NodeModal open initial={editNode} onClose={() => setEditNode(null)}
           onSave={(data) => editMut.mutate({ nodeName: editNode.nodeName, data })} />
       )}
+      {confirmDialog}
     </div>
   );
 }

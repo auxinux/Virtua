@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { VdmDocker, VdmNode } from "@/types/vdm";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
+import { useConfirm } from "@/hooks/useDialog";
 
 function StateChip({ state }: { state: string }) {
   const map: Record<string, string> = { running: "pill-green", stopped: "pill-gray", exited: "pill-gray", paused: "pill-yellow" };
@@ -12,6 +13,7 @@ function StateChip({ state }: { state: string }) {
 
 export default function DockerPage() {
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [filterNode, setFilterNode] = useState("all");
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -85,7 +87,7 @@ export default function DockerPage() {
                       <button className="vdm-btn-warning text-xs" onClick={() => actionMut.mutate({ node: ct.nodeName, id: ct.id, action: "stop" })}>Stop</button>
                       <button className="vdm-btn-ghost text-xs" onClick={() => actionMut.mutate({ node: ct.nodeName, id: ct.id, action: "restart" })}>Restart</button>
                     </>}
-                    <button className="vdm-btn-danger text-xs" onClick={() => { if (confirm(`Delete ${ct.name}?`)) deleteMut.mutate({ node: ct.nodeName, id: ct.id }); }}>Delete</button>
+                    <button className="vdm-btn-danger text-xs" onClick={async () => { if (await confirm({ title: `Delete ${ct.name}?`, message: "This container will be permanently removed.", confirmLabel: "Delete" })) deleteMut.mutate({ node: ct.nodeName, id: ct.id }); }}>Delete</button>
                   </div>
                 </td>
               </tr>
@@ -93,6 +95,7 @@ export default function DockerPage() {
           </tbody>
         </table>
       </div>
+      {confirmDialog}
     </div>
   );
 }

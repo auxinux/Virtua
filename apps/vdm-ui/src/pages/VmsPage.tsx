@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { VdmVm, VdmNode } from "@/types/vdm";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
+import { useConfirm } from "@/hooks/useDialog";
 
 function StateChip({ state }: { state: string }) {
   const map: Record<string, string> = { running: "pill-green", stopped: "pill-gray", paused: "pill-yellow", crashed: "pill-red" };
@@ -12,6 +13,7 @@ function StateChip({ state }: { state: string }) {
 
 export default function VmsPage() {
   const qc = useQueryClient();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [filterNode, setFilterNode] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -98,8 +100,8 @@ export default function VmsPage() {
                         </>
                       )}
                       <Link to={`/inventory/vm/${encodeURIComponent(vm.nodeName)}/${encodeURIComponent(vm.name)}`} className="vdm-btn-ghost text-xs">Details</Link>
-                      <button className="vdm-btn-danger text-xs" onClick={() => {
-                        if (confirm(`Delete VM ${vm.name}?`)) deleteMut.mutate({ node: vm.nodeName, name: vm.name });
+                      <button className="vdm-btn-danger text-xs" onClick={async () => {
+                        if (await confirm({ title: `Delete VM ${vm.name}?`, message: "The VM and its disks will be permanently removed.", confirmLabel: "Delete" })) deleteMut.mutate({ node: vm.nodeName, name: vm.name });
                       }}>Delete</button>
                     </div>
                   </td>
@@ -109,6 +111,7 @@ export default function VmsPage() {
           </tbody>
         </table>
       </div>
+      {confirmDialog}
     </div>
   );
 }

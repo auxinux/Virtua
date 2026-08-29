@@ -221,6 +221,17 @@ export interface VdmStorageContentItem {
   deletable?: boolean;
 }
 
+export interface VdmNodePool {
+  name: string;
+  path?: string;
+  type?: string;
+  mountSource?: string;
+  mounted?: boolean;
+  capacity?: number;
+  allocation?: number;
+  available?: number;
+}
+
 export interface VdmTask {
   id: string;
   kind: TaskKind;
