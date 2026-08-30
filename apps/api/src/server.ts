@@ -3771,6 +3771,21 @@ async function walkFiles(root: string, current = root, results: string[] = []): 
   return results;
 }
 
+/** Recursively sum the size of a directory (used for LXC rootfs). */
+async function getDirSize(dir: string): Promise<number> {
+  let total = 0;
+  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      total += await getDirSize(fullPath);
+    } else if (entry.isFile()) {
+      total += (await fs.promises.stat(fullPath).catch(() => ({ size: 0 }))).size;
+    }
+  }
+  return total;
+}
+
 async function listPoolContent(poolName: string, poolPath: string): Promise<StoragePoolContentItem[]> {
   const items: StoragePoolContentItem[] = [];
   const seen = new Set<string>();
@@ -3947,6 +3962,57 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
         synthetic: true,
         isLinked: Boolean(usedBy),
         deletable: !usedBy,
+      });
+    }
+  }
+
+  // Inject LXC containers as synthetic entries (rootfs lives in /var/lib/lxc,
+  // not in the pool dir, so they would otherwise be invisible).
+  if (poolContentTypes.includes("container") || poolContentTypes.includes("vm")) {
+    const lxcList = await callRunner<Array<{ name: string; state?: string }>>("lxc_containers").catch(() => []);
+    for (const ct of lxcList) {
+      const syntheticPath = `lxc://${ct.name}`;
+      if (seen.has(syntheticPath)) continue;
+      seen.add(syntheticPath);
+      const rootfsDir = path.join("/var/lib/lxc", ct.name, "rootfs");
+      const size = await getDirSize(rootfsDir).catch(() => 0);
+      items.push({
+        name: ct.name,
+        type: "container",
+        size,
+        path: syntheticPath,
+        linkedResourceType: "lxc",
+        linkedResourceName: ct.name,
+        relation: ct.state ? `LXC container (${ct.state})` : "LXC container",
+        synthetic: true,
+        isLinked: true,
+      });
+    }
+  }
+
+  // Inject VMs as synthetic entries (their disks may live outside the pool dir).
+  if (poolContentTypes.includes("vm") || poolContentTypes.includes("disk")) {
+    const vmList = await callRunner<Array<{ name: string; state?: string }>>("qemu_vms").catch(() => []);
+    for (const vm of vmList) {
+      const syntheticPath = `vm://${vm.name}`;
+      if (seen.has(syntheticPath)) continue;
+      seen.add(syntheticPath);
+      let size = 0;
+      const info = await callRunner<{ disks?: Array<{ source?: string }> }>("qemu_info", { name: vm.name }).catch(() => null);
+      for (const disk of info?.disks ?? []) {
+        if (!disk.source) continue;
+        size += await fs.promises.stat(disk.source).then((s) => s.size).catch(() => 0);
+      }
+      items.push({
+        name: vm.name,
+        type: "vm_disk",
+        size,
+        path: syntheticPath,
+        linkedResourceType: "vm",
+        linkedResourceName: vm.name,
+        relation: vm.state ? `VM (${vm.state})` : "VM",
+        synthetic: true,
+        isLinked: true,
       });
     }
   }

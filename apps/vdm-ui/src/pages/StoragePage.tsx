@@ -508,7 +508,7 @@ function PoolContentPanel({ nodeName, poolName, isAdmin, onDeleteDone, confirm }
   const items = contentQuery.data ?? [];
 
   const typeBadge = (t: string) => {
-    const map: Record<string, string> = { backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green", vm_disk: "pill-green", disk: "pill-green", archive: "pill-gray", file: "pill-gray" };
+    const map: Record<string, string> = { backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green", vm_disk: "pill-green", disk: "pill-green", container: "pill-blue", archive: "pill-gray", file: "pill-gray" };
     return map[t] ?? "pill-gray";
   };
 
