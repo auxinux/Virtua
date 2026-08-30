@@ -1177,10 +1177,15 @@ app.post("/api/vdm/nodes/:name/storage/:pool/content/delete", async (req, reply)
 app.get("/api/vdm/nodes/:name/isos", async (req, reply) => {
   requireAuth(req, reply);
   const node = getEnabledNode((req.params as { name: string }).name);
-  return tryFetchNode(node, "/api/internal/storage/isos", []);
+  const files = await tryFetchNode<Array<{ type?: string }>>(node, "/api/internal/storage/isos", []);
+  return files.filter((f) => LIBRARY_FILE_TYPES.has(f.type ?? "iso"));
 });
 
-// Aggregate ISOs across all enabled nodes (tagged with nodeName).
+// Aggregate ISOs/templates/Docker images across all enabled nodes (tagged with
+// nodeName). Only ISO, LXC template and Docker image types are returned — VM
+// disks live in the storage content view, not this library, mirroring Virtua's
+// "ISO, templates et images" view.
+const LIBRARY_FILE_TYPES = new Set(["iso", "lxc_template", "docker_image"]);
 app.get("/api/vdm/isos", async (req, reply) => {
   requireAuth(req, reply);
   const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name ASC").all() as VdmNodeRow[];
@@ -1188,7 +1193,9 @@ app.get("/api/vdm/isos", async (req, reply) => {
     if (node.status !== "online") return [];
     try {
       const isos = await tryFetchNode<Array<{ filename: string; displayName?: string; sizeBytes: number; createdAt?: string | null; storagePool?: string | null; type?: string }>>(node, "/api/internal/storage/isos", []);
-      return isos.map((iso) => ({ ...iso, nodeName: node.name, nodeDisplayName: node.display_name ?? node.name }));
+      return isos
+        .filter((iso) => LIBRARY_FILE_TYPES.has(iso.type ?? "iso"))
+        .map((iso) => ({ ...iso, nodeName: node.name, nodeDisplayName: node.display_name ?? node.name }));
     } catch {
       return [];
     }

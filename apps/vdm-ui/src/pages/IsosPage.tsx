@@ -286,7 +286,7 @@ export default function IsosPage() {
   const [showUrl, setShowUrl] = useState(false);
   const [showDepot, setShowDepot] = useState(false);
   const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("iso");
 
   const isosQuery = useQuery<VdmIso[]>({ queryKey: ["vdm-isos"], queryFn: () => api.get("/api/vdm/isos"), refetchInterval: 30_000 });
   const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
@@ -338,13 +338,6 @@ export default function IsosPage() {
           <p className="text-sm text-vdm-textMuted">{isos.length} file{isos.length !== 1 ? "s" : ""} across all nodes</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <select className="vdm-input w-40" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
-            <option value="all">All types</option>
-            <option value="iso">ISO</option>
-            <option value="lxc_template">LXC template</option>
-            <option value="docker_image">Docker image</option>
-            <option value="vm_disk">VM disk</option>
-          </select>
           <input className="vdm-input w-48" placeholder="Search…" value={search} onChange={(e) => setSearch(e.target.value)} />
           {isAdmin && (
             <>
@@ -360,6 +353,23 @@ export default function IsosPage() {
             </>
           )}
         </div>
+      </div>
+
+      {/* Tabs: ISO / Template LXC / Docker image (mirrors Virtua's view) */}
+      <div className="flex gap-1 border-b border-vdm-border">
+        {([
+          { id: "iso", label: "ISO" },
+          { id: "lxc_template", label: "Template LXC" },
+          { id: "docker_image", label: "Image Docker" },
+        ] as const).map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setTypeFilter(tab.id)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${typeFilter === tab.id ? "border-vdm-accent text-vdm-accentHover" : "border-transparent text-vdm-textMuted hover:text-vdm-text"}`}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
       <div className="vdm-card overflow-x-auto">

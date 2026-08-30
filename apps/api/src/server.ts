@@ -3791,7 +3791,8 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
   const seen = new Set<string>();
 
   // Retrieve the pool's declared content types (e.g. ["vm","iso","container"])
-  const poolRow = db.prepare("SELECT content FROM storage_pools WHERE name = ?").get(poolName) as { content: string } | undefined;
+  const poolRow = db.prepare("SELECT type, content FROM storage_pools WHERE name = ?").get(poolName) as { type: string; content: string } | undefined;
+  const poolType = poolRow?.type ?? "directory";
   const poolContentTypes: string[] = poolRow ? (() => { try { return JSON.parse(poolRow.content) as string[]; } catch { return []; } })() : [];
 
   const backups = db.prepare("SELECT * FROM backups WHERE storage_pool = ? ORDER BY created_at DESC").all(poolName) as Array<{
@@ -3967,8 +3968,10 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
   }
 
   // Inject LXC containers as synthetic entries (rootfs lives in /var/lib/lxc,
-  // not in the pool dir, so they would otherwise be invisible).
-  if (poolContentTypes.includes("container") || poolContentTypes.includes("vm")) {
+  // not in the pool dir, so they would otherwise be invisible). Only the LOCAL
+  // directory pool gets these — never S3/NFS pools, to avoid mixing storage.
+  const isLocalDirectoryPool = poolType === "directory" || poolName === "local";
+  if (isLocalDirectoryPool && (poolContentTypes.includes("container") || poolContentTypes.includes("vm"))) {
     const lxcList = await callRunner<Array<{ name: string; state?: string }>>("lxc_containers").catch(() => []);
     for (const ct of lxcList) {
       const syntheticPath = `lxc://${ct.name}`;
@@ -3991,18 +3994,28 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
   }
 
   // Inject VMs as synthetic entries (their disks may live outside the pool dir).
-  if (poolContentTypes.includes("vm") || poolContentTypes.includes("disk")) {
+  // Only the LOCAL directory pool gets these — never S3/NFS pools, and only if
+  // at least one disk physically resolves inside this pool's path, so storage
+  // views never mix disks that live elsewhere.
+  if (isLocalDirectoryPool && (poolContentTypes.includes("vm") || poolContentTypes.includes("disk"))) {
     const vmList = await callRunner<Array<{ name: string; state?: string }>>("qemu_vms").catch(() => []);
     for (const vm of vmList) {
       const syntheticPath = `vm://${vm.name}`;
       if (seen.has(syntheticPath)) continue;
       seen.add(syntheticPath);
       let size = 0;
+      let inThisPool = false;
       const info = await callRunner<{ disks?: Array<{ source?: string }> }>("qemu_info", { name: vm.name }).catch(() => null);
       for (const disk of info?.disks ?? []) {
         if (!disk.source) continue;
-        size += await fs.promises.stat(disk.source).then((s) => s.size).catch(() => 0);
+        const resolved = await fs.promises.realpath(disk.source).catch(() => disk.source);
+        if (resolved && (resolved === poolPath || resolved.startsWith(`${poolPath}${path.sep}`))) {
+          inThisPool = true;
+          size += await fs.promises.stat(disk.source).then((s) => s.size).catch(() => 0);
+        }
       }
+      // Only show the VM in this pool if it actually has a disk here.
+      if (!inThisPool) continue;
       items.push({
         name: vm.name,
         type: "vm_disk",
