@@ -515,6 +515,27 @@ async function readBestMetaConfig(metaDir: string) {
 }
 
 /**
+ * Resolve the container's rootfs path from its config (`lxc.rootfs.path`),
+ * falling back to the legacy `/var/lib/lxc/<name>/rootfs` location. This is the
+ * single source of truth so a container whose rootfs was relocated onto a
+ * dedicated storage pool is still found by every host-side write (hostname,
+ * DNS, network, OS detection, apt sources).
+ */
+async function containerRootfsPath(name: string): Promise<string> {
+  try {
+    const cfg = await readConfig(name);
+    const raw = getCfgValue(cfg, "lxc.rootfs.path");
+    if (raw) {
+      const cleaned = raw.replace(/^dir:/, "").trim();
+      if (cleaned) return cleaned;
+    }
+  } catch {
+    /* fall through to legacy path */
+  }
+  return path.join(LXC_DIR, name, "rootfs");
+}
+
+/**
  * SÉCURITÉ — écritures host-root dans un rootfs de conteneur.
  * Le contenu du rootfs est contrôlé par le root du conteneur : il peut
  * remplacer `etc` (ou un fichier cible) par un symlink vers un chemin de
@@ -524,7 +545,7 @@ async function readBestMetaConfig(metaDir: string) {
  * symlink et on ouvre les fichiers finaux avec O_EXCL / O_NOFOLLOW.
  */
 async function resolveRootfsDir(name: string, relDir: string): Promise<string> {
-  let current = path.join(LXC_DIR, name, "rootfs");
+  let current = await containerRootfsPath(name);
   await fs.mkdir(current, { recursive: true });
   for (const segment of relDir.split("/").filter(Boolean)) {
     current = path.join(current, segment);
@@ -898,6 +919,20 @@ async function sanitizeInvalidDhcpConfig(name: string) {
 async function cleanupContainerArtifacts(name: string) {
   try { await lxcCmd("lxc-stop", "-n", name, "-k"); } catch {}
   try { await lxcCmd("lxc-destroy", "-n", name); } catch {}
+  // If the rootfs was relocated onto a storage pool, lxc-destroy normally removes
+  // it (it reads lxc.rootfs.path), but a failed destroy leaves it behind. Read the
+  // config first and remove the relocated rootfs explicitly so no orphan data
+  // stays on the pool. Only paths OUTSIDE /var/lib/lxc are treated as relocated.
+  try {
+    const cfg = await readConfig(name);
+    const raw = getCfgValue(cfg, "lxc.rootfs.path");
+    const rootfs = raw?.replace(/^dir:/, "").trim();
+    if (rootfs && !rootfs.startsWith(`${LXC_DIR}${path.sep}`)) {
+      await fs.rm(rootfs, { recursive: true, force: true }).catch(() => {});
+      // Also remove the now-empty pool container dir (e.g. <pool>/<name>).
+      await fs.rm(path.dirname(rootfs), { recursive: true, force: true }).catch(() => {});
+    }
+  } catch {}
   await fs.rm(path.join(LXC_DIR, name), { recursive: true, force: true }).catch(() => {});
 }
 
@@ -922,7 +957,7 @@ async function getHostDnsServers() {
 }
 
 async function readContainerDns(name: string) {
-  const resolvPath = path.join(LXC_DIR, name, "rootfs", "etc", "resolv.conf");
+  const resolvPath = path.join(await containerRootfsPath(name), "etc", "resolv.conf");
   try {
     const resolvConf = await fs.readFile(resolvPath, "utf8");
     return resolvConf
@@ -1468,6 +1503,13 @@ async function createContainer(p: Record<string, unknown>) {
   const dns = (p.dnsServers as string[]) ?? [];
   const autostart = (p.autostart as boolean) ?? false;
   const nesting = (p.nesting as boolean | undefined) ?? false;
+  // Optional storage pool path (already resolved by the API from the pool name).
+  // When set, the container's rootfs is relocated there so its data lives on the
+  // dedicated pool instead of the boot disk. The config stays in /var/lib/lxc.
+  const storagePoolPath = (p.storagePool as string | undefined)?.trim() || undefined;
+  if (storagePoolPath && !path.isAbsolute(storagePoolPath)) {
+    throw new Error("Invalid storagePool: must be an absolute path");
+  }
   const containerDir = path.join(LXC_DIR, name);
 
   await ensureHostBridgeReady(bridge);
@@ -1479,7 +1521,9 @@ async function createContainer(p: Record<string, unknown>) {
   // On a ZFS host, back the new container on its own dataset so the disk size is
   // a REAL quota (otherwise the rootfs is a plain dir and the guest sees the whole
   // pool). Falls back to a directory rootfs on non-ZFS hosts. NEW containers only.
-  const zfsRoot = await detectZfsLxcRoot();
+  // When an explicit storage pool path is requested, we always use a directory
+  // rootfs on that pool (generic, works everywhere) and skip the ZFS dataset.
+  const zfsRoot = storagePoolPath ? null : await detectZfsLxcRoot();
   const backingArgs: string[] = [];
   if (zfsRoot) {
     await execFileAsync("zfs", ["create", "-p", zfsRoot]).catch(() => {});
@@ -1530,6 +1574,20 @@ async function createContainer(p: Record<string, unknown>) {
     }
   }
 
+  // Relocate the rootfs onto the requested storage pool. lxc-create placed it at
+  // /var/lib/lxc/<name>/rootfs; move it to <pool>/<name>/rootfs and point
+  // lxc.rootfs.path there so the container's data lives on the dedicated pool
+  // instead of the boot disk. The config stays in /var/lib/lxc/<name>/config.
+  let relocatedRootfsPath: string | undefined;
+  if (storagePoolPath) {
+    const legacyRootfs = path.join(containerDir, "rootfs");
+    const poolContainerDir = path.join(storagePoolPath, name);
+    const poolRootfs = path.join(poolContainerDir, "rootfs");
+    await fs.mkdir(poolContainerDir, { recursive: true });
+    await fs.rename(legacyRootfs, poolRootfs);
+    relocatedRootfsPath = poolRootfs;
+  }
+
   const cfgPath = path.join(LXC_DIR, name, "config");
   await sanitizeInvalidDhcpConfig(name);
 
@@ -1549,6 +1607,7 @@ async function createContainer(p: Record<string, unknown>) {
     `lxc.net.0.hwaddr = ${effectiveMac}`,
     netSection,
     `lxc.rootfs.options = size=${diskGb}G`,
+    relocatedRootfsPath ? `lxc.rootfs.path = dir:${relocatedRootfsPath}` : "",
     autostart ? "lxc.start.auto = 1" : "",
     // Container nesting (run Docker/LXC inside this container) — opt-in, NEW containers only.
     nesting ? "lxc.apparmor.allow_nesting = 1" : "",
@@ -1563,6 +1622,7 @@ async function createContainer(p: Record<string, unknown>) {
     .replace(/^lxc\.net\.\d+\.[^\n]*$/gim, "")
     .replace(/^lxc\.cgroup2?\.[^\n]*$/gim, "")
     .replace(/^lxc\.rootfs\.options\s*=.*$/gim, "")
+    .replace(/^lxc\.rootfs\.path\s*=.*$/gim, "")
     .replace(/^lxc\.start\.auto\s*=.*$/gim, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();

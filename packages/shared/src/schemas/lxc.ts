@@ -20,6 +20,11 @@ export const CreateLxcSchema = z.object({
   password: z.string().min(6).max(128),
   autostart: z.boolean().default(false),
   description: z.string().max(500).optional(),
+  // Storage pool (by name) that should host the container's rootfs. When set,
+  // the API resolves it to a path and the runner points lxc.rootfs.path there
+  // instead of the default /var/lib/lxc/<name>/rootfs. Optional for backward
+  // compatibility: existing callers that omit it keep the legacy location.
+  storagePool: z.string().optional(),
   // Debian only: replace the container's apt sources with the AuxiNux DEB mirror
   // and add the VIRTUA KERNEL repo. The server injects the actual repo URLs.
   overwriteSources: z.boolean().default(false),

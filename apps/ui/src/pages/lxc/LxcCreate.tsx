@@ -43,6 +43,7 @@ interface CreateLxcApiPayload {
   dnsServers: string[];
   password: string;
   autostart: boolean;
+  storagePool?: string;
   overwriteSources?: boolean;
 }
 
@@ -152,6 +153,7 @@ export default function LxcCreate() {
       dnsServers: form.dnsMode === "custom" ? form.dnsServers.split(/[\n,\s]+/).filter(Boolean) : [],
       password: form.rootPassword,
       autostart: form.autostart,
+      storagePool: form.storagePool || undefined,
       overwriteSources: dist.toLowerCase() === "debian" ? form.overwriteSources : false,
     });
   };

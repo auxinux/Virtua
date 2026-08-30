@@ -771,6 +771,21 @@ async function prepareVmCreatePayload(input: CreateVmInput) {
   };
 }
 
+/** Resolve an LXC container's storage pool (by name) to its absolute path so the
+ * runner can relocate the rootfs there. Mirrors prepareVmCreatePayload. When no
+ * pool is given, storagePool stays undefined and the runner keeps the legacy
+ * /var/lib/lxc/<name>/rootfs location (backward compatible). */
+async function prepareLxcCreatePayload<T extends { storagePool?: string }>(input: T): Promise<T & { storagePool?: string }> {
+  const poolName = input.storagePool?.trim();
+  if (!poolName) return input;
+  const pool = resolveManagedStoragePool(poolName);
+  if (!pool) throw Object.assign(new Error("Storage pool not found"), { statusCode: 404 });
+  if (!pool.content.includes("container") && !pool.content.includes("vm")) {
+    throw Object.assign(new Error("Storage pool does not allow container content"), { statusCode: 400 });
+  }
+  return { ...input, storagePool: pool.path };
+}
+
 function mapDatacenterNodeRow(row: DatacenterNodeRow): DatacenterNode {
   let status: DatacenterNode["status"] = row.is_local ? "local" : "unknown";
   if (!row.is_local && row.last_seen_at) {
@@ -5375,7 +5390,7 @@ app.post("/api/internal/lxc", async (req, reply) => {
   requireInternalNodeToken(req);
   const parsed = CreateLxcSchema.safeParse(req.body);
   if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
-  const result = await callRunner("lxc_create", lxcPayloadWithRepos(parsed.data));
+  const result = await callRunner("lxc_create", await prepareLxcCreatePayload(lxcPayloadWithRepos(parsed.data)));
   db.prepare("INSERT INTO lxc_containers (container_name, user_id, description, node_name) VALUES (?, NULL, ?, ?)")
     .run(parsed.data.name, parsed.data.description ?? null, getLocalNodeName());
   return result;
@@ -7657,7 +7672,7 @@ app.post("/api/lxc", async (req, reply) => {
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "create", action: "lxc.create", label: `Create LXC ${parsed.data.name}`, resourceType: "lxc", resourceName: parsed.data.name, message: "Creating container" });
   return runInstantTask(task, ip, async () => {
     const result = targetNode.isLocal
-      ? await callRunner("lxc_create", lxcPayloadWithRepos(parsed.data))
+      ? await callRunner("lxc_create", await prepareLxcCreatePayload(lxcPayloadWithRepos(parsed.data)))
       : await fetchRemoteNode(targetNode, "/api/internal/lxc", { method: "POST", body: JSON.stringify(parsed.data) });
     db.prepare("INSERT INTO lxc_containers (container_name, user_id, description, node_name) VALUES (?, ?, ?, ?) ON CONFLICT(container_name) DO UPDATE SET user_id = excluded.user_id, description = excluded.description, node_name = excluded.node_name")
       .run(parsed.data.name, req.session.userId!, parsed.data.description ?? null, targetNode.name);
