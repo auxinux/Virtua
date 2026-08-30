@@ -80,6 +80,16 @@ function typeIconPath(type: string): string {
   return type === "nfs" ? ICONS.db : ICONS.server;
 }
 
+// Human-readable label for a pool CONTENT item type (docker/lxc/vm_disk/…).
+function contentTypeLabel(type: string): string {
+  const map: Record<string, string> = {
+    iso: "ISO", vm: "VM", vm_disk: "VM", backup: "Backup", template: "Template",
+    disk: "Disk", archive: "Archive", snapshot: "Snapshot", docker: "Docker",
+    lxc: "LXC", container: "Container", file: "File",
+  };
+  return map[type] ?? type.toUpperCase();
+}
+
 // ── Add Storage Modal ────────────────────────────────────────────────────────
 function AddStorageModal({ open, onClose, onSave, isPending }: {
   open: boolean; onClose: () => void;
@@ -368,7 +378,8 @@ function StorageContentPanel({ storage }: { storage: VdmSharedStorage }) {
   const typeBadge = (t: string) => {
     const map: Record<string, string> = {
       backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green",
-      vm_disk: "pill-green", disk: "pill-green", archive: "pill-gray", file: "pill-gray",
+      vm_disk: "pill-green", disk: "pill-green", docker: "pill-blue",
+      lxc: "pill-blue", container: "pill-blue", archive: "pill-gray", file: "pill-gray",
     };
     return map[t] ?? "pill-gray";
   };
@@ -391,7 +402,7 @@ function StorageContentPanel({ storage }: { storage: VdmSharedStorage }) {
               {items.map((it) => (
                 <tr key={it.path} className="hover:bg-vdm-bg/40">
                   <td className="font-mono text-xs text-vdm-text truncate max-w-56" title={it.path}>{it.name}</td>
-                  <td><span className={`rounded-md border border-vdm-border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${typeBadge(it.type)}`}>{it.type}</span></td>
+                  <td><span className={`rounded-md border border-vdm-border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${typeBadge(it.type)}`}>{contentTypeLabel(it.type)}</span></td>
                   <td className="text-xs text-vdm-textMuted">{formatBytes(it.size)}</td>
                   <td className="text-xs text-vdm-textMuted">
                     {it.linkedResourceName ? `${it.linkedResourceType ?? ""} ${it.linkedResourceName}` : it.relation ?? "—"}
@@ -508,7 +519,7 @@ function PoolContentPanel({ nodeName, poolName, isAdmin, onDeleteDone, confirm }
   const items = contentQuery.data ?? [];
 
   const typeBadge = (t: string) => {
-    const map: Record<string, string> = { backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green", vm_disk: "pill-green", disk: "pill-green", container: "pill-blue", archive: "pill-gray", file: "pill-gray" };
+    const map: Record<string, string> = { backup: "pill-blue", snapshot: "pill-yellow", iso: "pill-green", vm_disk: "pill-green", disk: "pill-green", docker: "pill-blue", lxc: "pill-blue", container: "pill-blue", archive: "pill-gray", file: "pill-gray" };
     return map[t] ?? "pill-gray";
   };
 
@@ -530,7 +541,7 @@ function PoolContentPanel({ nodeName, poolName, isAdmin, onDeleteDone, confirm }
               {items.map((it) => (
                 <tr key={it.path} className="hover:bg-vdm-bg/40">
                   <td className="font-mono text-xs text-vdm-text truncate max-w-56" title={it.path}>{it.name}</td>
-                  <td><span className={`rounded-md border border-vdm-border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${typeBadge(it.type)}`}>{it.type}</span></td>
+                  <td><span className={`rounded-md border border-vdm-border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${typeBadge(it.type)}`}>{contentTypeLabel(it.type)}</span></td>
                   <td className="text-xs text-vdm-textMuted">{formatBytes(it.size)}</td>
                   <td className="text-xs text-vdm-textMuted">{it.createdAt ? new Date(it.createdAt).toLocaleString() : "—"}</td>
                   {isAdmin && (

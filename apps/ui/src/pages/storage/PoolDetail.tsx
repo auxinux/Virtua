@@ -79,14 +79,31 @@ export default function PoolDetail() {
   const typeIcon: Record<string, string> = {
     iso: "💿",
     vm: "🖥",
+    vm_disk: "🖥",
     backup: "📦",
     template: "📄",
     disk: "💾",
-    vm_disk: "💾",
     archive: "🗜",
     snapshot: "📸",
+    docker: "🐳",
+    lxc: "📦",
     container: "🐳",
     file: "📄",
+  };
+
+  const typeLabel: Record<string, string> = {
+    iso: "ISO",
+    vm: "VM",
+    vm_disk: "VM",
+    backup: "Backup",
+    template: "Template",
+    disk: "Disk",
+    archive: "Archive",
+    snapshot: "Snapshot",
+    docker: "Docker",
+    lxc: "LXC",
+    container: "Container",
+    file: "File",
   };
 
   const downloadUrl = (item: PoolContentItem) =>
@@ -205,7 +222,7 @@ export default function PoolDetail() {
                     <td className="px-4 py-2 font-mono text-text-200 text-xs">
                       {typeIcon[item.type] || "📄"} {item.name}
                     </td>
-                    <td className="px-4 py-2 text-text-400">{item.type}</td>
+                    <td className="px-4 py-2 text-text-400">{typeLabel[item.type] || item.type}</td>
                     <td className="px-4 py-2 text-text-400">
                       {item.linkedResourceType && item.linkedResourceName
                         ? `${item.linkedResourceType.toUpperCase()} · ${item.linkedResourceName}`
@@ -307,7 +324,7 @@ export default function PoolDetail() {
               </div>
               <div>
                 <div className="text-text-500">Type</div>
-                <div className="text-text-200">{selectedItem.type}</div>
+                <div className="text-text-200">{typeLabel[selectedItem.type] || selectedItem.type}</div>
               </div>
               <div>
                 <div className="text-text-500">Linked Resource</div>

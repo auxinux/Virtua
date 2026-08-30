@@ -3964,7 +3964,7 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       const usedBy = users[0];
       items.push({
         name: tag,
-        type: "container",
+        type: "docker",
         size: img.size ?? 0,
         path: syntheticPath,
         createdAt: img.created ? new Date(img.created).toISOString() : undefined,
@@ -3984,7 +3984,7 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       seen.add(syntheticPath);
       items.push({
         name: container.name || container.id.slice(0, 12),
-        type: "container",
+        type: "docker",
         size: 0,
         path: syntheticPath,
         createdAt: container.createdAt,
@@ -4014,7 +4014,7 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       }
       items.push({
         name: vol.name,
-        type: "container",
+        type: "docker",
         size,
         path: syntheticPath,
         linkedResourceType: "docker",
@@ -4043,7 +4043,7 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       const size = sizeGb > 0 ? Math.round(sizeGb * 1024 * 1024 * 1024) : 0;
       items.push({
         name: ct.name,
-        type: "container",
+        type: "lxc",
         size,
         path: syntheticPath,
         linkedResourceType: "lxc",
