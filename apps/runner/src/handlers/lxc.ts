@@ -526,8 +526,14 @@ async function containerRootfsPath(name: string): Promise<string> {
     const cfg = await readConfig(name);
     const raw = getCfgValue(cfg, "lxc.rootfs.path");
     if (raw) {
-      const cleaned = raw.replace(/^dir:/, "").trim();
-      if (cleaned) return cleaned;
+      // Only a `dir:` rootfs is a plain host path we can write to directly.
+      // Other backings (zfs:, btrfs:, lvm:, overlayfs:…) are mounted by LXC at
+      // the legacy /var/lib/lxc/<name>/rootfs mountpoint, so we must fall back
+      // to that path rather than treat the backing spec as a filesystem path.
+      if (raw.startsWith("dir:")) {
+        const cleaned = raw.slice("dir:".length).trim();
+        if (cleaned) return cleaned;
+      }
     }
   } catch {
     /* fall through to legacy path */
@@ -926,7 +932,9 @@ async function cleanupContainerArtifacts(name: string) {
   try {
     const cfg = await readConfig(name);
     const raw = getCfgValue(cfg, "lxc.rootfs.path");
-    const rootfs = raw?.replace(/^dir:/, "").trim();
+    // Only a `dir:` rootfs is a real host path we relocated; other backings
+    // (zfs:, btrfs:, …) are managed by LXC itself and must not be rm'd here.
+    const rootfs = raw?.startsWith("dir:") ? raw.slice("dir:".length).trim() : undefined;
     if (rootfs && !rootfs.startsWith(`${LXC_DIR}${path.sep}`)) {
       await fs.rm(rootfs, { recursive: true, force: true }).catch(() => {});
       // Also remove the now-empty pool container dir (e.g. <pool>/<name>).
@@ -1584,7 +1592,10 @@ async function createContainer(p: Record<string, unknown>) {
     const poolContainerDir = path.join(storagePoolPath, name);
     const poolRootfs = path.join(poolContainerDir, "rootfs");
     await fs.mkdir(poolContainerDir, { recursive: true });
-    await fs.rename(legacyRootfs, poolRootfs);
+    // Use `mv` (not fs.rename): the pool is typically on a DIFFERENT filesystem
+    // than /var/lib/lxc (that's the whole point), and fs.rename fails with EXDEV
+    // across devices. `mv` transparently copies+deletes in that case.
+    await execFileAsync("mv", [legacyRootfs, poolRootfs]);
     relocatedRootfsPath = poolRootfs;
   }
 
