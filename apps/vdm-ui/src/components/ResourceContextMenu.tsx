@@ -48,11 +48,19 @@ export function ResourceContextMenu({ menu, onClose }: {
   const [showClone, setShowClone] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [showTransfer, setShowTransfer] = useState<"migrate" | "duplicate" | null>(null);
+  // Remember the last target resource so modals (migrate/clone/backup/transfer)
+  // stay mounted after the context menu itself closes. The menu closes on
+  // every click (onClose), and without this the modal that was just opened gets
+  // unmounted on the same render because `if (!menu) return null` below.
+  const [target, setTarget] = useState<ResourceMenuTarget | null>(null);
+  if (menu?.resource && menu.resource !== target) {
+    setTarget(menu.resource);
+  }
 
   const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
   const storagesQuery = useQuery<VdmSharedStorage[]>({ queryKey: ["vdm-storage"], queryFn: () => api.get("/api/vdm/storage") });
 
-  const r = menu?.resource;
+  const r = target;
 
   const base = r ? `/api/vdm/${r.kind === "vm" ? "vms" : r.kind === "lxc" ? "lxc" : "docker"}/${encodeURIComponent(r.node)}/${encodeURIComponent(r.name)}` : "";
 
@@ -88,7 +96,7 @@ export function ResourceContextMenu({ menu, onClose }: {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-tasks-recent"] }); navigate("/tasks"); },
   });
 
-  if (!menu || !r) return null;
+  if (!r) return null;
 
   const isRunning = r.state === "running";
   const href = r.kind === "docker"
@@ -133,7 +141,7 @@ export function ResourceContextMenu({ menu, onClose }: {
 
   return (
     <>
-      <ContextMenu state={{ x: menu.x, y: menu.y, entries }} onClose={onClose} />
+      {menu && <ContextMenu state={{ x: menu.x, y: menu.y, entries }} onClose={onClose} />}
       {confirmDialog}
       {promptDialog}
       {showMigrate && r.kind !== "docker" && (

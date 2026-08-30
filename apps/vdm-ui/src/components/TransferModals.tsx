@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/api/client";
 import type { VdmNode, VdmSharedStorage } from "@/types/vdm";
 
 // ── Icon ────────────────────────────────────────────────────────────────────
@@ -14,6 +16,46 @@ const ICONS = {
   info: "m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z",
 };
 
+interface NodePool {
+  name: string;
+  path?: string;
+  type?: string;
+  mountSource?: string;
+  mounted?: boolean;
+  totalBytes?: number;
+  freeBytes?: number;
+}
+
+/** Local (non-network) storage pools of a node, for choosing a destination pool. */
+function useNodePools(node: string | undefined, enabled: boolean) {
+  return useQuery<NodePool[]>({
+    queryKey: ["vdm-node-pools", node],
+    queryFn: () => api.get<NodePool[]>(`/api/vdm/nodes/${encodeURIComponent(node!)}/storage`),
+    enabled: enabled && !!node,
+  });
+}
+
+// ── Destination pool selector (local-copy mode) ─────────────────────────────
+function PoolSelect({ node, value, onChange }: { node: string; value: string; onChange: (v: string) => void }) {
+  const poolsQuery = useNodePools(node, true);
+  const pools = poolsQuery.data ?? [];
+  const options = pools.length > 0 ? pools : [{ name: "local" as const }];
+
+  return (
+    <div>
+      <label className="vdm-label">Destination storage pool</label>
+      <select className="vdm-input" value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((p) => (
+          <option key={p.name} value={p.name}>
+            {p.name}{p.type ? ` (${p.type})` : ""}
+          </option>
+        ))}
+      </select>
+      {poolsQuery.isLoading && <p className="text-xs text-vdm-textMuted mt-1">Loading pools…</p>}
+    </div>
+  );
+}
+
 // ── Migrate Modal (VM/LXC) ─────────────────────────────────────────────────
 export function MigrateModal({ open, onClose, resourceType, resourceName, sourceNode, nodes, storages, onSubmit }: {
   open: boolean; onClose: () => void; resourceType: string; resourceName: string;
@@ -23,12 +65,13 @@ export function MigrateModal({ open, onClose, resourceType, resourceName, source
   const [targetNode, setTargetNode] = useState("");
   const [mode, setMode] = useState<"shared" | "local">("shared");
   const [storName, setStorName] = useState("");
+  const [poolName, setPoolName] = useState("local");
   const [deleteSource, setDeleteSource] = useState(true);
 
-  useEffect(() => { if (open) { setTargetNode(""); setStorName(""); setMode("shared"); setDeleteSource(true); } }, [open]);
+  useEffect(() => { if (open) { setTargetNode(""); setStorName(""); setMode("shared"); setPoolName("local"); setDeleteSource(true); } }, [open]);
 
   if (!open) return null;
-  const canSubmit = targetNode && (mode === "local" ? true : !!storName);
+  const canSubmit = targetNode && (mode === "local" ? !!poolName : !!storName);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="vdm-card w-full max-w-md p-5 space-y-4">
@@ -67,9 +110,12 @@ export function MigrateModal({ open, onClose, resourceType, resourceName, source
             {storages.length === 0 && <p className="text-xs text-vdm-danger mt-1">⚠ No shared storage configured. Use "Local copy" instead.</p>}
           </div>
         ) : (
-          <p className="text-xs text-vdm-textMuted bg-vdm-accent/8 border border-vdm-accent/25 rounded px-3 py-2">
-            Copies the {resourceType} data directly to the target node's <span className="font-mono">local</span> storage pool (streamed node-to-node, no shared storage required).
-          </p>
+          <div className="space-y-3">
+            {targetNode && <PoolSelect node={targetNode} value={poolName} onChange={setPoolName} />}
+            <p className="text-xs text-vdm-textMuted bg-vdm-accent/8 border border-vdm-accent/25 rounded px-3 py-2">
+              Copies the {resourceType} data directly to the target node's selected storage pool (streamed node-to-node, no shared storage required).
+            </p>
+          </div>
         )}
 
         <label className="flex items-center gap-2 text-sm text-vdm-text cursor-pointer">
@@ -78,7 +124,7 @@ export function MigrateModal({ open, onClose, resourceType, resourceName, source
         </label>
         <div className="flex gap-2 justify-end">
           <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(targetNode, mode === "shared" ? storName : undefined, mode === "local" ? "local" : undefined, deleteSource); onClose(); } }} disabled={!canSubmit}>
+          <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(targetNode, mode === "shared" ? storName : undefined, mode === "local" ? poolName : undefined, deleteSource); onClose(); } }} disabled={!canSubmit}>
             Start Migration
           </button>
         </div>
@@ -97,12 +143,13 @@ export function CloneModal({ open, onClose, resourceType, resourceName, sourceNo
   const [targetNode, setTargetNode] = useState(sourceNode);
   const [mode, setMode] = useState<"local" | "shared">("local");
   const [storName, setStorName] = useState("");
+  const [poolName, setPoolName] = useState("local");
 
-  useEffect(() => { if (open) { setNewName(`${resourceName}-clone`); setTargetNode(sourceNode); setMode("local"); setStorName(""); } }, [open, resourceName, sourceNode]);
+  useEffect(() => { if (open) { setNewName(`${resourceName}-clone`); setTargetNode(sourceNode); setMode("local"); setStorName(""); setPoolName("local"); } }, [open, resourceName, sourceNode]);
 
   if (!open) return null;
   const onlineNodes = nodes.filter((n) => n.status === "online");
-  const canSubmit = newName.trim() && targetNode && (mode === "local" || !!storName);
+  const canSubmit = newName.trim() && targetNode && (mode === "local" ? !!poolName : !!storName);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="vdm-card w-full max-w-md p-5 space-y-4">
@@ -130,7 +177,7 @@ export function CloneModal({ open, onClose, resourceType, resourceName, sourceNo
             </button>
           </div>
         </div>
-        {mode === "shared" && (
+        {mode === "shared" ? (
           <div>
             <label className="vdm-label">Shared Storage</label>
             <select className="vdm-input" value={storName} onChange={(e) => setStorName(e.target.value)}>
@@ -139,6 +186,8 @@ export function CloneModal({ open, onClose, resourceType, resourceName, sourceNo
             </select>
             {storages.length === 0 && <p className="text-xs text-vdm-danger mt-1">⚠ No shared storage configured.</p>}
           </div>
+        ) : (
+          <PoolSelect node={targetNode} value={poolName} onChange={setPoolName} />
         )}
         {mode === "local" && targetNode !== sourceNode && (
           <p className="text-xs text-vdm-textMuted bg-vdm-accent/8 border border-vdm-accent/25 rounded px-3 py-2 flex gap-2 items-start">
@@ -148,7 +197,7 @@ export function CloneModal({ open, onClose, resourceType, resourceName, sourceNo
         )}
         <div className="flex gap-2 justify-end">
           <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(newName.trim(), targetNode, mode === "local" ? "local" : undefined, mode === "shared" ? storName : undefined); onClose(); } }} disabled={!canSubmit}>Clone</button>
+          <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(newName.trim(), targetNode, mode === "local" ? poolName : undefined, mode === "shared" ? storName : undefined); onClose(); } }} disabled={!canSubmit}>Clone</button>
         </div>
       </div>
     </div>
@@ -196,11 +245,12 @@ export function DockerTransferModal({ open, onClose, mode, currentName, sourceNo
   const [targetName, setTargetName] = useState(mode === "migrate" ? currentName : `${currentName}-copy`);
   const [transferMode, setTransferMode] = useState<"shared" | "local">("local");
   const [storageName, setStorageName] = useState("");
+  const [poolName, setPoolName] = useState("local");
 
-  useEffect(() => { if (open) { setTargetNode(""); setTargetName(mode === "migrate" ? currentName : `${currentName}-copy`); setTransferMode("local"); setStorageName(""); } }, [open, mode, currentName]);
+  useEffect(() => { if (open) { setTargetNode(""); setTargetName(mode === "migrate" ? currentName : `${currentName}-copy`); setTransferMode("local"); setStorageName(""); setPoolName("local"); } }, [open, mode, currentName]);
 
   if (!open) return null;
-  const ready = !!targetNode && !!targetName && (transferMode === "local" || !!storageName);
+  const ready = !!targetNode && !!targetName && (transferMode === "local" ? !!poolName : !!storageName);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="vdm-card w-full max-w-md p-5 space-y-4">
@@ -214,15 +264,17 @@ export function DockerTransferModal({ open, onClose, mode, currentName, sourceNo
           <button type="button" onClick={() => setTransferMode("local")} className={`rounded-lg border px-3 py-2 text-sm ${transferMode === "local" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted"}`}>Local copy</button>
           <button type="button" onClick={() => setTransferMode("shared")} className={`rounded-lg border px-3 py-2 text-sm ${transferMode === "shared" ? "border-vdm-accent bg-vdm-accent/10 text-vdm-accent" : "border-vdm-border text-vdm-textMuted"}`}>Shared storage</button>
         </div></div>
-        {transferMode === "shared" && <div><label className="vdm-label">Shared storage</label><select className="vdm-input" value={storageName} onChange={(e) => setStorageName(e.target.value)}>
+        {transferMode === "shared" ? <div><label className="vdm-label">Shared storage</label><select className="vdm-input" value={storageName} onChange={(e) => setStorageName(e.target.value)}>
           <option value="">Select storage...</option>{storages.map((s) => <option key={s.name} value={s.name}>{s.displayName}</option>)}
-        </select></div>}
+        </select></div> : (
+          targetNode && <PoolSelect node={targetNode} value={poolName} onChange={setPoolName} />
+        )}
         <p className="text-xs text-vdm-warning bg-vdm-warning/10 border border-vdm-warning/30 rounded px-3 py-2">
           The writable container layer and configuration are preserved. Containers with volumes or bind mounts are refused to prevent silent data loss.
         </p>
         <div className="flex justify-end gap-2"><button className="vdm-btn-ghost" onClick={onClose}>Cancel</button><button className="vdm-btn-primary" disabled={!ready} onClick={() => {
           if (!ready) return;
-          onSubmit({ targetNode, targetName, sharedStorageName: transferMode === "shared" ? storageName : undefined, targetStoragePool: transferMode === "local" ? "local" : undefined, deleteSource: mode === "migrate" });
+          onSubmit({ targetNode, targetName, sharedStorageName: transferMode === "shared" ? storageName : undefined, targetStoragePool: transferMode === "local" ? poolName : undefined, deleteSource: mode === "migrate" });
           onClose();
         }}>{mode === "migrate" ? "Start Migration" : "Start Duplication"}</button></div>
       </div>

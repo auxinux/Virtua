@@ -21,11 +21,71 @@ function ProgressBar({ value }: { value: number }) {
   );
 }
 
+// ── Task detail modal (opened on double-click) ─────────────────────────────
+function TaskDetailModal({ task, onClose }: { task: VdmTask; onClose: () => void }) {
+  const fields: Array<[string, string | null]> = [
+    ["ID", task.id],
+    ["Type", task.kind],
+    ["Label", task.label],
+    ["Status", task.status],
+    ["Progress", `${task.progress}%`],
+    ["Source node", task.sourceNode],
+    ["Target node", task.targetNode],
+    ["Resource type", task.resourceType],
+    ["Resource", task.resourceName],
+    ["Created by", task.createdBy],
+    ["Created", task.createdAt ? new Date(task.createdAt).toLocaleString() : null],
+    ["Updated", task.updatedAt ? new Date(task.updatedAt).toLocaleString() : null],
+  ];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="vdm-card w-full max-w-2xl p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold text-vdm-text">Task detail</h3>
+          <button className="vdm-btn-ghost" onClick={onClose}>Close</button>
+        </div>
+        <div className="flex items-center gap-2">
+          <StatusBadge status={task.status} />
+          <span className="text-sm text-vdm-text capitalize">{task.kind}</span>
+          <span className="text-sm text-vdm-textMuted">— {task.resourceName}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+          {fields.map(([k, v]) => (
+            <div key={k} className="flex flex-col">
+              <span className="text-xs text-vdm-textMuted">{k}</span>
+              <span className="text-sm text-vdm-text break-all">{v ?? "—"}</span>
+            </div>
+          ))}
+        </div>
+        {task.message && (
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted mb-1">Message</h4>
+            <p className="text-sm text-vdm-text whitespace-pre-wrap">{task.message}</p>
+          </div>
+        )}
+        {task.error && (
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-vdm-danger mb-1">Error</h4>
+            <pre className="text-sm text-vdm-danger whitespace-pre-wrap break-all bg-vdm-bg rounded p-3 max-h-48 overflow-auto">{task.error}</pre>
+          </div>
+        )}
+        {task.result !== undefined && task.result !== null && (
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted mb-1">Result</h4>
+            <pre className="text-xs text-vdm-textMuted whitespace-pre-wrap break-all bg-vdm-bg rounded p-3 max-h-48 overflow-auto">{JSON.stringify(task.result, null, 2)}</pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function TasksPage() {
   const { isAdmin } = useVdmAuth();
   const queryClient = useQueryClient();
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterKind, setFilterKind] = useState("all");
+  const [selectedTask, setSelectedTask] = useState<VdmTask | null>(null);
 
   const tasksQuery = useQuery<VdmTask[]>({
     queryKey: ["vdm-tasks"],
@@ -50,7 +110,7 @@ export default function TasksPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-vdm-text">Tasks</h1>
-          <p className="text-sm text-vdm-textMuted">{tasks.length} task{tasks.length !== 1 ? "s" : ""}</p>
+          <p className="text-sm text-vdm-textMuted">{tasks.length} task{tasks.length !== 1 ? "s" : ""} · double-click a row for full details</p>
         </div>
         {tasksQuery.isFetching && (
           <div className="w-4 h-4 border-2 border-vdm-accent border-t-transparent rounded-full animate-spin" />
@@ -83,7 +143,12 @@ export default function TasksPage() {
             ) : tasks.length === 0 ? (
               <tr><td colSpan={7} className="text-center py-8 text-vdm-textMuted">No tasks found</td></tr>
             ) : tasks.map((task) => (
-              <tr key={task.id} className="hover:bg-vdm-bg/40 transition-colors">
+              <tr
+                key={task.id}
+                className="hover:bg-vdm-bg/40 transition-colors cursor-pointer"
+                onClick={() => setSelectedTask(task)}
+                onDoubleClick={() => setSelectedTask(task)}
+              >
                 <td className="font-mono text-xs text-vdm-textMuted">{task.id.slice(0, 8)}…</td>
                 <td><span className="pill-gray capitalize">{task.kind}</span></td>
                 <td className="text-sm">
@@ -108,13 +173,15 @@ export default function TasksPage() {
                   ) : (
                     <span className="text-vdm-textMuted">{task.message ?? "—"}</span>
                   )}
-                  {isAdmin && task.status === "recovery-required" && <div className="mt-1 flex gap-1"><button className="vdm-btn-ghost text-[10px]" onClick={() => resolveTask.mutate({ id: task.id, resolution: "completed" })}>Mark completed</button><button className="vdm-btn-danger text-[10px]" onClick={() => resolveTask.mutate({ id: task.id, resolution: "failed" })}>Mark failed</button></div>}
+                  {isAdmin && task.status === "recovery-required" && <div className="mt-1 flex gap-1"><button className="vdm-btn-ghost text-[10px]" onClick={(e) => { e.stopPropagation(); resolveTask.mutate({ id: task.id, resolution: "completed" }); }}>Mark completed</button><button className="vdm-btn-danger text-[10px]" onClick={(e) => { e.stopPropagation(); resolveTask.mutate({ id: task.id, resolution: "failed" }); }}>Mark failed</button></div>}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {selectedTask && <TaskDetailModal task={selectedTask} onClose={() => setSelectedTask(null)} />}
     </div>
   );
 }

@@ -2701,7 +2701,9 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
     throw new Error(`LXC container ${name} already exists`);
   }
 
-  const tempDir = await fs.mkdtemp("/tmp/auxinux-lxc-restore-");
+  // Extract under LXC_DIR (same filesystem as the destination) rather than
+  // /tmp, so full container rootfs images don't hit a small tmpfs limit.
+  const tempDir = await fs.mkdtemp(path.join(LXC_DIR, ".auxinux-lxc-restore-"));
   const destDir = path.join(LXC_DIR, name);
   await fs.rm(destDir, { recursive: true, force: true }).catch(() => {});
 

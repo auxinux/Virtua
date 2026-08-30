@@ -3073,7 +3073,10 @@ async function restoreVmBackup(p: Record<string, unknown>) {
 
   await ensureLibvirtStorageDir(storagePool);
   const diskPath = path.join(storagePool, `${name}.qcow2`);
-  const tempDir = await fs.mkdtemp("/tmp/auxinux-vm-restore-");
+  // Extract inside the destination pool (same filesystem as the final disk),
+  // NOT /tmp: /tmp is commonly a small tmpfs and full VM disk images don't fit
+  // there, aborting the restore with "No space left on device".
+  const tempDir = await fs.mkdtemp(path.join(storagePool, ".auxinux-vm-restore-"));
 
   try {
     let xmlToDefine = "";
