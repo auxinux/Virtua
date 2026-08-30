@@ -3771,21 +3771,6 @@ async function walkFiles(root: string, current = root, results: string[] = []): 
   return results;
 }
 
-/** Recursively sum the size of a directory (used for LXC rootfs). */
-async function getDirSize(dir: string): Promise<number> {
-  let total = 0;
-  const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      total += await getDirSize(fullPath);
-    } else if (entry.isFile()) {
-      total += (await fs.promises.stat(fullPath).catch(() => ({ size: 0 }))).size;
-    }
-  }
-  return total;
-}
-
 async function listPoolContent(poolName: string, poolPath: string): Promise<StoragePoolContentItem[]> {
   const items: StoragePoolContentItem[] = [];
   const seen = new Set<string>();
@@ -3922,7 +3907,9 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
     });
   }
 
-  // Inject Docker images as synthetic entries when pool declares "container" content type
+  // Inject Docker images, containers and volumes as synthetic entries when the
+  // pool declares "container" content type. Docker data lives under
+  // /var/lib/docker (not the pool dir), so it would otherwise be invisible.
   if (poolContentTypes.includes("container")) {
     interface DockerImageEntry {
       id: string;
@@ -3934,9 +3921,18 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       id: string;
       name: string;
       image: string;
+      state?: string;
+      status?: string;
+      createdAt?: string;
+    }
+    interface DockerVolumeEntry {
+      name: string;
+      driver: string;
+      mountpoint: string;
     }
     const dockerImages = await callRunner<DockerImageEntry[]>("docker_images").catch(() => []);
     const dockerContainers = await callRunner<DockerContainerEntry[]>("docker_containers").catch(() => []);
+    const dockerVolumes = await callRunner<DockerVolumeEntry[]>("docker_volumes").catch(() => []);
     for (const img of dockerImages) {
       const tag = img.repoTags?.[0] ?? img.id;
       const syntheticPath = `docker-image://${img.id}`;
@@ -3965,6 +3961,54 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
         deletable: !usedBy,
       });
     }
+
+    // Docker containers (running or stopped) as synthetic entries.
+    for (const container of dockerContainers) {
+      const syntheticPath = `docker-container://${container.id}`;
+      if (seen.has(syntheticPath)) continue;
+      seen.add(syntheticPath);
+      items.push({
+        name: container.name || container.id.slice(0, 12),
+        type: "container",
+        size: 0,
+        path: syntheticPath,
+        createdAt: container.createdAt,
+        linkedResourceType: "docker",
+        linkedResourceName: container.name || container.id,
+        relation: container.state ? `Docker container (${container.state})` : "Docker container",
+        synthetic: true,
+        isLinked: true,
+      });
+    }
+
+    // Docker volumes as synthetic entries. Size is read with a bounded `du`
+    // (5s) so a huge volume can never stall the pool listing the way the old
+    // recursive LXC rootfs walk did.
+    for (const vol of dockerVolumes) {
+      const syntheticPath = `docker-volume://${vol.name}`;
+      if (seen.has(syntheticPath)) continue;
+      seen.add(syntheticPath);
+      let size = 0;
+      if (vol.mountpoint) {
+        try {
+          const { stdout } = await execFileAsync("du", ["-sb", vol.mountpoint], { timeout: 5000 });
+          size = parseInt(stdout.trim().split(/\s+/)[0] ?? "0", 10) || 0;
+        } catch {
+          size = 0;
+        }
+      }
+      items.push({
+        name: vol.name,
+        type: "container",
+        size,
+        path: syntheticPath,
+        linkedResourceType: "docker",
+        linkedResourceName: vol.name,
+        relation: `Docker volume (${vol.driver})`,
+        synthetic: true,
+        isLinked: true,
+      });
+    }
   }
 
   // Inject LXC containers as synthetic entries (rootfs lives in /var/lib/lxc,
@@ -3972,13 +4016,16 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
   // directory pool gets these — never S3/NFS pools, to avoid mixing storage.
   const isLocalDirectoryPool = poolType === "directory" || poolName === "local";
   if (isLocalDirectoryPool && (poolContentTypes.includes("container") || poolContentTypes.includes("vm"))) {
-    const lxcList = await callRunner<Array<{ name: string; state?: string }>>("lxc_containers").catch(() => []);
+    const lxcList = await callRunner<Array<{ name: string; state?: string; rootfsSizeGb?: number; diskGb?: number }>>("lxc_containers").catch(() => []);
     for (const ct of lxcList) {
       const syntheticPath = `lxc://${ct.name}`;
       if (seen.has(syntheticPath)) continue;
       seen.add(syntheticPath);
-      const rootfsDir = path.join("/var/lib/lxc", ct.name, "rootfs");
-      const size = await getDirSize(rootfsDir).catch(() => 0);
+      // The runner already reports the rootfs size (rootfsSizeGb/diskGb); use it
+      // instead of recursively walking the rootfs, which took tens of seconds on
+      // large containers and made the pool listing time out (81s observed).
+      const sizeGb = ct.rootfsSizeGb ?? ct.diskGb ?? 0;
+      const size = sizeGb > 0 ? Math.round(sizeGb * 1024 * 1024 * 1024) : 0;
       items.push({
         name: ct.name,
         type: "container",
