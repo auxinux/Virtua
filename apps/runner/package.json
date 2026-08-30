@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/runner",
-  "version": "0.7.69",
+  "version": "0.7.70",
   "main": "./dist/runner.js",
   "scripts": {
     "build": "tsc",
