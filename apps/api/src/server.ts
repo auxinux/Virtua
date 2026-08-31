@@ -3888,6 +3888,13 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       }
     }
 
+    // Only surface items that are actually managed by Virtua. A file that did
+    // not match any known type (ISO, backup, disk, archive, VM attachment) is
+    // unrelated system noise (logs, caches, dpkg state…) and must not appear in
+    // the pool listing — the pool dir can otherwise contain tens of thousands
+    // of such files.
+    if (type === "file" && !linkedResourceType && backingDependents.length === 0) continue;
+
     const key = `file:${realPath}`;
     if (seen.has(key)) continue;
     seen.add(key);
