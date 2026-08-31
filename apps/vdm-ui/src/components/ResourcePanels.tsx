@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useConfirm, usePrompt } from "@/hooks/useDialog";
+import type { VdmVmInfo } from "@/types/vdm";
 
 // =============================================================================
 //  Config editors + multi-NIC managers + LXC snapshots for the VDM detail panels
@@ -341,6 +342,253 @@ export function LxcSnapshots({ node, name }: { node: string; name: string }) {
       </div>
       {confirmDialog}
       {promptDialog}
+    </div>
+  );
+}
+
+// ── VM hardware (disks / NICs / ISO drive) ──────────────────────────────────
+// The VDM panel used to expose only vCPU/RAM/flags for a VM: disks, network
+// cards and the ISO drive could be edited from the single-node panel but not
+// from the datacenter view. These call the /disk, /network and /iso relays.
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** qemu_info returns the CD drive alongside the data disks; only the latter
+ *  can be resized or detached. */
+function isCdrom(disk: { deviceType?: string }): boolean {
+  return disk.deviceType === "cdrom";
+}
+
+export function VmHardwarePanel({ node, name, vm }: { node: string; name: string; vm: VdmVmInfo }) {
+  const qc = useQueryClient();
+  const base = `/api/vdm/vms/${encodeURIComponent(node)}/${encodeURIComponent(name)}`;
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { prompt, dialog: promptDialog } = usePrompt();
+  const [addDisk, setAddDisk] = useState(false);
+  const [addNic, setAddNic] = useState(false);
+  const [editNic, setEditNic] = useState<string | null>(null);
+  const [err, setErr] = useState("");
+
+  const refresh = () => qc.invalidateQueries({ queryKey: ["vdm-vm", node, name] });
+  const fail = (e: Error) => setErr(e.message);
+
+  const pools = useQuery<Array<{ name: string; type?: string }>>({
+    queryKey: ["vdm-node-pools", node], queryFn: () => api.get(`/api/vdm/nodes/${encodeURIComponent(node)}/storage`),
+  });
+  const bridges = useQuery<Array<{ name: string }>>({
+    queryKey: ["vdm-node-bridges", node], queryFn: () => api.get(`/api/vdm/nodes/${encodeURIComponent(node)}/bridges`),
+  });
+  const isos = useQuery<Array<{ filename: string; nodeName: string; sizeBytes: number }>>({
+    queryKey: ["vdm-isos"], queryFn: () => api.get("/api/vdm/isos"),
+  });
+
+  const detachDisk = useMutation({
+    mutationFn: (device: string) => api.post(`${base}/disk/detach`, { device }),
+    onSuccess: refresh, onError: fail,
+  });
+  const resizeDisk = useMutation({
+    mutationFn: (p: { device: string; sizeGb: number }) => api.post(`${base}/disk/resize`, p),
+    onSuccess: refresh, onError: fail,
+  });
+  const detachNic = useMutation({
+    mutationFn: (mac: string) => api.delete(`${base}/network/${encodeURIComponent(mac)}`),
+    onSuccess: refresh, onError: fail,
+  });
+  const attachIso = useMutation({
+    mutationFn: (isoFile: string) => api.post(`${base}/iso/attach`, { isoFile }),
+    onSuccess: refresh, onError: fail,
+  });
+  const ejectIso = useMutation({
+    mutationFn: () => api.post(`${base}/iso/eject`),
+    onSuccess: refresh, onError: fail,
+  });
+
+  const disks = (vm.disks ?? []).filter((d) => !isCdrom(d));
+  const nics = vm.networks ?? [];
+  const nodeIsos = (isos.data ?? []).filter((i) => i.nodeName === node);
+  const running = vm.state === "running";
+
+  return (
+    <div className="space-y-5 max-w-3xl">
+      {err && <p className="text-xs text-vdm-danger bg-vdm-danger/10 border border-vdm-danger/30 rounded px-3 py-2">{err}</p>}
+      <p className="text-xs text-vdm-textMuted bg-vdm-warning/10 border border-vdm-warning/30 rounded px-3 py-2">
+        Hardware changes apply to the VM definition. Attach/detach on a running VM may require a restart to be visible in the guest.
+      </p>
+
+      {/* ── ISO drive ── */}
+      <section className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">CD/DVD drive</h3>
+        <div className="vdm-card p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-mono text-vdm-text truncate">{vm.mountedIso || "No disc"}</span>
+            {vm.mountedIso && (
+              <button className="vdm-btn-danger text-xs" disabled={ejectIso.isPending} onClick={() => { setErr(""); ejectIso.mutate(); }}>
+                {ejectIso.isPending ? "Ejecting…" : "Eject"}
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <select className="vdm-input flex-1" defaultValue="" onChange={(e) => { if (e.target.value) { setErr(""); attachIso.mutate(e.target.value); e.target.value = ""; } }}>
+              <option value="">{nodeIsos.length ? "Insert an ISO…" : "No ISO available on this node"}</option>
+              {nodeIsos.map((i) => <option key={i.filename} value={i.filename}>{i.filename} ({formatBytes(i.sizeBytes)})</option>)}
+            </select>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Disks ── */}
+      <section className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Disks</h3>
+        {disks.length === 0 && <p className="text-sm text-vdm-textMuted italic">No disk attached.</p>}
+        {disks.map((d) => (
+          <NicCard
+            key={d.device}
+            title={d.device}
+            primary={false}
+            rows={[["Size", formatBytes(d.sizeBytes)], ["Format", d.format || "—"], ["Bus", d.bus || "—"], ["Path", d.source || "—"], ["Mode", d.readonly ? "read-only" : "read-write"]]}
+            onEdit={async () => {
+              const currentGb = Math.max(1, Math.round(d.sizeBytes / 1024 ** 3));
+              const v = await prompt({ title: `Resize ${d.device}`, label: `New size in GB (current: ${currentGb} GB — growing only)`, placeholder: String(currentGb + 10) });
+              const sizeGb = Number(v);
+              if (!v || !Number.isFinite(sizeGb) || sizeGb <= 0) return;
+              setErr("");
+              resizeDisk.mutate({ device: d.device, sizeGb });
+            }}
+            onDelete={async () => {
+              if (await confirm({ title: `Detach ${d.device}?`, message: "The disk is removed from the VM. Its image file is kept on the storage pool.", confirmLabel: "Detach" })) {
+                setErr("");
+                detachDisk.mutate(d.device);
+              }
+            }}
+            deleting={detachDisk.isPending}
+          />
+        ))}
+        {addDisk
+          ? <AttachDiskForm base={base} pools={pools.data ?? []} onDone={() => { setAddDisk(false); refresh(); }} onCancel={() => setAddDisk(false)} />
+          : <button className="vdm-btn-ghost" onClick={() => { setErr(""); setAddDisk(true); }}>+ Add disk</button>}
+      </section>
+
+      {/* ── Network cards ── */}
+      <section className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Network cards</h3>
+        {nics.length === 0 && <p className="text-sm text-vdm-textMuted italic">No network card.</p>}
+        {nics.map((n, i) => editNic === n.mac ? (
+          <VmNicForm key={n.mac} base={base} bridges={bridges.data ?? []} nic={n} onDone={() => { setEditNic(null); refresh(); }} onCancel={() => setEditNic(null)} />
+        ) : (
+          <NicCard
+            key={n.mac}
+            title={`net${i}`}
+            primary={false}
+            rows={[["Bridge", n.source || "—"], ["MAC", n.mac], ["Model", n.model || "virtio"]]}
+            onEdit={() => { setErr(""); setEditNic(n.mac); }}
+            onDelete={async () => {
+              if (await confirm({ title: `Detach ${n.mac}?`, message: running ? "The VM is running; the guest will lose this interface." : "This network card will be removed from the VM.", confirmLabel: "Detach" })) {
+                setErr("");
+                detachNic.mutate(n.mac);
+              }
+            }}
+            deleting={detachNic.isPending}
+          />
+        ))}
+        {addNic
+          ? <VmNicForm base={base} bridges={bridges.data ?? []} onDone={() => { setAddNic(false); refresh(); }} onCancel={() => setAddNic(false)} />
+          : <button className="vdm-btn-ghost" onClick={() => { setErr(""); setAddNic(true); }}>+ Add network card</button>}
+      </section>
+
+      {confirmDialog}
+      {promptDialog}
+    </div>
+  );
+}
+
+function AttachDiskForm({ base, pools, onDone, onCancel }: {
+  base: string; pools: Array<{ name: string; type?: string }>; onDone: () => void; onCancel: () => void;
+}) {
+  const [sizeGb, setSizeGb] = useState(10);
+  const [bus, setBus] = useState<"virtio" | "sata" | "scsi" | "ide">("virtio");
+  const [format, setFormat] = useState<"qcow2" | "raw">("qcow2");
+  const [storagePool, setStoragePool] = useState(pools[0]?.name ?? "");
+  const save = useMutation({
+    mutationFn: () => api.post(`${base}/disk/attach`, { sizeGb, bus, format, ...(storagePool ? { storagePool } : {}) }),
+    onSuccess: onDone,
+  });
+  return (
+    <div className="vdm-card p-4 space-y-3 border border-vdm-accent/40">
+      <h4 className="text-sm font-semibold text-vdm-text">Add disk</h4>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="vdm-label">Size (GB)</label><input className="vdm-input" type="number" min={1} value={sizeGb} onChange={(e) => setSizeGb(parseInt(e.target.value, 10) || 1)} /></div>
+        <div><label className="vdm-label">Storage pool</label>
+          <select className="vdm-input" value={storagePool} onChange={(e) => setStoragePool(e.target.value)}>
+            {pools.length === 0 && <option value="">default</option>}
+            {pools.map((p) => <option key={p.name} value={p.name}>{p.name}{p.type ? ` (${p.type})` : ""}</option>)}
+          </select>
+        </div>
+        <div><label className="vdm-label">Bus</label>
+          <select className="vdm-input" value={bus} onChange={(e) => setBus(e.target.value as typeof bus)}>
+            {(["virtio", "sata", "scsi", "ide"] as const).map((b) => <option key={b} value={b}>{b}</option>)}
+          </select>
+        </div>
+        <div><label className="vdm-label">Format</label>
+          <select className="vdm-input" value={format} onChange={(e) => setFormat(e.target.value as typeof format)}>
+            {(["qcow2", "raw"] as const).map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </div>
+      </div>
+      {save.error && <p className="text-xs text-vdm-danger">{(save.error as Error).message}</p>}
+      <div className="flex gap-2 justify-end">
+        <button className="vdm-btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="vdm-btn-primary" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Attaching…" : "Attach"}</button>
+      </div>
+    </div>
+  );
+}
+
+function VmNicForm({ base, bridges, nic, onDone, onCancel }: {
+  base: string; bridges: Array<{ name: string }>; nic?: { mac: string; source: string; model: string };
+  onDone: () => void; onCancel: () => void;
+}) {
+  const editing = !!nic;
+  const [bridge, setBridge] = useState(nic?.source || bridges[0]?.name || "vmbr0");
+  const [model, setModel] = useState<"virtio" | "e1000" | "rtl8139">((nic?.model as "virtio") || "virtio");
+  const [mac, setMac] = useState(editing ? nic!.mac : "");
+  const save = useMutation({
+    mutationFn: () => {
+      const macValue = mac.trim();
+      if (editing) return api.put(`${base}/network/${encodeURIComponent(nic!.mac)}`, { bridge, model, ...(macValue && macValue !== nic!.mac ? { mac: macValue } : {}) });
+      return api.post(`${base}/network/attach`, { bridge, model, ...(macValue ? { mac: macValue } : {}) });
+    },
+    onSuccess: onDone,
+  });
+  return (
+    <div className="vdm-card p-4 space-y-3 border border-vdm-accent/40">
+      <h4 className="text-sm font-semibold text-vdm-text">{editing ? `Edit ${nic!.mac}` : "Add network card"}</h4>
+      <div className="grid grid-cols-3 gap-3">
+        <div><label className="vdm-label">Bridge</label>
+          <select className="vdm-input" value={bridge} onChange={(e) => setBridge(e.target.value)}>
+            {bridges.length === 0 && <option value={bridge}>{bridge}</option>}
+            {bridges.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+          </select>
+        </div>
+        <div><label className="vdm-label">Model</label>
+          <select className="vdm-input" value={model} onChange={(e) => setModel(e.target.value as typeof model)}>
+            {(["virtio", "e1000", "rtl8139"] as const).map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+        <div><label className="vdm-label">MAC {editing ? "" : "(optional)"}</label>
+          <input className="vdm-input font-mono" placeholder="aa:bb:cc:dd:ee:ff" value={mac} onChange={(e) => setMac(e.target.value)} />
+        </div>
+      </div>
+      {save.error && <p className="text-xs text-vdm-danger">{(save.error as Error).message}</p>}
+      <div className="flex gap-2 justify-end">
+        <button className="vdm-btn-ghost" onClick={onCancel}>Cancel</button>
+        <button className="vdm-btn-primary" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? "Saving…" : editing ? "Save" : "Attach"}</button>
+      </div>
     </div>
   );
 }

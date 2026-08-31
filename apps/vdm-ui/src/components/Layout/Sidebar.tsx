@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/ResourceContextMenu";
 import { type ContextMenuState } from "@/components/ui/ContextMenu";
+import { useTaskActivity } from "@/hooks/useTaskActivity";
 import type { VdmNode, VdmVm, VdmLxc, VdmDocker, VdmSharedStorage } from "@/types/vdm";
 
 // Icons as SVG strings
@@ -171,15 +172,12 @@ export function Sidebar() {
     queryFn: () => api.get<VdmSharedStorage[]>("/api/vdm/storage"),
     staleTime: 60_000,
   });
-  const tasksQuery = useQuery({
-    queryKey: ["vdm-tasks-active-count"],
-    queryFn: () => api.get<{ count: number }>("/api/vdm/tasks/active-count"),
-    refetchInterval: 5000,
-  });
+  // Also refreshes the resource lists below when a task completes — creation is
+  // asynchronous, so the tree cannot be refreshed at submit time.
+  const { count: activeTasksCount } = useTaskActivity();
 
   const nodes = nodesQuery.data ?? [];
   const storages = storageQuery.data ?? [];
-  const activeTasksCount = tasksQuery.data?.count ?? 0;
 
   return (
     <aside className="flex flex-col w-60 min-w-[240px] bg-[#0d1117] border-r border-vdm-border overflow-hidden">

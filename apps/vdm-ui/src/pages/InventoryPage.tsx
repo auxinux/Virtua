@@ -6,7 +6,7 @@ import { buildAllResourceRows, type AllResourceRow } from "@/lib/allResources";
 import type { VdmVm, VdmVmInfo, VdmVmStats, VdmLxc, VdmDocker, VdmNode, VdmSharedStorage, VdmSnapshot, VdmTask } from "@/types/vdm";
 import { LogsModal } from "@/components/LogsModal";
 import { ConsoleModal } from "@/components/ConsoleModal";
-import { VmConfigForm, LxcConfigForm, DockerConfigForm, DockerExec, LxcNetworks, DockerNetworks, LxcSnapshots } from "@/components/ResourcePanels";
+import { VmConfigForm, VmHardwarePanel, LxcConfigForm, DockerConfigForm, DockerExec, LxcNetworks, DockerNetworks, LxcSnapshots } from "@/components/ResourcePanels";
 import { MigrateModal, CloneModal, BackupModal, DockerTransferModal } from "@/components/TransferModals";
 import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/ResourceContextMenu";
 import { ContextMenuState } from "@/components/ui/ContextMenu";
@@ -74,7 +74,7 @@ function ActionButton({ label, icon, onClick, variant = "ghost", disabled }: { l
 // ── VM Detail Panel ────────────────────────────────────────────────────────
 function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"summary" | "config" | "snapshots" | "tasks">("summary");
+  const [tab, setTab] = useState<"summary" | "config" | "hardware" | "snapshots" | "tasks">("summary");
   const [showConsole, setShowConsole] = useState(false);
   const [showVnc, setShowVnc] = useState(false);
   const [showSpice, setShowSpice] = useState(false);
@@ -178,7 +178,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-vdm-border">
-        {(["summary", "config", "snapshots", "tasks"] as const).map((t) => (
+        {(["summary", "config", "hardware", "snapshots", "tasks"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`px-3 py-2 text-sm capitalize transition-colors border-b-2 -mb-px ${tab === t ? "border-vdm-accent text-vdm-accent" : "border-transparent text-vdm-textMuted hover:text-vdm-text"}`}>
             {t}
           </button>
@@ -229,7 +229,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
               <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Disks</h3>
               <table className="vdm-table"><thead><tr><th>Device</th><th>Path</th><th>Size</th><th>Format</th></tr></thead>
                 <tbody>{vm.disks.map((d) => (
-                  <tr key={d.device}><td className="font-mono">{d.device}</td><td className="text-vdm-textMuted text-xs truncate max-w-48">{d.path}</td><td>{formatBytes(d.sizeBytes)}</td><td>{d.format}</td></tr>
+                  <tr key={d.device}><td className="font-mono">{d.device}</td><td className="text-vdm-textMuted text-xs truncate max-w-48">{d.source}</td><td>{formatBytes(d.sizeBytes)}</td><td>{d.format}</td></tr>
                 ))}</tbody>
               </table>
             </div>
@@ -239,6 +239,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
 
       {/* Tab: Config */}
       {tab === "config" && <VmConfigForm node={nodeName} name={vm.name} vm={vm as unknown as Record<string, unknown>} />}
+      {tab === "hardware" && <VmHardwarePanel node={nodeName} name={vm.name} vm={vm} />}
 
       {/* Tab: Snapshots */}
       {tab === "snapshots" && (

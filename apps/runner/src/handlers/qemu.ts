@@ -1587,6 +1587,9 @@ async function getVmInfo(name: string) {
 
   const disks = parseDiskBlocks(xml).map((disk) => ({
     device: disk.device,
+    // Kept so callers can tell a data disk from the CD drive: the list mixes
+    // both, and only `disk` entries are resizable/detachable.
+    deviceType: disk.deviceType,
     bus: disk.bus,
     source: disk.source,
     format: disk.format,

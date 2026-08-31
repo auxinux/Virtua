@@ -1957,6 +1957,49 @@ app.post("/api/vdm/vms/:node/:name/iso/:op", async (req, reply) => {
   return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/iso/${op}`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
 });
 
+// ── VM hardware: disks, NICs, USB — relayed to the owning node ─────────────
+// Mirrors the single-node panel: without these, a VM's hardware could only be
+// edited by connecting to its node directly, never from VDM.
+
+app.post("/api/vdm/vms/:node/:name/disk/:op", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name, op } = req.params as { node: string; name: string; op: string };
+  if (!["attach", "detach", "resize"].includes(op)) return reply.status(400).send({ error: "op must be attach, detach or resize" });
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/disk/${op}`, {
+    method: "POST", timeoutMs: LONG_OPERATION_TIMEOUT_MS, body: JSON.stringify(req.body ?? {}),
+  });
+});
+
+app.post("/api/vdm/vms/:node/:name/network/attach", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name } = req.params as { node: string; name: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/network/attach`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
+});
+
+app.put("/api/vdm/vms/:node/:name/network/:mac", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name, mac } = req.params as { node: string; name: string; mac: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/network/${encodeURIComponent(mac)}`, { method: "PUT", body: JSON.stringify(req.body ?? {}) });
+});
+
+app.delete("/api/vdm/vms/:node/:name/network/:mac", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name, mac } = req.params as { node: string; name: string; mac: string };
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/network/${encodeURIComponent(mac)}`, { method: "DELETE" });
+});
+
+app.post("/api/vdm/vms/:node/:name/usb/:op", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name, op } = req.params as { node: string; name: string; op: string };
+  if (op !== "attach" && op !== "detach") return reply.status(400).send({ error: "op must be attach or detach" });
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/usb/${op}`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
+});
+
 app.post("/api/vdm/vms/:node/:name/repair-disk", async (req, reply) => {
   requireAdmin(req, reply);
   const { node: nodeName, name } = req.params as { node: string; name: string };
@@ -2943,10 +2986,16 @@ app.get("/api/vdm/tasks", async (req, reply) => {
 
 // Cheap badge counter: the list endpoint is capped by `limit`, so counting its
 // rows client-side can never report more than that cap.
+//
+// `lastFinishedAt` is the UI's completion signal. Resource creation/deletion is
+// asynchronous (202 + task), so the client cannot refresh its lists at submit
+// time — the resource does not exist yet. Polling this single timestamp lets it
+// refresh exactly when some task actually reached a terminal state.
 app.get("/api/vdm/tasks/active-count", async (req, reply) => {
   requireAuth(req, reply);
   const row = db.prepare("SELECT COUNT(*) AS count FROM vdm_tasks WHERE status IN ('pending', 'running')").get() as { count: number };
-  return { count: row.count };
+  const finished = db.prepare("SELECT MAX(finished_at) AS last FROM vdm_tasks WHERE finished_at IS NOT NULL").get() as { last: string | null };
+  return { count: row.count, lastFinishedAt: finished.last ?? null };
 });
 
 app.get("/api/vdm/tasks/:id", async (req, reply) => {

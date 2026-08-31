@@ -5607,6 +5607,59 @@ app.post("/api/internal/vms/:name/iso/eject", async (req, reply) => {
   return callRunner("qemu_eject_iso", { name });
 });
 
+// ── Internal: VM hardware (disks + NICs) ───────────────────────────────────
+// The public /api/vms routes have exposed these for a while, but the internal
+// surface did not — so VDM had no way to edit a remote VM's hardware. Same
+// runner actions, node-token auth instead of a session, and no local task
+// wrapper: VDM tracks the operation in its own task.
+
+app.post("/api/internal/vms/:name/disk/attach", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const parsed = AttachDiskSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  return callRunner("qemu_attach_disk", await buildAttachDiskPayload(name, parsed.data));
+});
+
+app.post("/api/internal/vms/:name/disk/detach", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { device } = (req.body ?? {}) as { device?: string };
+  if (!device) return reply.status(400).send({ error: "device is required" });
+  return callRunner("qemu_detach_disk", { name, device });
+});
+
+app.post("/api/internal/vms/:name/disk/resize", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { device, sizeGb } = (req.body ?? {}) as { device?: string; sizeGb?: number };
+  if (!device) return reply.status(400).send({ error: "device is required" });
+  if (!Number.isFinite(sizeGb) || (sizeGb as number) <= 0) return reply.status(400).send({ error: "sizeGb must be a positive number" });
+  return callRunner("qemu_resize_disk", { name, device, sizeGb });
+});
+
+app.post("/api/internal/vms/:name/network/attach", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const parsed = AttachNetworkSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  return callRunner("qemu_attach_network", { name, ...parsed.data });
+});
+
+app.put("/api/internal/vms/:name/network/:mac", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name, mac } = req.params as { name: string; mac: string };
+  const parsed = UpdateNetworkSchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  return callRunner("qemu_update_network", { name, mac, newMac: parsed.data.mac, bridge: parsed.data.bridge, model: parsed.data.model });
+});
+
+app.delete("/api/internal/vms/:name/network/:mac", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name, mac } = req.params as { name: string; mac: string };
+  return callRunner("qemu_detach_network", { name, mac });
+});
+
 app.post("/api/internal/vms/:name/usb/attach", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
@@ -6955,6 +7008,45 @@ app.get("/api/vms/:name/logs", async (req, reply) => {
     : { logs: await callRunner("qemu_logs", { name, tail }) };
 });
 
+/**
+ * Resolve an attach-disk request into a runner payload.
+ *
+ * Holds the security-critical part of the operation — managed-filename
+ * sanitising, pool containment and the "already attached elsewhere" guard — so
+ * the session-authenticated route and the node-token internal route (used by
+ * VDM) cannot drift apart.
+ */
+async function buildAttachDiskPayload(name: string, data: ReturnType<typeof AttachDiskSchema.parse>): Promise<Record<string, unknown>> {
+  let storagePath: string | undefined;
+  if (data.storagePool) {
+    const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(data.storagePool) as { path: string } | undefined;
+    storagePath = pool?.path;
+  }
+  let existingPath: string | undefined;
+  if (data.existingPath) {
+    const filename = sanitizeManagedFilename(path.basename(data.existingPath));
+    if (!isAllowedManagedFile(filename, "vm_disk")) {
+      throw Object.assign(new Error("Unsupported file extension for vm_disk"), { statusCode: 400 });
+    }
+    if (data.storagePool) {
+      const pool = resolveManagedStoragePool(data.storagePool);
+      if (!pool) throw Object.assign(new Error("Storage pool not found"), { statusCode: 404 });
+      const candidate = path.join(pool.path, filename);
+      const stat = await fs.promises.stat(candidate).catch(() => null);
+      if (!stat?.isFile()) throw Object.assign(new Error(`Managed file not found: ${filename}`), { statusCode: 404 });
+      existingPath = candidate;
+    } else {
+      existingPath = await resolveManagedFilePath(filename, "vm_disk");
+    }
+  }
+  const attachedSources = existingPath ? await listAttachedVmDiskSources() : undefined;
+  const realExistingPath = existingPath ? await fs.promises.realpath(existingPath).catch(() => existingPath) : undefined;
+  if (realExistingPath && attachedSources?.has(realExistingPath)) {
+    throw Object.assign(new Error("This VM disk is already attached to a machine"), { statusCode: 409 });
+  }
+  return { name, ...data, existingPath: realExistingPath, storagePool: storagePath };
+}
+
 app.post("/api/vms/:name/disk/attach", async (req, reply) => {
   requireAuth(req, reply);
   const { name } = req.params as { name: string };
@@ -6963,43 +7055,9 @@ app.post("/api/vms/:name/disk/attach", async (req, reply) => {
   if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const permCheck = checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_modify");
   if (!permCheck.ok) return replyQuotaError(reply, permCheck);
-  let storagePath: string | undefined;
-  if (parsed.data.storagePool) {
-    const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(parsed.data.storagePool) as { path: string } | undefined;
-    storagePath = pool?.path;
-  }
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "vm.disk.attach", label: `Attach disk to VM ${name}`, resourceType: "vm", resourceName: name, message: "Attaching disk" });
-  return runInstantTask(task, ip, async () => {
-    let existingPath: string | undefined;
-    if (parsed.data.existingPath) {
-      const filename = sanitizeManagedFilename(path.basename(parsed.data.existingPath));
-      if (!isAllowedManagedFile(filename, "vm_disk")) {
-        throw Object.assign(new Error("Unsupported file extension for vm_disk"), { statusCode: 400 });
-      }
-      if (parsed.data.storagePool) {
-        const pool = resolveManagedStoragePool(parsed.data.storagePool);
-        if (!pool) throw Object.assign(new Error("Storage pool not found"), { statusCode: 404 });
-        const candidate = path.join(pool.path, filename);
-        const stat = await fs.promises.stat(candidate).catch(() => null);
-        if (!stat?.isFile()) throw Object.assign(new Error(`Managed file not found: ${filename}`), { statusCode: 404 });
-        existingPath = candidate;
-      } else {
-        existingPath = await resolveManagedFilePath(filename, "vm_disk");
-      }
-    }
-    const attachedSources = existingPath ? await listAttachedVmDiskSources() : undefined;
-    const realExistingPath = existingPath ? await fs.promises.realpath(existingPath).catch(() => existingPath) : undefined;
-    if (realExistingPath && attachedSources?.has(realExistingPath)) {
-      throw Object.assign(new Error("This VM disk is already attached to a machine"), { statusCode: 409 });
-    }
-    return callRunner("qemu_attach_disk", {
-      name,
-      ...parsed.data,
-      existingPath: realExistingPath,
-      storagePool: storagePath,
-    });
-  });
+  return runInstantTask(task, ip, async () => callRunner("qemu_attach_disk", await buildAttachDiskPayload(name, parsed.data)));
 });
 
 app.post("/api/vms/:name/disk/detach", async (req, reply) => {

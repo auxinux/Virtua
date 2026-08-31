@@ -107,8 +107,13 @@ export interface VdmVmInfo extends VdmVm {
   qemuAgentEnabled?: boolean;
   videoModel?: string;
   bootDevice?: string;
-  disks?: Array<{ device: string; path: string; sizeBytes: number; format: string; readonly: boolean }>;
-  networks?: Array<{ mac: string; bridge: string; model: string }>;
+  // Shapes below mirror what the runner's qemu_info actually returns: the disk
+  // path is `source` and a NIC's bridge is `source` too — the previous
+  // `path`/`bridge` fields never existed on the wire.
+  disks?: Array<{ device: string; deviceType?: string; bus?: string; source: string; sizeBytes: number; format: string; readonly: boolean }>;
+  networks?: Array<{ index?: number; mac: string; model: string; source: string; type?: string }>;
+  usbDevices?: Array<{ vendorId?: string; productId?: string; description?: string }>;
+  mountedIso?: string | null;
 }
 
 export interface VdmSnapshot {
