@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client";
+import { Modal } from "@/components/ui/Dialogs";
 import type { VdmNode, VdmSharedStorage } from "@/types/vdm";
 
 // ── Icon ────────────────────────────────────────────────────────────────────
@@ -73,8 +74,7 @@ export function MigrateModal({ open, onClose, resourceType, resourceName, source
   if (!open) return null;
   const canSubmit = targetNode && (mode === "local" ? !!poolName : !!storName);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-md p-5 space-y-4">
+    <Modal open onClose={onClose} maxWidth="max-w-md">
         <h3 className="text-base font-semibold text-vdm-text">Migrate {resourceType}: {resourceName}</h3>
         <div>
           <label className="vdm-label">Target Node</label>
@@ -128,8 +128,7 @@ export function MigrateModal({ open, onClose, resourceType, resourceName, source
             Start Migration
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -151,8 +150,7 @@ export function CloneModal({ open, onClose, resourceType, resourceName, sourceNo
   const onlineNodes = nodes.filter((n) => n.status === "online");
   const canSubmit = newName.trim() && targetNode && (mode === "local" ? !!poolName : !!storName);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-md p-5 space-y-4">
+    <Modal open onClose={onClose} maxWidth="max-w-md">
         <h3 className="text-base font-semibold text-vdm-text">Clone {resourceType}: {resourceName}</h3>
         <div>
           <label className="vdm-label">New Name</label>
@@ -199,8 +197,7 @@ export function CloneModal({ open, onClose, resourceType, resourceName, sourceNo
           <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
           <button className="vdm-btn-primary" onClick={() => { if (canSubmit) { onSubmit(newName.trim(), targetNode, mode === "local" ? poolName : undefined, mode === "shared" ? storName : undefined); onClose(); } }} disabled={!canSubmit}>Clone</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -213,8 +210,7 @@ export function BackupModal({ open, onClose, resourceName, storages, onSubmit }:
   useEffect(() => { if (open) setStorName(""); }, [open]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-sm p-5 space-y-4">
+    <Modal open onClose={onClose} maxWidth="max-w-sm">
         <h3 className="text-base font-semibold text-vdm-text">Backup: {resourceName}</h3>
         <div>
           <label className="vdm-label">Destination (Shared Storage)</label>
@@ -230,8 +226,7 @@ export function BackupModal({ open, onClose, resourceName, storages, onSubmit }:
             Start Backup
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -252,8 +247,7 @@ export function DockerTransferModal({ open, onClose, mode, currentName, sourceNo
   if (!open) return null;
   const ready = !!targetNode && !!targetName && (transferMode === "local" ? !!poolName : !!storageName);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="vdm-card w-full max-w-md p-5 space-y-4">
+    <Modal open onClose={onClose} maxWidth="max-w-md">
         <h3 className="text-base font-semibold text-vdm-text">{mode === "migrate" ? "Migrate" : "Duplicate"} Docker: {currentName}</h3>
         <div><label className="vdm-label">Target Node</label><select className="vdm-input" value={targetNode} onChange={(e) => setTargetNode(e.target.value)}>
           <option value="">Select node...</option>
@@ -277,7 +271,6 @@ export function DockerTransferModal({ open, onClose, mode, currentName, sourceNo
           onSubmit({ targetNode, targetName, sharedStorageName: transferMode === "shared" ? storageName : undefined, targetStoragePool: transferMode === "local" ? poolName : undefined, deleteSource: mode === "migrate" });
           onClose();
         }}>{mode === "migrate" ? "Start Migration" : "Start Duplication"}</button></div>
-      </div>
-    </div>
+    </Modal>
   );
 }

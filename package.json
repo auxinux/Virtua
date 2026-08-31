@@ -21,10 +21,11 @@
     "build:ui": "npm run build --workspace=apps/ui",
     "build:cli": "npm run build --workspace=apps/cli",
     "build:vdm": "npm run build --workspace=apps/vdm && npm run build --workspace=apps/vdm-ui",
-    "test": "npm run test:shared && npm run test:vdm",
+    "test": "npm run test:shared && npm run test:vdm && npm run test:vdm-ui",
     "test:shared": "npm test --workspace=packages/shared",
     "test:vdm": "npm test --workspace=apps/vdm",
-    "check": "npm run build && npm test"
+    "check": "npm run build && npm test",
+    "test:vdm-ui": "npm test --workspace=apps/vdm-ui"
   },
   "allowScripts": {
     "argon2@0.43.1": true,

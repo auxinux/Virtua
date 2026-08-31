@@ -173,13 +173,13 @@ export function Sidebar() {
   });
   const tasksQuery = useQuery({
     queryKey: ["vdm-tasks-active-count"],
-    queryFn: () => api.get<{ count: number }>("/api/vdm/tasks?status=running&limit=1"),
+    queryFn: () => api.get<{ count: number }>("/api/vdm/tasks/active-count"),
     refetchInterval: 5000,
   });
 
   const nodes = nodesQuery.data ?? [];
   const storages = storageQuery.data ?? [];
-  const activeTasksCount = Array.isArray(tasksQuery.data) ? tasksQuery.data.length : 0;
+  const activeTasksCount = tasksQuery.data?.count ?? 0;
 
   return (
     <aside className="flex flex-col w-60 min-w-[240px] bg-[#0d1117] border-r border-vdm-border overflow-hidden">

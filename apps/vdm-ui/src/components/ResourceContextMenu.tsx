@@ -23,6 +23,16 @@ const ICONS = {
 
 export type ResourceKind = "vm" | "lxc" | "docker";
 
+/**
+ * Menu callers rebuild the target object on every right-click, so identity
+ * comparison would reset the modal state even when re-opening the menu on the
+ * same resource. Compare by value instead.
+ */
+function sameResource(a: ResourceMenuTarget | null, b: ResourceMenuTarget | null): boolean {
+  if (!a || !b) return a === b;
+  return a.kind === b.kind && a.node === b.node && a.name === b.name;
+}
+
 export interface ResourceMenuTarget {
   kind: ResourceKind;
   node: string;
@@ -53,8 +63,14 @@ export function ResourceContextMenu({ menu, onClose }: {
   // every click (onClose), and without this the modal that was just opened gets
   // unmounted on the same render because `if (!menu) return null` below.
   const [target, setTarget] = useState<ResourceMenuTarget | null>(null);
-  if (menu?.resource && menu.resource !== target) {
+  if (menu?.resource && !sameResource(menu.resource, target)) {
     setTarget(menu.resource);
+    // Opening the menu on a different resource must not leave a modal from the
+    // previous one on screen — it would submit against the new target.
+    setShowMigrate(false);
+    setShowClone(false);
+    setShowBackup(false);
+    setShowTransfer(null);
   }
 
   const nodesQuery = useQuery<VdmNode[]>({ queryKey: ["vdm-nodes"], queryFn: () => api.get("/api/vdm/nodes") });
@@ -125,7 +141,10 @@ export function ResourceContextMenu({ menu, onClose }: {
       const n = await prompt({ title: "New snapshot", label: "Snapshot name", placeholder: "snapshot-name" });
       if (n) snapshotMut.mutate(n);
     } });
-    entries.push({ label: "Clone…", icon: ICONS.clone, onClick: () => setShowClone(true) });
+    // Clone is VM-only: the VDM API exposes /vms/:node/:name/clone but has no
+    // LXC equivalent, so offering it for containers opened a modal whose submit
+    // could only 404.
+    if (r.kind === "vm") entries.push({ label: "Clone…", icon: ICONS.clone, onClick: () => setShowClone(true) });
     entries.push({ label: "Migrate…", icon: ICONS.migrate, onClick: () => setShowMigrate(true) });
     entries.push({ label: "Backup…", icon: ICONS.backup, onClick: () => setShowBackup(true) });
   } else {

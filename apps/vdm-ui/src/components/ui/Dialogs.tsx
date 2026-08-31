@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Z_MODAL } from "@/components/ui/ContextMenu";
 
 // ── Icon ────────────────────────────────────────────────────────────────────
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
@@ -28,12 +30,21 @@ export function Modal({ open, onClose, children, maxWidth = "max-w-md" }: {
   }, [open, onClose]);
 
   if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div ref={ref} className={`vdm-card w-full ${maxWidth} p-5 space-y-4`}>
+  // Portalled on <body> with an explicit z-index above the context-menu layer:
+  // a dialog opened from a context menu entry must always paint on top, no
+  // matter which clipped/stacking ancestor the trigger lived in.
+  return createPortal(
+    <div
+      className="fixed inset-0 flex items-center justify-center bg-black/60 p-4"
+      style={{ zIndex: Z_MODAL }}
+      onContextMenu={(e) => e.preventDefault()}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div ref={ref} role="dialog" aria-modal="true" className={`vdm-card w-full ${maxWidth} p-5 space-y-4`}>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -57,7 +68,7 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", 
       </div>
       <div className="flex gap-2 justify-end">
         <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-        <button className={btnCls} onClick={() => { onConfirm(); onClose(); }}>{confirmLabel}</button>
+        <button className={btnCls} onClick={onConfirm}>{confirmLabel}</button>
       </div>
     </Modal>
   );
@@ -80,11 +91,11 @@ export function PromptDialog({ open, title, label, placeholder, confirmLabel = "
         value={value}
         placeholder={placeholder}
         onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && value.trim()) { onSubmit(value.trim()); onClose(); } }}
+        onKeyDown={(e) => { if (e.key === "Enter" && value.trim()) onSubmit(value.trim()); }}
       />
       <div className="flex gap-2 justify-end">
         <button className="vdm-btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="vdm-btn-primary" disabled={!value.trim()} onClick={() => { onSubmit(value.trim()); onClose(); }}>{confirmLabel}</button>
+        <button className="vdm-btn-primary" disabled={!value.trim()} onClick={() => onSubmit(value.trim())}>{confirmLabel}</button>
       </div>
     </Modal>
   );

@@ -10,7 +10,7 @@ async function fetchCsrf() {
   csrfToken = data.token;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, csrfRetry = true): Promise<T> {
   if (method !== "GET" && !csrfToken) await fetchCsrf();
 
   const headers: Record<string, string> = {};
@@ -26,9 +26,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
   if (res.status === 403) {
     const data = await res.json().catch(() => ({})) as { error?: string };
-    if (data.error?.includes("CSRF")) {
+    // Refresh the token and replay once. Retrying unconditionally turned an
+    // expired session into an infinite request loop against the server.
+    if (data.error?.includes("CSRF") && csrfRetry) {
       csrfToken = null;
-      return request(method, path, body);
+      return request(method, path, body, false);
     }
     const message = data.error ?? "Forbidden";
     reportMutationError(method, message);
@@ -59,16 +61,16 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
   /** Multipart upload (FormData). Returns the parsed JSON body. */
-  upload: async <T>(path: string, form: FormData): Promise<T> => {
+  upload: async <T>(path: string, form: FormData, csrfRetry = true): Promise<T> => {
     if (!csrfToken) await fetchCsrf();
     const headers: Record<string, string> = {};
     if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
     const res = await fetch(path, { method: "POST", headers, credentials: "include", body: form });
     if (res.status === 403) {
       const data = await res.json().catch(() => ({})) as { error?: string };
-      if (data.error?.includes("CSRF")) {
+      if (data.error?.includes("CSRF") && csrfRetry) {
         csrfToken = null;
-        return api.upload<T>(path, form);
+        return api.upload<T>(path, form, false);
       }
       const message = data.error ?? "Forbidden";
       reportMutationError("POST", message);

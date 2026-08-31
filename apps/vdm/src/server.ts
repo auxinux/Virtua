@@ -169,21 +169,56 @@ await app.register(fastifyCsrf, { sessionPlugin: "@fastify/session" });
 await app.register(fastifyRateLimit, { global: true, max: 300, timeWindow: "1 minute" });
 await app.register(fastifyMultipart, { limits: { fileSize: 8 * 1024 * 1024 * 1024 } });
 
+// The VDM panel drives every VM/LXC/Docker action in the cluster: never let it
+// be framed (clickjacking), sniffed, or leak its URLs through the referer.
+app.addHook("onSend", async (req, reply, payload) => {
+  reply.header("X-Frame-Options", "DENY");
+  reply.header("Content-Security-Policy", "frame-ancestors 'none'");
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("Referrer-Policy", "no-referrer");
+  if (req.url.startsWith("/api/")) reply.header("Cache-Control", "no-store");
+  return payload;
+});
+
 // Serve VDM UI static files if dist exists
 if (fs.existsSync(UI_DIST_DIR)) {
   await app.register(fastifyStatic, { root: UI_DIST_DIR, wildcard: false });
 }
 
 // ── Auth helpers ──────────────────────────────────────────────────────────
-function requireAuth(req: FastifyRequest, reply: FastifyReply): void {
+/**
+ * Resolve the session back to a live account on every guarded request.
+ *
+ * The session cookie carries a snapshot of the user (id + role) taken at login
+ * and lives for 8 hours. Trusting that snapshot meant a deleted account — or
+ * one whose role was lowered — kept its access, including admin access, until
+ * the cookie expired. A single indexed SQLite lookup closes that window.
+ */
+function currentUser(req: FastifyRequest): { id: number; username: string; role: string } {
   if (!req.session.userId) {
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
   }
+  const row = db.prepare("SELECT id, username, role FROM vdm_users WHERE id = ?").get(req.session.userId) as
+    { id: number; username: string; role: string } | undefined;
+  if (!row) {
+    // destroy() resolves a promise; swallow store errors so the 401 below is
+    // what the caller actually sees.
+    void Promise.resolve(req.session.destroy()).catch(() => { /* store error */ });
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  }
+  // Keep the session in sync so downstream reads of req.session.role agree
+  // with the database.
+  req.session.role = row.role;
+  req.session.username = row.username;
+  return row;
 }
 
-function requireAdmin(req: FastifyRequest, reply: FastifyReply): void {
-  requireAuth(req, reply);
-  if (req.session.role !== "admin") {
+function requireAuth(req: FastifyRequest, _reply: FastifyReply): void {
+  currentUser(req);
+}
+
+function requireAdmin(req: FastifyRequest, _reply: FastifyReply): void {
+  if (currentUser(req).role !== "admin") {
     throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
   }
 }
@@ -269,6 +304,24 @@ function getEnabledNode(name: string): VdmNodeRow {
 function parseBoundedInt(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : fallback;
+}
+
+/**
+ * VDM forwards node tokens and shared-storage credentials (SMB password, S3
+ * secret key) to the node API. Over plain http to a remote host those cross the
+ * wire in clear. Registration is not blocked — many clusters run on a trusted
+ * management VLAN — but the operator gets a durable warning in the VDM log.
+ */
+function warnIfInsecureNodeUrl(nodeName: string, value: string): void {
+  try {
+    const url = new URL(value);
+    const loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname);
+    if (url.protocol === "http:" && !loopback) {
+      recordVdmLog(db, "warn", nodeName, "nodes", `Node registered over plain http (${url.origin}) — node tokens and storage credentials are sent unencrypted. Prefer https.`);
+    }
+  } catch {
+    // assertNodeApiUrl already rejected malformed URLs.
+  }
 }
 
 function assertNodeApiUrl(value: string): void {
@@ -885,7 +938,7 @@ app.post("/api/vdm/auth/login", {
 });
 
 app.post("/api/vdm/auth/logout", async (req) => {
-  req.session.destroy();
+  await req.session.destroy();
   return { ok: true };
 });
 
@@ -942,7 +995,9 @@ app.delete("/api/vdm/join-tokens/:id", async (req, reply) => {
 });
 
 app.post("/api/vdm/join", {
-  config: { csrfProtection: false },
+  // Unauthenticated by design (a node enrols itself with an admin-issued
+  // token), so it gets a much tighter budget than the global 300/min.
+  config: { csrfProtection: false, rateLimit: { max: 10, timeWindow: "1 minute" } },
 }, async (req, reply) => {
   const body = (req.body ?? {}) as {
     token?: string;
@@ -969,6 +1024,7 @@ app.post("/api/vdm/join", {
   if (!joinToken) {
     return reply.status(403).send({ error: "Invalid or expired join token" });
   }
+  const existingNode = getNode(name);
 
   const testNode: VdmNodeRow = {
     id: 0,
@@ -1018,6 +1074,9 @@ app.post("/api/vdm/join", {
   const saved = getNode(name);
   if (saved) await syncNodeState(saved);
   db.prepare("DELETE FROM vdm_join_tokens WHERE id = ?").run(joinToken.id);
+  // Enrolment repoints a node's API URL and token, so it must be traceable.
+  recordVdmLog(db, "warn", name, "nodes", `Node enrolled via join token (${apiUrl})${existingNode ? " — replaced an existing registration" : ""}`);
+  warnIfInsecureNodeUrl(name, apiUrl);
   return { ok: true, node: saved ? mapNodeRow(saved) : null };
 });
 
@@ -1081,6 +1140,7 @@ app.post("/api/vdm/nodes", async (req, reply) => {
   if (!name || !apiUrl || !authToken) return reply.status(400).send({ error: "name, apiUrl, authToken required" });
   assertNodeApiUrl(apiUrl);
   if (!/^[a-z0-9_-]+$/.test(name)) return reply.status(400).send({ error: "Name must be lowercase alphanumeric with - or _" });
+  warnIfInsecureNodeUrl(name, apiUrl);
 
   // Probe the node before saving
   const testNode: VdmNodeRow = { id: 0, name, display_name: null, api_url: apiUrl, auth_token: authToken, enabled: 1, status: "unknown", last_seen_at: null, notes: null, created_at: "", updated_at: "" };
@@ -1115,7 +1175,7 @@ app.put("/api/vdm/nodes/:name", async (req, reply) => {
   const { displayName, apiUrl, authToken, enabled, notes } = req.body as { displayName?: string; apiUrl?: string; authToken?: string; enabled?: boolean; notes?: string };
   const node = getNode(name);
   if (!node) return reply.status(404).send({ error: "Node not found" });
-  if (apiUrl) assertNodeApiUrl(apiUrl);
+  if (apiUrl) { assertNodeApiUrl(apiUrl); warnIfInsecureNodeUrl(name, apiUrl); }
   db.prepare("UPDATE vdm_nodes SET display_name = COALESCE(?, display_name), api_url = COALESCE(?, api_url), auth_token = COALESCE(?, auth_token), enabled = COALESCE(?, enabled), notes = COALESCE(?, notes), updated_at = ? WHERE name = ?")
     .run(displayName ?? null, apiUrl ?? null, authToken ? encryptSecret(authToken) : null, enabled !== undefined ? (enabled ? 1 : 0) : null, notes ?? null, new Date().toISOString(), name);
   return { ok: true };
@@ -2881,6 +2941,14 @@ app.get("/api/vdm/tasks", async (req, reply) => {
   return rows.map(mapTaskRow);
 });
 
+// Cheap badge counter: the list endpoint is capped by `limit`, so counting its
+// rows client-side can never report more than that cap.
+app.get("/api/vdm/tasks/active-count", async (req, reply) => {
+  requireAuth(req, reply);
+  const row = db.prepare("SELECT COUNT(*) AS count FROM vdm_tasks WHERE status IN ('pending', 'running')").get() as { count: number };
+  return { count: row.count };
+});
+
 app.get("/api/vdm/tasks/:id", async (req, reply) => {
   requireAuth(req, reply);
   const { id } = req.params as { id: string };
@@ -3087,9 +3155,18 @@ app.post("/api/vdm/users", async (req, reply) => {
 
 app.delete("/api/vdm/users/:id", async (req, reply) => {
   requireAdmin(req, reply);
-  const { id } = req.params as { id: string };
-  if (parseInt(id) === req.session.userId) return reply.status(400).send({ error: "Cannot delete your own account" });
-  db.prepare("DELETE FROM vdm_users WHERE id = ?").run(parseInt(id));
+  const id = Number.parseInt((req.params as { id: string }).id, 10);
+  if (!Number.isInteger(id)) return reply.status(400).send({ error: "Invalid user id" });
+  if (id === req.session.userId) return reply.status(400).send({ error: "Cannot delete your own account" });
+  const victim = db.prepare("SELECT role FROM vdm_users WHERE id = ?").get(id) as { role: string } | undefined;
+  if (!victim) return reply.status(404).send({ error: "User not found" });
+  // Deleting the last admin would lock every operator out of the cluster with
+  // no recovery path short of editing the database by hand.
+  if (victim.role === "admin") {
+    const admins = (db.prepare("SELECT COUNT(*) AS c FROM vdm_users WHERE role = 'admin'").get() as { c: number }).c;
+    if (admins <= 1) return reply.status(400).send({ error: "Cannot delete the last administrator" });
+  }
+  db.prepare("DELETE FROM vdm_users WHERE id = ?").run(id);
   return { ok: true };
 });
 
@@ -3113,7 +3190,13 @@ function bridgeConsole(clientWs: WebSocket, node: VdmNodeRow, ticket: VdmConsole
   // TLS cert even if self-signed. The WS itself is gated by the one-time ticket.
   const upstream = new WebSocket(upstreamUrl, { rejectUnauthorized: false, perMessageDeflate: false });
 
+  // A client can start sending before the upstream socket is ready. Buffer a
+  // bounded amount and drop the connection past it, so a peer that floods a
+  // never-connecting relay cannot grow VDM's heap without limit.
+  const MAX_PENDING_FRAMES = 64;
+  const MAX_PENDING_BYTES = 4 * 1024 * 1024;
   const pending: Array<{ data: WebSocket.RawData; binary: boolean }> = [];
+  let pendingBytes = 0;
   let upstreamOpen = false;
   const closeBoth = () => { try { clientWs.close(); } catch { /* */ } try { upstream.close(); } catch { /* */ } };
 
@@ -3121,14 +3204,22 @@ function bridgeConsole(clientWs: WebSocket, node: VdmNodeRow, ticket: VdmConsole
     upstreamOpen = true;
     for (const m of pending) { try { upstream.send(m.data, { binary: m.binary }); } catch { /* */ } }
     pending.length = 0;
+    pendingBytes = 0;
   });
   upstream.on("message", (data, isBinary) => { if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data, { binary: isBinary }); });
   upstream.on("close", closeBoth);
   upstream.on("error", (err) => { app.log.warn({ err: err.message, node: node.name }, "console upstream error"); closeBoth(); });
 
   clientWs.on("message", (data, isBinary) => {
-    if (upstreamOpen && upstream.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
-    else pending.push({ data, binary: isBinary });
+    if (upstreamOpen && upstream.readyState === WebSocket.OPEN) { upstream.send(data, { binary: isBinary }); return; }
+    const size = Buffer.isBuffer(data) ? data.length : Array.isArray(data) ? data.reduce((n, c) => n + c.length, 0) : (data as ArrayBuffer).byteLength;
+    pendingBytes += size;
+    if (pending.length >= MAX_PENDING_FRAMES || pendingBytes > MAX_PENDING_BYTES) {
+      app.log.warn({ node: node.name }, "console relay buffer exceeded before upstream opened");
+      closeBoth();
+      return;
+    }
+    pending.push({ data, binary: isBinary });
   });
   clientWs.on("close", closeBoth);
   clientWs.on("error", closeBoth);

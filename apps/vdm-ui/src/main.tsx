@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import { AppContextMenu } from "@/components/ui/AppContextMenu";
 import "./index.css";
 
 const queryClient = new QueryClient({
@@ -16,6 +17,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <App />
+        {/* VDM never falls back to the browser's native context menu. */}
+        <AppContextMenu />
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>,
