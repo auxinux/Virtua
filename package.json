@@ -1,6 +1,6 @@
 {
   "name": "auxinux-controle-virtua",
-  "version": "0.7.77",
+  "version": "0.7.78",
   "private": true,
   "workspaces": [
     "packages/*",
