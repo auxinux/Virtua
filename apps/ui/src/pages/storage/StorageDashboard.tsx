@@ -326,7 +326,12 @@ function CreatePoolModal({ open, onClose, onCreated }: {
   const { t } = useTranslation();
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
-  const [type, setType] = useState<"directory" | "nfs" | "cifs">("directory");
+  // "disk" is a UI-level choice only: the API models a disk-backed pool as a
+  // directory pool with a mountSource (the block device) + fstype, which it
+  // mounts at `path` and persists in fstab.
+  const [type, setType] = useState<"directory" | "disk" | "nfs" | "cifs">("directory");
+  const [diskDevice, setDiskDevice] = useState("");
+  const [diskFstype, setDiskFstype] = useState<"ext4" | "xfs" | "btrfs">("ext4");
   const [mountSource, setMountSource] = useState("");
   const [mountOptions, setMountOptions] = useState("");
   const [smbUsername, setSmbUsername] = useState("");
@@ -335,14 +340,32 @@ function CreatePoolModal({ open, onClose, onCreated }: {
   const [content, setContent] = useState<string[]>(["vm", "iso", "backup", "disk"]);
   const [error, setError] = useState("");
 
+  const { data: physicalDisks = [] } = useQuery<PhysicalDisk[]>({
+    queryKey: ["storage-disks"],
+    queryFn: () => apiGet<PhysicalDisk[]>("/api/storage/disks"),
+    enabled: open && type === "disk",
+  });
+  // Offer partitions when a disk has them, the whole device otherwise; skip
+  // anything already mounted or claimed by a RAID array.
+  const blockDevices = physicalDisks.flatMap((disk) =>
+    disk.partitions.length > 0
+      ? disk.partitions
+          .filter((part) => !part.mountpoint)
+          .map((part) => ({ path: part.path, size: part.size, fstype: part.fstype, label: `${disk.model || disk.name}` }))
+      : disk.inUse || disk.inRaid
+        ? []
+        : [{ path: disk.path, size: disk.size, fstype: "" as string, label: disk.model || disk.name }],
+  );
+  const selectedDevice = blockDevices.find((d) => d.path === diskDevice);
+
   const create = useMutation({
     mutationFn: () => apiPost("/api/storage/pools", {
       name,
       path,
-      type,
       content,
-      mountSource: type === "directory" ? undefined : mountSource,
-      fstype: type === "directory" ? undefined : type,
+      type: type === "disk" ? "directory" : type,
+      mountSource: type === "disk" ? diskDevice : type === "directory" ? undefined : mountSource,
+      fstype: type === "disk" ? diskFstype : type === "directory" ? undefined : type,
       mountOptions: mountOptions || undefined,
       smbUsername: type === "cifs" && smbUsername ? smbUsername : undefined,
       smbPassword: type === "cifs" && smbUsername ? smbPassword : undefined,
@@ -354,6 +377,8 @@ function CreatePoolModal({ open, onClose, onCreated }: {
       setName("");
       setPath("");
       setType("directory");
+      setDiskDevice("");
+      setDiskFstype("ext4");
       setMountSource("");
       setMountOptions("");
       setSmbUsername("");
@@ -377,16 +402,17 @@ function CreatePoolModal({ open, onClose, onCreated }: {
         </div>
         <div>
           <label className="label">Pool Type *</label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             {[
               { value: "directory", label: "Directory" },
+              { value: "disk", label: "Disk" },
               { value: "nfs", label: "NFS" },
               { value: "cifs", label: "SMB / CIFS" },
             ].map((entry) => (
               <button
                 key={entry.value}
                 type="button"
-                onClick={() => setType(entry.value as "directory" | "nfs" | "cifs")}
+                onClick={() => setType(entry.value as "directory" | "disk" | "nfs" | "cifs")}
                 className={`px-3 py-2 rounded text-sm border transition-colors ${
                   type === entry.value
                     ? "bg-accent-blue/20 text-accent-blue border-accent-blue/50"
@@ -399,16 +425,59 @@ function CreatePoolModal({ open, onClose, onCreated }: {
           </div>
         </div>
         <div>
-          <label className="label">Directory Path *</label>
+          <label className="label">{type === "directory" ? "Directory Path *" : "Mount Point *"}</label>
           <input className="input font-mono" value={path} onChange={(e) => setPath(e.target.value)}
-            placeholder="/var/lib/auxinux/pools/vm-storage" />
+            placeholder={type === "disk" ? `/mnt/${name || "pool"}` : "/var/lib/auxinux/pools/vm-storage"} />
           <p className="text-xs text-text-500 mt-1">
             {type === "directory"
               ? "Directory will be created if it doesn't exist"
-              : "Local mount point used by Virtua for this remote share"}
+              : type === "disk"
+                ? "Where Virtua mounts the disk. Give a directory such as /mnt/… — never the device node itself (/dev/sda1)."
+                : "Local mount point used by Virtua for this remote share"}
           </p>
         </div>
-        {type !== "directory" && (
+        {type === "disk" && (
+          <div className="space-y-3">
+            <div>
+              <label className="label">Disk / Partition *</label>
+              <select className="input font-mono" value={diskDevice} onChange={(e) => setDiskDevice(e.target.value)}>
+                <option value="">{blockDevices.length ? "Select a device…" : "No unmounted device available"}</option>
+                {blockDevices.map((device) => (
+                  <option key={device.path} value={device.path}>
+                    {device.path} — {formatBytes(device.size)}{device.fstype ? ` · ${device.fstype}` : " · unformatted"}{device.label ? ` · ${device.label}` : ""}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-text-500 mt-1">
+                Only devices that are not currently mounted are listed.
+              </p>
+            </div>
+            <div>
+              <label className="label">Filesystem *</label>
+              <div className="grid grid-cols-3 gap-2">
+                {(["ext4", "xfs", "btrfs"] as const).map((fs) => (
+                  <button key={fs} type="button" onClick={() => setDiskFstype(fs)}
+                    className={`px-3 py-2 rounded text-sm border transition-colors ${
+                      diskFstype === fs
+                        ? "bg-accent-blue/20 text-accent-blue border-accent-blue/50"
+                        : "bg-surface-700 text-text-300 border-surface-500 hover:bg-surface-600"
+                    }`}>{fs}</button>
+                ))}
+              </div>
+              {selectedDevice && !selectedDevice.fstype && (
+                <p className="text-xs text-accent-amber mt-1">
+                  This device has no filesystem yet. Format it first from the disk list — creating the pool only mounts an existing filesystem, it does not erase anything.
+                </p>
+              )}
+              {selectedDevice && selectedDevice.fstype && selectedDevice.fstype !== diskFstype && (
+                <p className="text-xs text-accent-amber mt-1">
+                  The device already holds {selectedDevice.fstype}. Select that filesystem, or the mount will fail.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+        {(type === "nfs" || type === "cifs") && (
           <div>
             <label className="label">Remote Source *</label>
             <input
@@ -475,7 +544,10 @@ function CreatePoolModal({ open, onClose, onCreated }: {
         <div className="flex gap-2 pt-1">
           <button
             onClick={() => create.mutate()}
-            disabled={!name || !path || (type !== "directory" && !mountSource) || create.isPending}
+            disabled={!name || !path
+              || (type === "disk" && !diskDevice)
+              || ((type === "nfs" || type === "cifs") && !mountSource)
+              || create.isPending}
             className="btn-primary"
           >
             {create.isPending ? "Creating..." : "Create Pool"}

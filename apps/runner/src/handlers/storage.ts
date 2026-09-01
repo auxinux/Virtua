@@ -206,7 +206,7 @@ function validateDevicePath(value: unknown, field: string): string {
   return trimmed;
 }
 
-function validateMountPath(value: unknown, field: string): string {
+export function validateMountPath(value: unknown, field: string): string {
   if (typeof value !== "string") throw new Error(`Invalid ${field}: must be a string`);
   const trimmed = value.trim();
   if (!trimmed.startsWith("/")) {
@@ -216,12 +216,25 @@ function validateMountPath(value: unknown, field: string): string {
     throw new Error(`Invalid ${field}: path too long`);
   }
   assertNoFstabMetachars(trimmed, field);
+  const normalized = trimmed.length > 1 ? trimmed.replace(/\/+$/, "") : trimmed;
   // Reject obviously dangerous mount targets
   const forbidden = ["/", "/boot", "/etc", "/proc", "/sys", "/dev", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/root"];
-  if (forbidden.includes(trimmed)) {
-    throw new Error(`Invalid ${field}: cannot mount over system directory ${trimmed}`);
+  if (forbidden.includes(normalized)) {
+    throw new Error(`Invalid ${field}: cannot mount over system directory ${normalized}`);
   }
-  return trimmed;
+  // …and anything *inside* the kernel-managed trees. A pool path of /dev/sda1
+  // is a block device node, not a mountpoint: the previous check only matched
+  // "/dev" exactly, so the path slipped through and failed much later with a
+  // bare `EEXIST: mkdir /dev/sda1`, which says nothing useful.
+  const forbiddenTrees = ["/dev", "/proc", "/sys", "/run"];
+  const tree = forbiddenTrees.find((root) => normalized.startsWith(`${root}/`));
+  if (tree) {
+    const hint = tree === "/dev"
+      ? ` — "${normalized}" is a block device, not a directory. Give a mountpoint (e.g. /mnt/${path.basename(normalized)}) and pass the device as the pool's source so Virtua mounts it there.`
+      : "";
+    throw new Error(`Invalid ${field}: ${tree} is managed by the kernel and cannot hold a storage pool${hint}`);
+  }
+  return normalized;
 }
 
 function validateMountSource(value: unknown, field: string): string {
