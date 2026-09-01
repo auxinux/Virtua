@@ -451,10 +451,38 @@ async function assertBlockDevice(device: string) {
   }
 }
 
+/**
+ * Mountpoints reported by `lsblk -nro NAME,MOUNTPOINT <device>`, which lists the
+ * device itself plus every child partition and holder (LVM, RAID, crypt).
+ */
+export function parseMountedBlockDevices(lsblkOutput: string): Array<{ name: string; mountpoint: string }> {
+  return lsblkOutput
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf(" ");
+      if (separator === -1) return { name: line, mountpoint: "" };
+      return { name: line.slice(0, separator), mountpoint: line.slice(separator + 1).trim() };
+    })
+    // A non-empty mountpoint means in use — including "[SWAP]".
+    .filter((entry) => entry.mountpoint !== "");
+}
+
 async function assertDeviceNotMounted(device: string) {
+  // `findmnt -S` only matches the exact device: /dev/sda looks free even when
+  // /dev/sda1 is mounted, so formatting or wiping the parent would silently
+  // destroy a live filesystem. lsblk covers the device AND its descendants.
+  const { stdout } = await execFileAsync("lsblk", ["-nro", "NAME,MOUNTPOINT", device]).catch(() => ({ stdout: "" }));
+  const mounted = parseMountedBlockDevices(stdout);
+  if (mounted.length > 0) {
+    const detail = mounted.map((entry) => `${entry.name} → ${entry.mountpoint}`).join(", ");
+    throw new Error(`Refusing to operate on ${device}: still in use (${detail}). Unmount it first.`);
+  }
+
   try {
-    const { stdout } = await execFileAsync("findmnt", ["-n", "-S", device]);
-    if (stdout.trim()) {
+    const { stdout: findmntOut } = await execFileAsync("findmnt", ["-n", "-S", device]);
+    if (findmntOut.trim()) {
       throw new Error(`Refusing to operate on ${device}: currently mounted`);
     }
   } catch (error) {

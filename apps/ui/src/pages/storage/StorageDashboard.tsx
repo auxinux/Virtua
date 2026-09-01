@@ -11,9 +11,91 @@ import type { MountedFilesystem, PhysicalDisk, RaidArray, StoragePool } from "@a
 type RaidLevel = 0 | 1 | 5 | 10;
 
 // ─── Disk Section ──────────────────────────────────────────────────────────────
-function DiskCard({ disk }: { disk: PhysicalDisk }) {
-  const usedPercent = disk.size ? 0 : 0; // physical disks don't report usage directly
+/**
+ * Destructive disk action (format / wipe). The API has exposed these since the
+ * beginning, but nothing in the UI could reach them — so a fresh disk could be
+ * seen and never prepared.
+ *
+ * Guarded by a confirmation that requires typing the device path: these erase
+ * a whole device or partition and there is no undo.
+ */
+function DiskActionModal({ target, action, onClose, onDone }: {
+  target: { path: string; size: number; fstype?: string } | null;
+  action: "format" | "wipe";
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [fstype, setFstype] = useState<"ext4" | "xfs" | "btrfs">("ext4");
+  const [label, setLabel] = useState("");
+  const [typed, setTyped] = useState("");
+  const [error, setError] = useState("");
+
+  const device = target?.path ?? "";
+  // /dev/sda1 → sda1, the path segment the API expects.
+  const deviceName = device.replace(/^\/dev\//, "");
+
+  const run = useMutation({
+    mutationFn: () => action === "format"
+      ? apiPost(`/api/storage/disks/${encodeURIComponent(deviceName)}/format`, { fstype, label: label.trim() || undefined, force: true })
+      : apiPost(`/api/storage/disks/${encodeURIComponent(deviceName)}/wipe`, {}),
+    onSuccess: () => { onDone(); onClose(); setTyped(""); setLabel(""); setError(""); },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  return (
+    <Modal open={!!target} title={action === "format" ? `Format ${device}` : `Wipe ${device}`} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          This erases everything on <span className="font-mono">{device}</span> ({formatBytes(target?.size ?? 0)}
+          {target?.fstype ? `, currently ${target.fstype}` : ", no filesystem detected"}). There is no undo.
+        </div>
+        {action === "format" && (
+          <>
+            <div>
+              <label className="label">Filesystem *</label>
+              <div className="grid grid-cols-3 gap-2">
+                {(["ext4", "xfs", "btrfs"] as const).map((fs) => (
+                  <button key={fs} type="button" onClick={() => setFstype(fs)}
+                    className={`px-3 py-2 rounded text-sm border transition-colors ${
+                      fstype === fs
+                        ? "bg-accent-blue/20 text-accent-blue border-accent-blue/50"
+                        : "bg-surface-700 text-text-300 border-surface-500 hover:bg-surface-600"
+                    }`}>{fs}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="label">Label (optional)</label>
+              <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="hdd-storage" />
+            </div>
+          </>
+        )}
+        <div>
+          <label className="label">Type <span className="font-mono">{device}</span> to confirm</label>
+          <input className="input font-mono" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={device} />
+        </div>
+        {error && <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</div>}
+        <div className="flex justify-end gap-2">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-danger" disabled={typed !== device || run.isPending} onClick={() => { setError(""); run.mutate(); }}>
+            {run.isPending ? "Working…" : action === "format" ? "Format" : "Wipe"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function DiskCard({ disk, onChanged }: { disk: PhysicalDisk; onChanged: () => void }) {
   const stateColor = disk.inUse ? "text-yellow-400" : "text-green-400";
+  const [target, setTarget] = useState<{ path: string; size: number; fstype?: string } | null>(null);
+  const [action, setAction] = useState<"format" | "wipe">("format");
+  const openAction = (next: "format" | "wipe", t: { path: string; size: number; fstype?: string }) => {
+    setAction(next);
+    setTarget(t);
+  };
+  // A device backing a RAID array or already mounted must not be touched.
+  const diskLocked = disk.inUse || !!disk.inRaid;
 
   return (
     <div className="card p-4">
@@ -45,14 +127,49 @@ function DiskCard({ disk }: { disk: PhysicalDisk }) {
           <div className="text-xs text-text-500 mb-1">Partitions</div>
           <div className="space-y-1">
             {disk.partitions.map((p) => (
-              <div key={p.name} className="flex justify-between text-xs">
+              <div key={p.name} className="flex items-center justify-between text-xs gap-2">
                 <span className="font-mono text-text-300">{p.name}</span>
+                <span className="text-text-400">{p.fstype || "unformatted"}</span>
                 <span className="text-text-400">{formatBytes(p.size)}</span>
+                {p.mountpoint ? (
+                  <span className="text-text-500 font-mono truncate max-w-[6rem]" title={`mounted on ${p.mountpoint}`}>{p.mountpoint}</span>
+                ) : (
+                  <button className="text-accent-blue hover:underline"
+                    onClick={() => openAction("format", { path: p.path, size: p.size, fstype: p.fstype })}>
+                    Format
+                  </button>
+                )}
               </div>
             ))}
           </div>
         </div>
       )}
+
+      <div className="mt-3 pt-3 border-t border-surface-600 flex items-center gap-2">
+        <button
+          className="btn-ghost text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+          disabled={diskLocked}
+          title={diskLocked ? "Disk is mounted or part of a RAID array" : undefined}
+          onClick={() => openAction("format", { path: disk.path, size: disk.size })}
+        >
+          Format whole disk
+        </button>
+        <button
+          className="btn-ghost text-xs text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
+          disabled={diskLocked}
+          title={diskLocked ? "Disk is mounted or part of a RAID array" : undefined}
+          onClick={() => openAction("wipe", { path: disk.path, size: disk.size })}
+        >
+          Wipe
+        </button>
+      </div>
+      {diskLocked && (
+        <p className="text-xs text-text-500 mt-1">
+          {disk.inRaid ? `Member of ${disk.inRaid}` : "In use — unmount it first"}
+        </p>
+      )}
+
+      <DiskActionModal target={target} action={action} onClose={() => setTarget(null)} onDone={onChanged} />
     </div>
   );
 }
@@ -341,7 +458,7 @@ function CreatePoolModal({ open, onClose, onCreated }: {
   const [error, setError] = useState("");
 
   const { data: physicalDisks = [] } = useQuery<PhysicalDisk[]>({
-    queryKey: ["storage-disks"],
+    queryKey: ["storage", "disks"],
     queryFn: () => apiGet<PhysicalDisk[]>("/api/storage/disks"),
     enabled: open && type === "disk",
   });
@@ -567,7 +684,7 @@ export default function StorageDashboard() {
   const [createPoolOpen, setCreatePoolOpen] = useState(false);
   const [deleteRaidTarget, setDeleteRaidTarget] = useState<string | null>(null);
 
-  const { data: disks = [] } = useQuery<PhysicalDisk[]>({
+  const { data: disks = [], refetch: refetchDisks } = useQuery<PhysicalDisk[]>({
     queryKey: ["storage", "disks"],
     queryFn: () => apiGet<PhysicalDisk[]>("/api/storage/disks"),
   });
@@ -615,7 +732,7 @@ export default function StorageDashboard() {
           <div className="card p-6 text-center text-text-400 text-sm">No disks detected</div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-            {disks.map((d) => <DiskCard key={d.path} disk={d} />)}
+            {disks.map((d) => <DiskCard key={d.path} disk={d} onChanged={() => { void refetchDisks(); }} />)}
           </div>
         )}
       </section>
