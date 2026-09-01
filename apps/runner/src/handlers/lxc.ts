@@ -8,6 +8,7 @@ import * as path from "path";
 
 import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, decompressorFor, runTarPipeline } from "./compression.js";
 import type { ProgressEmitter } from "../runner.js";
+import { isExternalRootfs, buildBackupTarArgs, checkSnapshotRestorable } from "./lxcLayout.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,12 +43,22 @@ interface CachedLxcTemplate {
   rootfsPath: string;
 }
 
+/**
+ * v1 captured only /var/lib/lxc/<name>. Once a container's rootfs could be
+ * relocated onto a storage pool, that directory holds nothing but the config —
+ * so v1 snapshots of pool-backed containers are empty and their rollback is a
+ * no-op. v2 records where the rootfs actually lived and stores it alongside.
+ */
+const MANUAL_SNAPSHOT_FORMATS = ["auxinux-lxc-snapshot-v1", "auxinux-lxc-snapshot-v2"] as const;
+
 interface ManualLxcSnapshotMetadata {
-  format: "auxinux-lxc-snapshot-v1";
+  format: typeof MANUAL_SNAPSHOT_FORMATS[number];
   containerName: string;
   snapshotName: string;
   createdAt: string;
   description?: string;
+  /** Absolute path of the rootfs when it lives outside /var/lib/lxc/<name>. */
+  externalRootfsPath?: string;
 }
 
 export async function handleLxc(action: string, params: unknown, emit?: ProgressEmitter): Promise<unknown> {
@@ -2418,11 +2429,26 @@ function manualSnapshotContainerDir(name: string, snapName: string) {
   return path.join(manualSnapshotDir(name, snapName), "container");
 }
 
+/** Where a v2 snapshot stores a rootfs that lives outside /var/lib/lxc/<name>. */
+function manualSnapshotRootfsDir(name: string, snapName: string) {
+  return path.join(manualSnapshotDir(name, snapName), "rootfs");
+}
+
+/**
+ * Resolve the rootfs only when it sits outside the container directory.
+ * Returns undefined for the classic layout, where copying
+ * /var/lib/lxc/<name> already includes rootfs/.
+ */
+async function externalRootfsPath(name: string): Promise<string | undefined> {
+  const rootfs = await containerRootfsPath(name);
+  return isExternalRootfs(path.join(LXC_DIR, name), rootfs) ? rootfs : undefined;
+}
+
 async function readManualSnapshotMetadata(name: string, snapName: string): Promise<ManualLxcSnapshotMetadata | null> {
   try {
     const raw = await fs.readFile(manualSnapshotMetadataPath(name, snapName), "utf8");
     const parsed = JSON.parse(raw) as Partial<ManualLxcSnapshotMetadata>;
-    if (parsed.format !== "auxinux-lxc-snapshot-v1" || parsed.containerName !== name || parsed.snapshotName !== snapName) {
+    if (!MANUAL_SNAPSHOT_FORMATS.includes(parsed.format as typeof MANUAL_SNAPSHOT_FORMATS[number]) || parsed.containerName !== name || parsed.snapshotName !== snapName) {
       return null;
     }
     return parsed as ManualLxcSnapshotMetadata;
@@ -2478,16 +2504,25 @@ async function createManualSnapshot(name: string, snapName: string, description?
   await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   await fs.rm(finalDir, { recursive: true, force: true }).catch(() => {});
 
+  // A relocated rootfs is NOT under sourceDir, so copying sourceDir alone
+  // produces a snapshot holding just the config — which is why rolling one back
+  // changed nothing.
+  const externalRootfs = await externalRootfsPath(name);
+
   try {
     const copiedContainerDir = path.join(tmpDir, "container");
     await fs.mkdir(tmpDir, { recursive: true });
     await execFileAsync("cp", ["-a", sourceDir, copiedContainerDir]);
+    if (externalRootfs) {
+      await execFileAsync("cp", ["-a", externalRootfs, path.join(tmpDir, "rootfs")]);
+    }
     const metadata: ManualLxcSnapshotMetadata = {
-      format: "auxinux-lxc-snapshot-v1",
+      format: "auxinux-lxc-snapshot-v2",
       containerName: name,
       snapshotName: safeSnapName,
       createdAt: new Date().toISOString(),
       description: description?.trim() || undefined,
+      externalRootfsPath: externalRootfs,
     };
     await fs.writeFile(path.join(tmpDir, "metadata.json"), JSON.stringify(metadata, null, 2));
     await fs.rename(tmpDir, finalDir);
@@ -2571,12 +2606,38 @@ async function rollbackSnapshot(name: string, snapName: string) {
       await stopForSnapshot(name);
     }
     if (await hasManualSnapshot(name, safeSnapName)) {
+      const metadata = await readManualSnapshotMetadata(name, safeSnapName);
       const currentDir = path.join(LXC_DIR, name);
       const snapshotContainerDir = manualSnapshotContainerDir(name, safeSnapName);
+      const snapshotRootfsDir = manualSnapshotRootfsDir(name, safeSnapName);
       const rollbackBackupDir = path.join(LXC_DIR, `.rollback-${name}-${Date.now()}`);
+
+      // The snapshot's own record of where the rootfs lived wins: the current
+      // config may have been edited since.
+      const targetRootfs = metadata?.externalRootfsPath;
+      const hasSnapshotRootfs = targetRootfs
+        ? await fs.stat(snapshotRootfsDir).then((st) => st.isDirectory()).catch(() => false)
+        : false;
+      const restorable = checkSnapshotRestorable(safeSnapName, targetRootfs, hasSnapshotRootfs);
+      if (!restorable.ok) throw new Error(restorable.reason);
+
+      const rootfsBackupDir = targetRootfs ? `${targetRootfs}.rollback-${Date.now()}` : undefined;
       await fs.rename(currentDir, rollbackBackupDir);
       try {
         await execFileAsync("cp", ["-a", snapshotContainerDir, currentDir]);
+        if (targetRootfs && rootfsBackupDir) {
+          await fs.mkdir(path.dirname(targetRootfs), { recursive: true });
+          // Move the live rootfs aside first so a failed copy can be undone.
+          await fs.rename(targetRootfs, rootfsBackupDir).catch(() => {});
+          try {
+            await execFileAsync("cp", ["-a", snapshotRootfsDir, targetRootfs]);
+          } catch (error) {
+            await fs.rm(targetRootfs, { recursive: true, force: true }).catch(() => {});
+            await fs.rename(rootfsBackupDir, targetRootfs).catch(() => {});
+            throw error;
+          }
+          await fs.rm(rootfsBackupDir, { recursive: true, force: true }).catch(() => {});
+        }
         await fs.rm(rollbackBackupDir, { recursive: true, force: true });
       } catch (error) {
         await fs.rm(currentDir, { recursive: true, force: true }).catch(() => {});
@@ -2642,18 +2703,22 @@ async function backupContainer(p: Record<string, unknown>, emit?: ProgressEmitte
   await execFileAsync("sync").catch(() => {});
 
   const containerDir = path.join(LXC_DIR, name);
+  // When the rootfs was relocated onto a storage pool it is NOT under
+  // containerDir; archiving containerDir alone yields a backup holding only the
+  // config. Store it as a sibling `rootfs/` member so restore can find it.
+  const externalRootfs = await externalRootfsPath(name);
   // Uncompressed source size → lets pv report a REAL progress percentage
   // (bytes archived / total), instead of a fictional ticking bar.
-  const totalBytes = await directorySizeBytes(containerDir);
+  // Keep the "unknown size" semantics: a partial total would make pv report a
+  // wildly optimistic percentage, since the rootfs is the bulk of the archive.
+  const containerBytes = await directorySizeBytes(containerDir);
+  const rootfsBytes = externalRootfs ? await directorySizeBytes(externalRootfs) : 0;
+  const totalBytes = containerBytes !== undefined && rootfsBytes !== undefined
+    ? containerBytes + rootfsBytes
+    : undefined;
   // tar streams the archive to stdout (`-cf -`); it tolerates files that change
   // while a running container is read (otherwise it exits 1 and "fails").
-  const tarArgs = [
-    "--warning=no-file-changed",
-    "--warning=no-file-removed",
-    "-cf",
-    "-",
-    containerDir,
-  ];
+  const tarArgs = buildBackupTarArgs(containerDir, externalRootfs);
 
   try {
     if (wantsFreeze && isRunning) {
@@ -2710,7 +2775,20 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
   try {
     // Decompress by extension so both legacy .tar.gz and new .tar.zst restore.
     await execFileAsync("tar", ["--use-compress-program", decompressorFor(sourcePath), "-xf", sourcePath, "-C", tempDir]);
-    const extractedDir = await findFileRecursive(tempDir, (fullPath) => path.basename(fullPath) === "config")
+    // Prefer a top-level "<container>/config": the recursive search below would
+    // otherwise happily match something like rootfs/etc/config and treat a
+    // guest directory as the container definition.
+    const topLevel = await fs.readdir(tempDir, { withFileTypes: true }).catch(() => []);
+    let directDir: string | null = null;
+    for (const entry of topLevel) {
+      if (!entry.isDirectory() || entry.name === "rootfs") continue;
+      const candidate = path.join(tempDir, entry.name);
+      if (await fs.stat(path.join(candidate, "config")).then((st) => st.isFile()).catch(() => false)) {
+        directDir = candidate;
+        break;
+      }
+    }
+    const extractedDir = directDir ?? await findFileRecursive(tempDir, (fullPath) => path.basename(fullPath) === "config")
       .then((configFile) => configFile ? path.dirname(configFile) : null);
     const sourceDir = extractedDir ?? await findDirectoryContaining(tempDir, path.basename(destDir));
     if (!sourceDir) {
@@ -2718,10 +2796,27 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
     }
 
     await execFileAsync("cp", ["-a", sourceDir, destDir]);
+
+    // An archive produced from a container whose rootfs was relocated carries it
+    // as a sibling `rootfs/` member. Put it back inside the restored container
+    // so the result is self-contained.
+    const archivedRootfs = path.join(tempDir, "rootfs");
+    const hasArchivedRootfs = path.resolve(archivedRootfs) !== path.resolve(sourceDir)
+      && await fs.stat(archivedRootfs).then((st) => st.isDirectory()).catch(() => false);
+    if (hasArchivedRootfs) {
+      const restoredRootfs = path.join(destDir, "rootfs");
+      await fs.rm(restoredRootfs, { recursive: true, force: true }).catch(() => {});
+      await execFileAsync("cp", ["-a", archivedRootfs, restoredRootfs]);
+    }
+
     let cfg = await fs.readFile(path.join(destDir, "config"), "utf8");
     const originalName = path.basename(sourceDir);
 
     cfg = cfg.replace(new RegExp(`/var/lib/lxc/${escapeRegExp(originalName)}/rootfs`, "g"), `/var/lib/lxc/${name}/rootfs`);
+    // Any rootfs path inherited from the source container must be neutralised:
+    // left as-is, a container restored under a new name would mount — and write
+    // into — the ORIGINAL container's rootfs on the storage pool.
+    cfg = cfg.replace(/^lxc\.rootfs\.path\s*=.*$/gim, `lxc.rootfs.path = dir:${path.join(destDir, "rootfs")}`);
     cfg = cfg.replace(/^lxc\.uts\.name\s*=.*$/gim, `lxc.uts.name = ${name}`);
     await writeContainerHostname(name, name);
 
