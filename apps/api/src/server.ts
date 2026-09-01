@@ -41,7 +41,7 @@ import { walkFiles, isManagedStorageLocation } from "./storageScan.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
   CreateVmSchema, UpdateVmConfigSchema, AttachDiskSchema, AttachNetworkSchema, UpdateNetworkSchema, CreateSnapshotSchema, BackupVmSchema,
-  UsbDeviceAssignmentSchema,
+  UsbDeviceAssignmentSchema, PartitionDiskSchema,
   CreateLxcSchema, UpdateLxcConfigSchema, BackupLxcSchema, LxcNicSchema, GpuDeviceAssignmentSchema, DockerConnectNetworkSchema,
   RunDockerSchema, CreateDockerNetworkSchema, UpdateDockerConfigSchema, ComposeDeploySchema,
   RecreateDockerSchema, ComposeProjectSchema, DockerVolumeCreateSchema, DockerExecSchema, DockerPruneSchema,
@@ -975,6 +975,19 @@ await app.register(fastifySession, {
   saveUninitialized: false,
 });
 await app.register(fastifyCsrf, { sessionPlugin: "@fastify/session" });
+// The panel drives every VM/LXC/Docker action on this host: never let it be
+// framed (clickjacking), sniffed, or leak its URLs through the referer.
+// The console pages embed no third-party frames, so frame-ancestors 'none' is
+// safe here.
+app.addHook("onSend", async (req, reply, payload) => {
+  reply.header("X-Frame-Options", "DENY");
+  reply.header("Content-Security-Policy", "frame-ancestors 'none'");
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("Referrer-Policy", "no-referrer");
+  if (req.url.startsWith("/api/")) reply.header("Cache-Control", "no-store");
+  return payload;
+});
+
 await app.register(fastifyMultipart, { limits: { fileSize: 8 * 1024 * 1024 * 1024 } });
 await app.register(fastifyRateLimit, { max: 1200, timeWindow: 60_000 });
 await app.register(fastifyStatic, {
@@ -995,16 +1008,37 @@ const MUST_CHANGE_PASSWORD_ALLOWED_PATHS = new Set([
   "/api/auth/capabilities",
 ]);
 
-function requireAuth(req: FastifyRequest, _reply: FastifyReply) {
+/**
+ * Resolve the session back to a live account on every guarded request.
+ *
+ * The cookie carries a snapshot of the user (id + role) taken at login and
+ * lives for 8 hours. Trusting it meant a deleted account — or one demoted from
+ * ADMIN — kept its access until the cookie expired, and 46 call sites read
+ * req.session.role. One indexed SQLite lookup closes that window and keeps the
+ * session object in sync for those readers.
+ */
+function resolveSessionUser(req: FastifyRequest): { id: number; username: string; role: string } {
   if (!req.session.userId) throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  const row = db.prepare("SELECT id, username, role FROM users WHERE id = ?").get(req.session.userId) as
+    { id: number; username: string; role: string } | undefined;
+  if (!row) {
+    void Promise.resolve(req.session.destroy()).catch(() => { /* store error */ });
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  }
+  req.session.role = row.role;
+  req.session.username = row.username;
+  return row;
+}
+
+function requireAuth(req: FastifyRequest, _reply: FastifyReply) {
+  resolveSessionUser(req);
   if (req.session.mustChangePassword && !MUST_CHANGE_PASSWORD_ALLOWED_PATHS.has((req.routeOptions?.url ?? req.url).split("?")[0])) {
     throw Object.assign(new Error("Password change required"), { statusCode: 409 });
   }
 }
 
 function requireAdmin(req: FastifyRequest, _reply: FastifyReply) {
-  if (!req.session.userId) throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
-  if (req.session.role !== "ADMIN") throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
+  if (resolveSessionUser(req).role !== "ADMIN") throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
 }
 
 function mapUserLimitsRow(row?: Record<string, number> | null): UserLimitsState {
@@ -8673,6 +8707,17 @@ app.post("/api/storage/disks/:dev/format", async (req, reply) => {
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "storage.disk.format", label: `Format disk /dev/${dev}`, resourceType: "storage", resourceName: `/dev/${dev}`, message: `Formatting as ${parsed.data.fstype ?? "ext4"}` });
   return runInstantTask(task, ip, () => callRunner("storage_disk_format", parsed.data));
+});
+
+app.post("/api/storage/disks/:dev/partition", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { dev } = req.params as { dev: string };
+  const parsed = PartitionDiskSchema.safeParse({ ...req.body as object, device: `/dev/${dev}` });
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const ip = getClientIp(req);
+  const count = parsed.data.partitions.length;
+  const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "storage.disk.partition", label: `Partition disk /dev/${dev}`, resourceType: "storage", resourceName: `/dev/${dev}`, message: `New ${parsed.data.table.toUpperCase()} table, ${count} partition${count > 1 ? "s" : ""}` });
+  return runInstantTask(task, ip, () => callRunner("storage_disk_partition", parsed.data));
 });
 
 app.post("/api/storage/disks/:dev/wipe", async (req, reply) => {

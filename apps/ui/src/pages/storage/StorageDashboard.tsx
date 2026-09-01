@@ -86,10 +86,111 @@ function DiskActionModal({ target, action, onClose, onDone }: {
   );
 }
 
+interface PartitionDraft { id: number; sizeGb: string; label: string }
+
+/**
+ * Write a new partition table on a whole disk. Replaces the existing table, so
+ * every partition on the device is lost — same confirmation discipline as
+ * format/wipe.
+ */
+function PartitionModal({ disk, onClose, onDone }: {
+  disk: PhysicalDisk | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [table, setTable] = useState<"gpt" | "msdos">("gpt");
+  const [rows, setRows] = useState<PartitionDraft[]>([{ id: 1, sizeGb: "", label: "" }]);
+  const [typed, setTyped] = useState("");
+  const [error, setError] = useState("");
+  const device = disk?.path ?? "";
+  const deviceName = device.replace(/^\/dev\//, "");
+
+  const run = useMutation({
+    mutationFn: () => apiPost(`/api/storage/disks/${encodeURIComponent(deviceName)}/partition`, {
+      table,
+      partitions: rows.map((row) => ({
+        // An empty size means "take the remaining space".
+        sizeMb: row.sizeGb.trim() ? Math.round(parseFloat(row.sizeGb) * 1024) : undefined,
+        label: row.label.trim() || undefined,
+      })),
+    }),
+    onSuccess: () => { onDone(); onClose(); setRows([{ id: 1, sizeGb: "", label: "" }]); setTyped(""); setError(""); },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  const update = (id: number, patch: Partial<PartitionDraft>) =>
+    setRows((prev) => prev.map((row) => row.id === id ? { ...row, ...patch } : row));
+
+  // Only the last partition may take the remaining space — mirror the server rule.
+  const emptySizes = rows.filter((row) => !row.sizeGb.trim());
+  const planInvalid = emptySizes.length > 1
+    || (emptySizes.length === 1 && rows[rows.length - 1].sizeGb.trim() !== "")
+    || rows.some((row) => row.sizeGb.trim() !== "" && !(parseFloat(row.sizeGb) > 0));
+
+  return (
+    <Modal open={!!disk} title={`Partition ${device}`} onClose={onClose}>
+      <div className="space-y-4">
+        <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          This writes a new partition table on <span className="font-mono">{device}</span> ({formatBytes(disk?.size ?? 0)}).
+          Every existing partition and all data on the disk are lost.
+        </div>
+        <div>
+          <label className="label">Partition table *</label>
+          <div className="grid grid-cols-2 gap-2">
+            {([["gpt", "GPT (recommended)"], ["msdos", "MBR / msdos"]] as const).map(([value, text]) => (
+              <button key={value} type="button" onClick={() => setTable(value)}
+                className={`px-3 py-2 rounded text-sm border transition-colors ${
+                  table === value
+                    ? "bg-accent-blue/20 text-accent-blue border-accent-blue/50"
+                    : "bg-surface-700 text-text-300 border-surface-500 hover:bg-surface-600"
+                }`}>{text}</button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <label className="label">Partitions *</label>
+          <div className="space-y-2">
+            {rows.map((row, index) => (
+              <div key={row.id} className="flex items-center gap-2">
+                <span className="text-xs text-text-500 w-6">{index + 1}</span>
+                <input className="input flex-1" value={row.sizeGb} onChange={(e) => update(row.id, { sizeGb: e.target.value })}
+                  placeholder={index === rows.length - 1 ? "Size in GB — empty = remaining space" : "Size in GB"} />
+                <input className="input w-32" value={row.label} onChange={(e) => update(row.id, { label: e.target.value })} placeholder="label" />
+                <button className="btn-ghost text-xs" disabled={rows.length === 1}
+                  onClick={() => setRows((prev) => prev.filter((r) => r.id !== row.id))}>Remove</button>
+              </div>
+            ))}
+          </div>
+          <button className="btn-ghost text-xs mt-2"
+            onClick={() => setRows((prev) => [...prev, { id: Math.max(0, ...prev.map((r) => r.id)) + 1, sizeGb: "", label: "" }])}>
+            + Add partition
+          </button>
+          <p className="text-xs text-text-500 mt-1">
+            Leave the last size empty to use all remaining space. Partitions are aligned automatically.
+          </p>
+        </div>
+        <div>
+          <label className="label">Type <span className="font-mono">{device}</span> to confirm</label>
+          <input className="input font-mono" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={device} />
+        </div>
+        {error && <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</div>}
+        <div className="flex justify-end gap-2">
+          <button className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn-danger" disabled={typed !== device || planInvalid || run.isPending}
+            onClick={() => { setError(""); run.mutate(); }}>
+            {run.isPending ? "Partitioning…" : "Write partition table"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function DiskCard({ disk, onChanged }: { disk: PhysicalDisk; onChanged: () => void }) {
   const stateColor = disk.inUse ? "text-yellow-400" : "text-green-400";
   const [target, setTarget] = useState<{ path: string; size: number; fstype?: string } | null>(null);
   const [action, setAction] = useState<"format" | "wipe">("format");
+  const [partitioning, setPartitioning] = useState(false);
   const openAction = (next: "format" | "wipe", t: { path: string; size: number; fstype?: string }) => {
     setAction(next);
     setTarget(t);
@@ -155,6 +256,14 @@ function DiskCard({ disk, onChanged }: { disk: PhysicalDisk; onChanged: () => vo
           Format whole disk
         </button>
         <button
+          className="btn-ghost text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+          disabled={diskLocked}
+          title={diskLocked ? "Disk is mounted or part of a RAID array" : undefined}
+          onClick={() => setPartitioning(true)}
+        >
+          Partition
+        </button>
+        <button
           className="btn-ghost text-xs text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
           disabled={diskLocked}
           title={diskLocked ? "Disk is mounted or part of a RAID array" : undefined}
@@ -170,6 +279,7 @@ function DiskCard({ disk, onChanged }: { disk: PhysicalDisk; onChanged: () => vo
       )}
 
       <DiskActionModal target={target} action={action} onClose={() => setTarget(null)} onDone={onChanged} />
+      <PartitionModal disk={partitioning ? disk : null} onClose={() => setPartitioning(false)} onDone={onChanged} />
     </div>
   );
 }

@@ -292,6 +292,7 @@ export async function handleStorage(action: string, params: unknown): Promise<un
     case "storage_mounts_list": return listMounts();
     case "storage_disk_format": return formatDisk(p.device as string, p.fstype as string, p.label as string | undefined, p.force as boolean);
     case "storage_disk_wipe": return wipeDisk(p.device as string);
+    case "storage_disk_partition": return partitionDisk(p);
     case "storage_raid_list": return listRaid();
     case "storage_raid_create": return createRaid(p);
     case "storage_raid_detail": return getRaidDetail(p.device as string);
@@ -526,6 +527,94 @@ async function formatDisk(rawDevice: string, fstype: string, rawLabel?: string, 
 
   await execFileAsync(args[0], args.slice(1));
   return { ok: true };
+}
+
+export interface PartitionPlanEntry {
+  /** Size in MiB. Omitted on the last entry means "use the remaining space". */
+  sizeMb?: number;
+  label?: string;
+}
+
+/**
+ * Turn a partition plan into parted's start/end pairs, in MiB.
+ *
+ * The first partition starts at 1 MiB so it stays aligned with the erase block
+ * of SSDs and the stripe of RAID arrays; a partition starting at sector 34
+ * (parted's minimum for GPT) is misaligned and measurably slower.
+ */
+export function buildPartitionRanges(plan: PartitionPlanEntry[], diskSizeMb: number): Array<{ start: string; end: string; label?: string }> {
+  if (plan.length === 0) throw new Error("At least one partition is required");
+  if (plan.length > 128) throw new Error("Too many partitions (max 128)");
+  const openEnded = plan.filter((entry) => entry.sizeMb === undefined);
+  if (openEnded.length > 1) throw new Error("Only one partition can take the remaining space");
+  if (openEnded.length === 1 && plan[plan.length - 1].sizeMb !== undefined) {
+    throw new Error("Only the last partition can take the remaining space");
+  }
+
+  const ALIGNMENT_MB = 1;
+  let cursor = ALIGNMENT_MB;
+  const ranges: Array<{ start: string; end: string; label?: string }> = [];
+  for (const [index, entry] of plan.entries()) {
+    const isLast = index === plan.length - 1;
+    if (entry.sizeMb === undefined) {
+      if (!isLast) throw new Error("Only the last partition can take the remaining space");
+      ranges.push({ start: `${cursor}MiB`, end: "100%", label: entry.label });
+      return ranges;
+    }
+    if (!Number.isFinite(entry.sizeMb) || entry.sizeMb <= 0) {
+      throw new Error("Partition size must be a positive number of MiB");
+    }
+    const end = cursor + Math.floor(entry.sizeMb);
+    // Leave the last MiB free so the GPT backup header always fits.
+    if (end > diskSizeMb - ALIGNMENT_MB) {
+      throw new Error(`Partition plan exceeds the device capacity (${Math.floor(diskSizeMb)} MiB available)`);
+    }
+    ranges.push({ start: `${cursor}MiB`, end: `${end}MiB`, label: entry.label });
+    cursor = end;
+  }
+  return ranges;
+}
+
+async function deviceSizeBytes(device: string): Promise<number> {
+  const { stdout } = await execFileAsync("lsblk", ["-bdn", "-o", "SIZE", device]);
+  const bytes = parseInt(stdout.trim(), 10);
+  if (!Number.isFinite(bytes) || bytes <= 0) throw new Error(`Cannot read the size of ${device}`);
+  return bytes;
+}
+
+/**
+ * Write a fresh partition table on a whole disk.
+ *
+ * Destructive by definition: it replaces the existing table, so every partition
+ * on the device is lost. Guarded the same way as format/wipe — the device and
+ * all of its children must be unmounted, and it must be a whole disk, never a
+ * partition (repartitioning /dev/sda1 makes no sense and would corrupt sda).
+ */
+async function partitionDisk(p: Record<string, unknown>) {
+  const device = validateDevicePath(p.device, "device");
+  const table = (p.table as string | undefined) ?? "gpt";
+  if (table !== "gpt" && table !== "msdos") throw new Error(`Unsupported partition table: ${table}`);
+
+  await assertBlockDevice(device);
+  const { stdout: typeOut } = await execFileAsync("lsblk", ["-dn", "-o", "TYPE", device]);
+  if (typeOut.trim() !== "disk") {
+    throw new Error(`Refusing to partition ${device}: it is a ${typeOut.trim() || "unknown"}, not a whole disk`);
+  }
+  await assertDeviceNotMounted(device);
+
+  const plan = (p.partitions as PartitionPlanEntry[] | undefined) ?? [{}];
+  const sizeMb = (await deviceSizeBytes(device)) / (1024 * 1024);
+  const ranges = buildPartitionRanges(plan, sizeMb);
+
+  await execFileAsync("parted", ["--script", device, "mklabel", table]);
+  for (const [index, range] of ranges.entries()) {
+    const partLabel = validateFsLabel(range.label) ?? `virtua${index + 1}`;
+    await execFileAsync("parted", ["--script", "--align", "optimal", device, "mkpart", table === "gpt" ? partLabel : "primary", range.start, range.end]);
+  }
+  // Make the kernel pick up the new table before anyone tries to format it.
+  await execFileAsync("partprobe", [device]).catch(() => {});
+  await execFileAsync("udevadm", ["settle"]).catch(() => {});
+  return { ok: true, partitions: ranges.length };
 }
 
 async function wipeDisk(rawDevice: string) {

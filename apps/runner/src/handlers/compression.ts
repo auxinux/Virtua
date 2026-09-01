@@ -1,5 +1,7 @@
 import { execFile, spawn } from "child_process";
-import { createWriteStream } from "fs";
+import { createWriteStream, constants as fsConstants } from "fs";
+import { promises as fsPromises } from "fs";
+import * as path from "path";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
@@ -36,13 +38,27 @@ function zstdProgram(level?: number): string {
 
 let cachedCompressor: Compressor | undefined;
 
+/**
+ * Probe for a program on PATH.
+ *
+ * Walks PATH with access(X_OK) instead of interpolating the name into
+ * `sh -c "command -v …"`. The runner is root, so a shell string built from a
+ * caller-supplied name is an injection waiting for its first dynamic caller —
+ * and this needs no subprocess at all.
+ */
 async function has(cmd: string): Promise<boolean> {
-  try {
-    await execFileAsync("sh", ["-c", `command -v ${cmd}`]);
-    return true;
-  } catch {
-    return false;
+  if (!/^[a-z0-9_-]{1,32}$/i.test(cmd)) return false;
+  const searchPath = (process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").split(":");
+  for (const dir of searchPath) {
+    if (!dir) continue;
+    try {
+      await fsPromises.access(path.join(dir, cmd), fsConstants.X_OK);
+      return true;
+    } catch {
+      // Not here — keep looking.
+    }
   }
+  return false;
 }
 
 /**

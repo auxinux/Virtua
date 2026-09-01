@@ -34,6 +34,16 @@ export const CreateStoragePoolSchema = z.object({
   s3VfsCacheMode: z.enum(["off", "minimal", "writes", "full"]).optional(),
 });
 
+export const PartitionDiskSchema = z.object({
+  device: z.string().regex(/^\/dev\/[a-z][a-z0-9]+$/),
+  table: z.enum(["gpt", "msdos"]).default("gpt"),
+  // An entry without sizeMb takes the remaining space; only the last one may.
+  partitions: z.array(z.object({
+    sizeMb: z.number().int().positive().max(1024 * 1024 * 64).optional(),
+    label: z.string().regex(/^[a-zA-Z0-9._-]{1,16}$/).optional(),
+  })).min(1).max(128).default([{}]),
+});
+
 export const FormatDiskSchema = z.object({
   device: z.string().regex(/^\/dev\/[a-z][a-z0-9]+$/),
   fstype: z.enum(["ext4", "xfs", "btrfs"]),
