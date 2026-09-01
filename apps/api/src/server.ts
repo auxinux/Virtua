@@ -37,6 +37,7 @@ import {
   CERT_PATH,
   KEY_PATH,
 } from "./ssl.js";
+import { walkFiles, isManagedStorageLocation } from "./storageScan.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
   CreateVmSchema, UpdateVmConfigSchema, AttachDiskSchema, AttachNetworkSchema, UpdateNetworkSchema, CreateSnapshotSchema, BackupVmSchema,
@@ -112,6 +113,8 @@ const LXC_TEMPLATES_DIR = process.env.LXC_TEMPLATES_DIR ?? path.join(DATA_DIR, "
 const DOCKER_ARCHIVES_DIR = process.env.DOCKER_ARCHIVES_DIR ?? path.join(DATA_DIR, "templates", "docker");
 const VM_DISKS_DIR = process.env.VM_DISKS_DIR ?? path.join(DATA_DIR, "images", "vm-disks");
 const VM_TEMPLATES_DIR = process.env.VM_TEMPLATES_DIR ?? path.join(DATA_DIR, "templates", "vm");
+/** Directories Virtua owns; anything outside them is not pool content. */
+const MANAGED_STORAGE_ROOTS = [DATA_DIR, ISOS_DIR, VM_DISKS_DIR, VM_TEMPLATES_DIR, LXC_TEMPLATES_DIR, DOCKER_ARCHIVES_DIR, "/var/lib/libvirt/images", "/var/lib/lxc"];
 // Hard cap on uploaded template/ISO size (bytes). Configurable for large ISOs.
 const TEMPLATE_MAX_BYTES = parseInt(process.env.TEMPLATE_MAX_BYTES ?? `${8 * 1024 * 1024 * 1024}`, 10);
 // Backup/restore can run for hours on huge LXC/VM images. These run inside a
@@ -3771,21 +3774,6 @@ async function reconcileSnapshotMetadata() {
   }
 }
 
-async function walkFiles(root: string, current = root, results: string[] = []): Promise<string[]> {
-  const entries = await fs.promises.readdir(current, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    const fullPath = path.join(current, entry.name);
-    if (entry.isDirectory()) {
-      await walkFiles(root, fullPath, results);
-      continue;
-    }
-    if (entry.isFile()) {
-      results.push(fullPath);
-    }
-  }
-  return results;
-}
-
 async function listPoolContent(poolName: string, poolPath: string): Promise<StoragePoolContentItem[]> {
   const items: StoragePoolContentItem[] = [];
   const seen = new Set<string>();
@@ -3888,11 +3876,13 @@ async function listPoolContent(poolName: string, poolPath: string): Promise<Stor
       }
     }
 
-    // Only surface items that are actually managed by Virtua. A file that did
-    // not match any known type (ISO, backup, disk, archive, VM attachment) is
-    // unrelated system noise (logs, caches, dpkg state…) and must not appear in
-    // the pool listing — the pool dir can otherwise contain tens of thousands
-    // of such files.
+    // Only surface items that are actually managed by Virtua. Filtering on the
+    // catch-all "file" type alone was not enough: anything carrying a known
+    // extension (.tar, .raw, .qcow2, .iso) slipped through, so third-party test
+    // fixtures sitting on the system disk were listed as Archives and Disks
+    // with working Download/Delete buttons. Location decides ownership, not the
+    // extension.
+    if (!linkedResourceType && backingDependents.length === 0 && !isManagedStorageLocation(poolPath, filePath, MANAGED_STORAGE_ROOTS)) continue;
     if (type === "file" && !linkedResourceType && backingDependents.length === 0) continue;
 
     const key = `file:${realPath}`;

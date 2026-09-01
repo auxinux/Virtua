@@ -15,7 +15,7 @@ export default defineConfig({
         test: {
           name: "node",
           environment: "node",
-          include: ["apps/vdm/src/**/*.test.ts", "apps/runner/src/**/*.test.ts", "packages/shared/src/**/*.test.ts"],
+          include: ["apps/api/src/**/*.test.ts", "apps/vdm/src/**/*.test.ts", "apps/runner/src/**/*.test.ts", "packages/shared/src/**/*.test.ts"],
         },
       },
     ],
