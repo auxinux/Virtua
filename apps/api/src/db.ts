@@ -355,6 +355,32 @@ function migrate(db: Database.Database) {
       message TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_node_error_log_ts ON node_error_log(ts);
+
+    -- Reprise après panne : politique par invité. L'absence de ligne signifie
+    -- « suivre le défaut global » (réglage crash.autoRestartDefault).
+    CREATE TABLE IF NOT EXISTS guest_crash_policy (
+      resource_type TEXT NOT NULL,              -- vm | lxc
+      resource_name TEXT NOT NULL,
+      restart_on_crash INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (resource_type, resource_name)
+    );
+
+    -- Journal des pannes : arrêts inattendus détectés par le surveillant et
+    -- suites données (redémarrage, échec, abandon après trop de tentatives).
+    CREATE TABLE IF NOT EXISTS guest_crash_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      resource_type TEXT NOT NULL,              -- vm | lxc
+      resource_name TEXT NOT NULL,
+      node_name TEXT,
+      event TEXT NOT NULL,                      -- crash | restart | restart-failed | gave-up
+      reason TEXT,                              -- crashed | failed | panicked | killed | unexpected
+      detail TEXT,                              -- état libvirt + extrait du journal invité
+      attempt INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_guest_crash_events_created_at ON guest_crash_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_guest_crash_events_resource ON guest_crash_events(resource_type, resource_name, created_at);
   `);
 
   const storagePoolColumns = db.prepare("PRAGMA table_info(storage_pools)").all() as Array<{ name: string }>;
@@ -650,4 +676,128 @@ export function startAuditLogPruner(db: Database.Database, intervalMs = 60 * 60 
   }, intervalMs);
   handle.unref?.();
   return handle;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REPRISE APRÈS PANNE (VM / LXC)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Nombre de redémarrages automatiques tolérés dans la fenêtre glissante. */
+export const DEFAULT_CRASH_MAX_ATTEMPTS = 3;
+/** Largeur (minutes) de la fenêtre glissante anti-boucle. */
+export const DEFAULT_CRASH_WINDOW_MINUTES = 10;
+/** Rétention du journal des pannes, en jours. */
+export const DEFAULT_CRASH_RETENTION_DAYS = 90;
+
+export type GuestKind = "vm" | "lxc";
+
+function readSetting(db: Database.Database, key: string): string | undefined {
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value?: string } | undefined;
+  return row?.value ?? undefined;
+}
+
+function readNumericSetting(db: Database.Database, key: string, fallback: number): number {
+  const parsed = parseInt(readSetting(db, key) ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Réglages globaux de la reprise après panne (avec valeurs par défaut). */
+export function getCrashSettings(db: Database.Database): {
+  autoRestartDefault: boolean;
+  maxAttempts: number;
+  windowMinutes: number;
+} {
+  return {
+    autoRestartDefault: readSetting(db, "crash.autoRestartDefault") === "1",
+    maxAttempts: readNumericSetting(db, "crash.maxAttempts", DEFAULT_CRASH_MAX_ATTEMPTS),
+    windowMinutes: readNumericSetting(db, "crash.windowMinutes", DEFAULT_CRASH_WINDOW_MINUTES),
+  };
+}
+
+/** Politique propre à un invité, ou `null` s'il suit le défaut global. */
+export function getGuestCrashPolicy(db: Database.Database, type: GuestKind, name: string): boolean | null {
+  const row = db.prepare("SELECT restart_on_crash FROM guest_crash_policy WHERE resource_type = ? AND resource_name = ?")
+    .get(type, name) as { restart_on_crash: number } | undefined;
+  return row ? row.restart_on_crash === 1 : null;
+}
+
+/** Politique effective : celle de l'invité si définie, sinon le défaut global. */
+export function resolveGuestCrashPolicy(db: Database.Database, type: GuestKind, name: string): boolean {
+  const own = getGuestCrashPolicy(db, type, name);
+  return own ?? getCrashSettings(db).autoRestartDefault;
+}
+
+/** Définit (ou efface, avec `null`) la politique d'un invité. */
+export function setGuestCrashPolicy(db: Database.Database, type: GuestKind, name: string, value: boolean | null): void {
+  if (value === null) {
+    db.prepare("DELETE FROM guest_crash_policy WHERE resource_type = ? AND resource_name = ?").run(type, name);
+    return;
+  }
+  db.prepare(`
+    INSERT INTO guest_crash_policy (resource_type, resource_name, restart_on_crash, updated_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(resource_type, resource_name)
+    DO UPDATE SET restart_on_crash = excluded.restart_on_crash, updated_at = datetime('now')
+  `).run(type, name, value ? 1 : 0);
+}
+
+export function recordCrashEvent(db: Database.Database, params: {
+  resourceType: GuestKind;
+  resourceName: string;
+  nodeName?: string;
+  event: "crash" | "restart" | "restart-failed" | "gave-up";
+  reason?: string;
+  detail?: string;
+  attempt?: number;
+}): void {
+  db.prepare(`
+    INSERT INTO guest_crash_events (resource_type, resource_name, node_name, event, reason, detail, attempt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    params.resourceType,
+    params.resourceName,
+    params.nodeName ?? null,
+    params.event,
+    params.reason ?? null,
+    // Le détail peut contenir un extrait de journal : on le borne pour ne pas
+    // faire gonfler la base sur un invité qui recrashe en boucle.
+    params.detail ? params.detail.slice(0, 8000) : null,
+    params.attempt ?? null,
+  );
+}
+
+/**
+ * Nombre de redémarrages automatiques déjà tentés pour cet invité dans la
+ * fenêtre glissante. Compté en base (et non en mémoire) pour que le garde-fou
+ * anti-boucle survive à un redémarrage de l'API.
+ */
+export function countRecentRestarts(db: Database.Database, type: GuestKind, name: string, windowMinutes: number): number {
+  // La fenêtre est calculée PAR SQLite : created_at est écrit au format
+  // datetime('now') (« 2026-09-02 15:06:27 »), qui ne se compare pas
+  // correctement à un ISO 8601 JavaScript (« …T15:06:27.000Z ») — l'espace
+  // trie avant le « T », donc toute comparaison mixte renverrait 0 et le
+  // garde-fou anti-boucle ne s'appliquerait jamais.
+  const row = db.prepare(`
+    SELECT COUNT(*) AS c FROM guest_crash_events
+    WHERE resource_type = ? AND resource_name = ?
+      AND event IN ('restart', 'restart-failed')
+      AND created_at > datetime('now', ?)
+  `).get(type, name, `-${Math.max(1, Math.round(windowMinutes))} minutes`) as { c: number };
+  return row.c;
+}
+
+export function getCrashRetentionDays(): number {
+  const raw = process.env.AUXINUX_CRASH_RETENTION_DAYS;
+  if (raw === undefined) return DEFAULT_CRASH_RETENTION_DAYS;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_CRASH_RETENTION_DAYS;
+  return parsed;
+}
+
+export function pruneCrashEvents(db: Database.Database, retentionDays = getCrashRetentionDays()): number {
+  if (retentionDays <= 0) return 0;
+  // Même raison que countRecentRestarts : on reste dans le format de SQLite.
+  return db.prepare("DELETE FROM guest_crash_events WHERE created_at < datetime('now', ?)")
+    .run(`-${Math.round(retentionDays)} days`).changes;
 }

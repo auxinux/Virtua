@@ -15,6 +15,7 @@ import { LockBadge, LockButton, useResourceLock } from "../../components/LockCon
 import { FirewallRulesPanel } from "../../components/firewall/FirewallRulesPanel";
 import { ResourceAclPanel } from "../../components/acl/ResourceAclPanel";
 import { HostUsbDevicesPanel } from "../../components/HostUsbDevicesPanel";
+import { CrashLog, CrashRestartToggle } from "../../components/CrashLog";
 import { formatBytes, formatDate } from "../../utils/formatBytes";
 import { useAuth } from "../../utils/useAuth";
 import { useSimpleMode } from "../../utils/useSimpleMode";
@@ -27,7 +28,7 @@ import {
 } from "lucide-react";
 import type { IsoFile, TaskProgress, VmInfo, VmRdpConsoleInfo, VmStats, VmSnapshot } from "@auxinux/shared";
 
-type TabId = "summary" | "console" | "hardware" | "network" | "firewall" | "acl" | "snapshots" | "backup" | "logs";
+type TabId = "summary" | "console" | "hardware" | "network" | "firewall" | "acl" | "snapshots" | "backup" | "logs" | "crashes";
 type VmDiskLibraryEntry = IsoFile & { path: string };
 
 export default function VmDetail() {
@@ -141,6 +142,7 @@ export default function VmDetail() {
     !isSimpleMode && perms?.canSnapshot ? { id: "snapshots", label: t("tab.snapshots") } : null,
     !isSimpleMode && perms?.canBackup ? { id: "backup", label: t("tab.backup") } : null,
     { id: "logs", label: isSimpleMode ? "Journal" : t("tab.logs") },
+    { id: "crashes", label: t("tab.crashes") },
   ].filter(Boolean) as Array<{ id: TabId; label: string }>;
 
   const detached = searchParams.get("detached");
@@ -363,6 +365,17 @@ export default function VmDetail() {
           />
         )}
         {tab === "backup" && perms?.canBackup && <VmBackupTab vmName={name!} nodeName={vm.nodeName} />}
+        {tab === "crashes" && (
+          <div className="space-y-4">
+            <CrashRestartToggle
+              resourceType="vm"
+              resourceName={name!}
+              value={vm.restartOnCrash}
+              canModify={!!perms?.canModify}
+            />
+            <CrashLog resource={{ type: "vm", name: name! }} limit={50} />
+          </div>
+        )}
         {tab === "logs" && (
           <div className="card p-6 bg-black/30">
             <div className="flex items-center gap-2 mb-4 text-text-400 text-sm">

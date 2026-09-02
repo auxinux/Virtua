@@ -63,6 +63,7 @@ const FirewallPage = lazy(() => import("./pages/network/FirewallPage"));
 const UserList = lazy(() => import("./pages/users/UserList"));
 const UserDetail = lazy(() => import("./pages/users/UserDetail"));
 const AuditPage = lazy(() => import("./pages/AuditPage"));
+const CrashesPage = lazy(() => import("./pages/CrashesPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const AboutPage = lazy(() => import("./pages/AboutPage"));
 const ChangePassword = lazy(() => import("./pages/ChangePassword"));
@@ -217,6 +218,7 @@ export default function App() {
           <Route path="/users/:id" element={<ProtectedLayout><SectionRoute section="users"><UserDetail /></SectionRoute></ProtectedLayout>} />
 
           <Route path="/audit" element={<ProtectedLayout><SectionRoute section="audit"><AuditPage /></SectionRoute></ProtectedLayout>} />
+          <Route path="/crashes" element={<ProtectedLayout><SectionRoute section="crashes"><CrashesPage /></SectionRoute></ProtectedLayout>} />
           <Route path="/settings" element={<ProtectedLayout><SectionRoute section="settings"><SettingsPage /></SectionRoute></ProtectedLayout>} />
 
           <Route path="*" element={<ProtectedLayout><HomeRedirect /></ProtectedLayout>} />

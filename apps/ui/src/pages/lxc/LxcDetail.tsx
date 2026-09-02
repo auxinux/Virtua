@@ -13,6 +13,7 @@ import { Terminal } from "../../components/Terminal";
 import { ResourceAclPanel } from "../../components/acl/ResourceAclPanel";
 import { HostUsbDevicesPanel } from "../../components/HostUsbDevicesPanel";
 import { HostGpuDevicesPanel } from "../../components/HostGpuDevicesPanel";
+import { CrashLog, CrashRestartToggle } from "../../components/CrashLog";
 import { useAuth } from "../../utils/useAuth";
 import { formatBytes } from "../../utils/formatBytes";
 import type { LxcContainer, LxcStats, LxcSnapshot, TaskProgress } from "@auxinux/shared";
@@ -742,6 +743,7 @@ export default function LxcDetail() {
     perms?.canSnapshot ? { key: "snapshots", label: "Snapshots" } : null,
     perms?.canBackup ? { key: "backup", label: "Backup" } : null,
     { key: "logs", label: "Logs" },
+    { key: "crashes", label: t("tab.crashes") },
   ].filter(Boolean) as Array<{ key: string; label: string }>;
 
   const { data: ct, isLoading, error } = useQuery<LxcContainer>({
@@ -879,6 +881,17 @@ export default function LxcDetail() {
         {tab === "snapshots" && perms?.canSnapshot && <LxcSnapshotsTab name={name!} />}
         {tab === "backup" && perms?.canBackup && <LxcBackupTab name={name!} nodeName={ct.nodeName} />}
         {tab === "logs" && <LxcLogsTab name={name!} />}
+        {tab === "crashes" && (
+          <div className="space-y-4">
+            <CrashRestartToggle
+              resourceType="lxc"
+              resourceName={name!}
+              value={ct.restartOnCrash}
+              canModify={!!perms?.canModify}
+            />
+            <CrashLog resource={{ type: "lxc", name: name! }} limit={50} />
+          </div>
+        )}
       </div>
 
       <ConfirmModal

@@ -21,6 +21,10 @@ interface Settings {
   "repo.templates"?: string;
   "repo.kernel"?: string;
   "repo.generic"?: string;
+  // Reprise après panne (valeurs stockées en texte comme le reste des réglages)
+  "crash.autoRestartDefault"?: string;
+  "crash.maxAttempts"?: string;
+  "crash.windowMinutes"?: string;
 }
 
 const REPO_PLACEHOLDERS: Record<string, string> = {
@@ -486,6 +490,51 @@ export default function SettingsPage() {
             />
           </div>
         </div>
+      </div>}
+
+      {showNodeSections && <div className="card p-5 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold text-text-300 border-b border-surface-500 pb-2">{t("crash.settingsTitle")}</h2>
+          <p className="mt-1 text-xs text-text-500">{t("crash.settingsDesc")}</p>
+        </div>
+
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue"
+            checked={settings["crash.autoRestartDefault"] === "1"}
+            onChange={(e) => set("crash.autoRestartDefault", e.target.checked ? "1" : "0")}
+          />
+          <span className="text-sm text-text-300">{t("crash.settingsDefaultRestart")}</span>
+        </label>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="label">{t("crash.settingsMaxAttempts")}</label>
+            <input
+              type="number"
+              min={1}
+              max={20}
+              className="input"
+              value={settings["crash.maxAttempts"] ?? ""}
+              onChange={(e) => set("crash.maxAttempts", e.target.value)}
+              placeholder="3"
+            />
+          </div>
+          <div>
+            <label className="label">{t("crash.settingsWindow")}</label>
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              className="input"
+              value={settings["crash.windowMinutes"] ?? ""}
+              onChange={(e) => set("crash.windowMinutes", e.target.value)}
+              placeholder="10"
+            />
+          </div>
+        </div>
+        <p className="text-xs text-text-500">{t("crash.settingsAntiLoop")}</p>
       </div>}
 
       {showNodeSections && <div className="card p-5 space-y-4">

@@ -62,6 +62,8 @@ export interface VmInfo {
   qemuAgentEnabled?: boolean;
   videoModel?: "vga" | "virtio" | "qxl";
   autostart: boolean;
+  /** Redémarrage automatique après une panne (null = défaut global du nœud). */
+  restartOnCrash?: boolean | null;
   disks: VmDisk[];
   networks: VmNetworkInterface[];
   usbDevices?: VmUsbDevice[];

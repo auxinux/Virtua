@@ -59,6 +59,7 @@ export interface AuthCapabilities {
     | "firewall"
     | "users"
     | "audit"
+    | "crashes"
     | "settings"
     | "vms"
     | "vmCreate"

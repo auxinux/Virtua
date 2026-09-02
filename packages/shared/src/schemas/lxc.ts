@@ -40,6 +40,8 @@ export const UpdateLxcConfigSchema = z.object({
   ipv4Gateway: z.string().optional(),
   dnsServers: z.array(z.string()).optional(),
   autostart: z.boolean().optional(),
+  // null remet le conteneur sur le défaut global du nœud.
+  restartOnCrash: z.boolean().nullable().optional(),
   description: z.string().max(500).optional(),
   portForwards: z.array(z.object({
     hostPort: z.number().int().min(1).max(65535),

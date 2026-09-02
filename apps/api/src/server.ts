@@ -19,7 +19,11 @@ import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import * as pty from "node-pty";
-import { getDb, auditLog, securityLog, startAuditLogPruner } from "./db.js";
+import {
+  getDb, auditLog, securityLog, startAuditLogPruner,
+  getGuestCrashPolicy, setGuestCrashPolicy,
+} from "./db.js";
+import { startCrashWatcher, markExpectedTransition } from "./crashWatcher.js";
 import { callRunner, type RunnerProgress } from "./runnerClient.js";
 import { registerDesktopApi, type DesktopResourceRow } from "./desktop.js";
 import {
@@ -362,6 +366,14 @@ function classifyNodeCategory(url: string): string {
   return "system";
 }
 startAuditLogPruner(db);
+// Surveillance des pannes VM/LXC : détecte les arrêts qu'aucune commande
+// Virtua n'a demandés, les journalise avec leur cause et redémarre l'invité
+// quand sa politique l'autorise.
+startCrashWatcher({
+  db,
+  getNodeName: getLocalNodeName,
+  startGuest: (type, name) => (type === "vm" ? runQemuAction(name, "start") : runLxcAction(name, "start")),
+});
 ensureLocalNodeAuthToken();
 ensureLocalDatacenterNode();
 
@@ -431,6 +443,7 @@ type UiSection =
   | "firewall"
   | "users"
   | "audit"
+  | "crashes"
   | "settings"
   | "vms"
   | "vmCreate"
@@ -1428,6 +1441,9 @@ function buildAuthCapabilities(user: {
     firewall: isAdmin || limits.allowNetworkManage,
     users: isAdmin,
     audit: isAdmin,
+    // Le journal des pannes concerne aussi les utilisateurs simples : ils y
+    // voient pourquoi LEURS machines se sont arrêtées (filtrage côté route).
+    crashes: isAdmin || resources.vms.length > 0 || resources.lxc.length > 0,
     settings: isAdmin,
     vms: isAdmin || limits.allowVmCreate || resources.vms.length > 0,
     vmCreate: isAdmin || limits.allowVmCreate,
@@ -1986,6 +2002,21 @@ function getTaskRecord(taskId: string) {
   return row ? mapTaskRow(row) : null;
 }
 
+/**
+ * Opérations de fond qui peuvent arrêter l'invité au passage (restauration,
+ * rollback de snapshot, clonage, suppression…). Le surveillant de pannes doit
+ * les ignorer, sinon chaque restauration serait journalisée comme une panne.
+ */
+const GUEST_STOPPING_TASK_ACTIONS = new Set([
+  "delete", "rename", "clone", "repair-disk", "export-template",
+  "backup.create", "backup.restore", "snapshot.rollback",
+]);
+
+function taskMayStopGuest(action: string): boolean {
+  const suffix = action.replace(/^(vm|lxc)\./, "");
+  return GUEST_STOPPING_TASK_ACTIONS.has(suffix) || GUEST_STOP_ACTIONS.has(suffix);
+}
+
 function createTask(
   ownerUserId: number,
   ownerUsername: string,
@@ -1999,6 +2030,9 @@ function createTask(
     detail?: string;
   },
 ): BackgroundTask {
+  if ((options.resourceType === "vm" || options.resourceType === "lxc") && options.resourceName && taskMayStopGuest(options.action)) {
+    markExpectedTransition(options.resourceType, options.resourceName);
+  }
   const now = new Date().toISOString();
   const task: BackgroundTask = {
     id: randomUUID(),
@@ -2544,11 +2578,24 @@ async function repairVmIsoSourcesBeforeStart(name: string) {
   }
 }
 
+/** Actions qui arrêtent l'invité : le surveillant ne doit pas y voir une panne. */
+const GUEST_STOP_ACTIONS = new Set(["stop", "forceStop", "shutdown", "reboot", "restart", "reset", "suspend", "pause", "freeze"]);
+
 async function runQemuAction(name: string, action: string) {
   if (action === "start") {
     await repairVmIsoSourcesBeforeStart(name);
   }
+  if (GUEST_STOP_ACTIONS.has(action)) markExpectedTransition("vm", name);
   return callRunner("qemu_action", { name, action });
+}
+
+/**
+ * Point de passage unique des actions LXC, pour la même raison que
+ * runQemuAction : un arrêt demandé ici ne doit jamais être compté comme panne.
+ */
+async function runLxcAction(name: string, action: string) {
+  if (GUEST_STOP_ACTIONS.has(action)) markExpectedTransition("lxc", name);
+  return callRunner("lxc_action", { name, action });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5456,7 +5503,7 @@ app.get("/api/internal/vms/:name", async (req, reply) => {
   const { name } = req.params as { name: string };
   const info = await callRunner("qemu_info", { name });
   const meta = db.prepare("SELECT * FROM qemu_vms WHERE vm_name = ?").get(name) as { user_id: number | null; description: string | null; tags: string } | undefined;
-  return { ...info as object, userId: meta?.user_id ?? undefined, description: meta?.description, tags: meta ? JSON.parse(meta.tags) : [] };
+  return { ...info as object, userId: meta?.user_id ?? undefined, description: meta?.description, tags: meta ? JSON.parse(meta.tags) : [], restartOnCrash: getGuestCrashPolicy(db, "vm", name) };
 });
 
 app.get("/api/internal/vms/:name/stats", async (req, reply) => {
@@ -5584,18 +5631,20 @@ app.put("/api/internal/vms/:name/config", async (req, reply) => {
   const { name } = req.params as { name: string };
   const parsed = UpdateVmConfigSchema.safeParse(req.body);
   if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const { restartOnCrash, ...runnerConfig } = parsed.data;
+  if (restartOnCrash !== undefined) setGuestCrashPolicy(db, "vm", name, restartOnCrash);
   if (
-    parsed.data.vcpus !== undefined ||
-    parsed.data.memoryMb !== undefined ||
-    parsed.data.autostart !== undefined ||
-    parsed.data.uefi !== undefined ||
-    parsed.data.secureBoot !== undefined ||
-    parsed.data.bootDevice !== undefined ||
-    parsed.data.tpmEnabled !== undefined ||
-    parsed.data.qemuAgentEnabled !== undefined ||
-    parsed.data.videoModel !== undefined
+    runnerConfig.vcpus !== undefined ||
+    runnerConfig.memoryMb !== undefined ||
+    runnerConfig.autostart !== undefined ||
+    runnerConfig.uefi !== undefined ||
+    runnerConfig.secureBoot !== undefined ||
+    runnerConfig.bootDevice !== undefined ||
+    runnerConfig.tpmEnabled !== undefined ||
+    runnerConfig.qemuAgentEnabled !== undefined ||
+    runnerConfig.videoModel !== undefined
   ) {
-    await callRunner("qemu_update_config", { name, ...parsed.data });
+    await callRunner("qemu_update_config", { name, ...runnerConfig });
   }
   if (parsed.data.description !== undefined || parsed.data.tags !== undefined) {
     db.prepare("UPDATE qemu_vms SET description = COALESCE(?, description), tags = COALESCE(?, tags) WHERE vm_name = ?")
@@ -5754,7 +5803,9 @@ app.get("/api/internal/lxc", async (req, reply) => {
 
 app.get("/api/internal/lxc/:name", async (req, reply) => {
   requireInternalNodeToken(req);
-  return callRunner("lxc_info", req.params);
+  const { name } = req.params as { name: string };
+  const info = await callRunner("lxc_info", { name });
+  return { ...(info as object), restartOnCrash: getGuestCrashPolicy(db, "lxc", name) };
 });
 
 app.get("/api/internal/lxc/:name/stats", async (req, reply) => {
@@ -5842,7 +5893,13 @@ app.put("/api/internal/lxc/:name/config", async (req, reply) => {
       return reply.status(400).send({ error: "LXC port forwards require a known container IPv4 address" });
     }
   }
-  const result = await callRunner("lxc_update_config", { name, ...parsed.data });
+  const { restartOnCrash, ...runnerConfig } = parsed.data;
+  if (restartOnCrash !== undefined) setGuestCrashPolicy(db, "lxc", name, restartOnCrash);
+  // Ne pas réécrire la config du conteneur quand seule la politique de reprise
+  // (propre à Virtua) a changé.
+  const result = Object.keys(runnerConfig).length > 0
+    ? await callRunner("lxc_update_config", { name, ...runnerConfig })
+    : { ok: true };
   if (parsed.data.portForwards) {
     db.prepare("DELETE FROM firewall_rules WHERE linked_resource_type = 'lxc' AND linked_resource_name = ? AND relation LIKE 'LXC port %'").run(name);
     const insert = db.prepare(`
@@ -5939,7 +5996,7 @@ app.post("/api/internal/lxc/:name/:action", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name, action } = req.params as { name: string; action: string };
   if (!LXC_ACTION_ALLOWLIST.has(action)) return reply.status(400).send({ error: `Invalid LXC action. Allowed: ${[...LXC_ACTION_ALLOWLIST].join(", ")}` });
-  return callRunner("lxc_action", { name, action });
+  return runLxcAction(name, action);
 });
 
 app.delete("/api/internal/lxc/:name", async (req, reply) => {
@@ -6890,7 +6947,9 @@ app.get("/api/vms/:name", async (req, reply) => {
   const node = await getResourceNodeAsync("vm", name);
   const info = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}`)
-    : await callRunner("qemu_info", { name });
+    // La politique de reprise vit sur le nœud qui héberge la VM : pour une VM
+    // distante, elle arrive déjà dans la réponse du nœud interrogé.
+    : { ...(await callRunner("qemu_info", { name })) as object, restartOnCrash: getGuestCrashPolicy(db, "vm", name) };
   const meta = db.prepare("SELECT * FROM qemu_vms WHERE vm_name = ?").get(name) as { user_id: number; description: string | null; tags: string } | undefined;
   return {
     ...info as object,
@@ -6989,18 +7048,22 @@ app.put("/api/vms/:name/config", async (req, reply) => {
         body: JSON.stringify(parsed.data),
       });
     } else {
+      // La reprise après panne est propre à Virtua (pas de notion équivalente
+      // côté libvirt) : elle est stockée en base et n'est pas envoyée au runner.
+      const { restartOnCrash, ...runnerConfig } = parsed.data;
+      if (restartOnCrash !== undefined) setGuestCrashPolicy(db, "vm", name, restartOnCrash);
       if (
-        parsed.data.vcpus !== undefined ||
-        parsed.data.memoryMb !== undefined ||
-        parsed.data.autostart !== undefined ||
-        parsed.data.uefi !== undefined ||
-        parsed.data.secureBoot !== undefined ||
-        parsed.data.bootDevice !== undefined ||
-        parsed.data.tpmEnabled !== undefined ||
-        parsed.data.qemuAgentEnabled !== undefined ||
-        parsed.data.videoModel !== undefined
+        runnerConfig.vcpus !== undefined ||
+        runnerConfig.memoryMb !== undefined ||
+        runnerConfig.autostart !== undefined ||
+        runnerConfig.uefi !== undefined ||
+        runnerConfig.secureBoot !== undefined ||
+        runnerConfig.bootDevice !== undefined ||
+        runnerConfig.tpmEnabled !== undefined ||
+        runnerConfig.qemuAgentEnabled !== undefined ||
+        runnerConfig.videoModel !== undefined
       ) {
-        await callRunner("qemu_update_config", { name, ...parsed.data });
+        await callRunner("qemu_update_config", { name, ...runnerConfig });
       }
       if (parsed.data.description !== undefined || parsed.data.tags !== undefined) {
         db.prepare("UPDATE qemu_vms SET description = COALESCE(?, description), tags = COALESCE(?, tags) WHERE vm_name = ?").run(parsed.data.description ?? null, parsed.data.tags ? JSON.stringify(parsed.data.tags) : null, name);
@@ -7776,7 +7839,7 @@ app.get("/api/lxc/:name", async (req, reply) => {
   const node = await getResourceNodeAsync("lxc", name);
   const info = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}`)
-    : await callRunner("lxc_info", { name });
+    : { ...(await callRunner("lxc_info", { name })) as object, restartOnCrash: getGuestCrashPolicy(db, "lxc", name) };
   return { ...(info as object), nodeName: node?.name ?? getLocalNodeName() };
 });
 
@@ -7849,7 +7912,7 @@ app.post("/api/lxc/:name/:action", async (req, reply) => {
     const node = await getResourceNodeAsync("lxc", name);
     return node && !node.isLocal
       ? fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}/${encodeURIComponent(action)}`, { method: "POST" })
-      : callRunner("lxc_action", { name, action });
+      : runLxcAction(name, action);
   });
 });
 
@@ -7874,7 +7937,13 @@ app.put("/api/lxc/:name/config", async (req, reply) => {
       return reply.status(400).send({ error: "LXC port forwards require a known container IPv4 address" });
     }
   }
-  const result = await callRunner("lxc_update_config", { name, ...parsed.data });
+  const { restartOnCrash, ...runnerConfig } = parsed.data;
+  if (restartOnCrash !== undefined) setGuestCrashPolicy(db, "lxc", name, restartOnCrash);
+  // Ne pas réécrire la config du conteneur quand seule la politique de reprise
+  // (propre à Virtua) a changé.
+  const result = Object.keys(runnerConfig).length > 0
+    ? await callRunner("lxc_update_config", { name, ...runnerConfig })
+    : { ok: true };
   if (parsed.data.portForwards) {
     db.prepare("DELETE FROM firewall_rules WHERE linked_resource_type = 'lxc' AND linked_resource_name = ? AND relation LIKE 'LXC port %'").run(name);
     const insert = db.prepare(`
@@ -10138,6 +10207,94 @@ app.delete("/api/audit-logs", async (req, reply) => {
   return { ok: true, cleared: info.changes };
 });
 
+// ── Journal des pannes (VM / LXC) ──────────────────────────────────────────
+/**
+ * Un utilisateur non-administrateur ne voit que les pannes des invités qu'il a
+ * le droit de consulter. Le filtre est appliqué EN SQL (et non après
+ * pagination) pour que le compteur et les pages restent justes.
+ */
+function crashEventVisibilityClause(req: FastifyRequest): { sql: string; params: unknown[] } | null {
+  if (req.session.role === "ADMIN") return { sql: "", params: [] };
+  const accessible = getAccessibleResources(req.session.userId!, req.session.role!);
+  const vmNames = accessible.vms.map((entry) => entry.name);
+  const lxcNames = accessible.lxc.map((entry) => entry.name);
+  if (vmNames.length === 0 && lxcNames.length === 0) return null;
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  if (vmNames.length > 0) {
+    parts.push(`(resource_type = 'vm' AND resource_name IN (${vmNames.map(() => "?").join(", ")}))`);
+    params.push(...vmNames);
+  }
+  if (lxcNames.length > 0) {
+    parts.push(`(resource_type = 'lxc' AND resource_name IN (${lxcNames.map(() => "?").join(", ")}))`);
+    params.push(...lxcNames);
+  }
+  return { sql: `(${parts.join(" OR ")})`, params };
+}
+
+app.get("/api/crash-events", async (req, reply) => {
+  requireAuth(req, reply);
+  const q = req.query as { resourceType?: string; resourceName?: string; event?: string; page?: string; limit?: string };
+  const limit = Math.max(1, Math.min(500, Number(q.limit) || 100));
+  const page = Math.max(1, Number(q.page) || 1);
+  const offset = (page - 1) * limit;
+  const type = q.resourceType === "vm" || q.resourceType === "lxc" ? q.resourceType : undefined;
+  const name = typeof q.resourceName === "string" && q.resourceName.trim() ? q.resourceName.trim() : undefined;
+
+  if (type && name) requireResourcePermission(req, type, name, "view");
+
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (type) { clauses.push("resource_type = ?"); params.push(type); }
+  if (name) { clauses.push("resource_name = ?"); params.push(name); }
+  if (!(type && name)) {
+    const visibility = crashEventVisibilityClause(req);
+    if (!visibility) return { events: [], total: 0 };
+    if (visibility.sql) { clauses.push(visibility.sql); params.push(...visibility.params); }
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+  const events = db.prepare(`
+    SELECT
+      id,
+      resource_type AS resourceType,
+      resource_name AS resourceName,
+      node_name AS nodeName,
+      event,
+      reason,
+      detail,
+      attempt,
+      created_at AS createdAt
+    FROM guest_crash_events
+    ${where}
+    ORDER BY created_at DESC, id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+  const total = (db.prepare(`SELECT COUNT(*) AS c FROM guest_crash_events ${where}`).get(...params) as { c: number }).c;
+  return { events, total };
+});
+
+// Vider le journal des pannes (tout, ou un seul invité).
+app.delete("/api/crash-events", async (req, reply) => {
+  requireAdmin(req, reply);
+  const q = req.query as { resourceType?: string; resourceName?: string };
+  const type = q.resourceType === "vm" || q.resourceType === "lxc" ? q.resourceType : undefined;
+  const name = typeof q.resourceName === "string" && q.resourceName.trim() ? q.resourceName.trim() : undefined;
+  const info = type && name
+    ? db.prepare("DELETE FROM guest_crash_events WHERE resource_type = ? AND resource_name = ?").run(type, name)
+    : db.prepare("DELETE FROM guest_crash_events").run();
+  auditLog(db, {
+    userId: req.session.userId,
+    username: req.session.username,
+    ip: getClientIp(req),
+    action: "crash.log.clear",
+    resourceType: type,
+    resourceName: name,
+    details: `${info.changes} entrée(s)`,
+  });
+  return { ok: true, cleared: info.changes };
+});
+
 // Clear finished task history (running/pending tasks are kept).
 app.delete("/api/tasks", async (req, reply) => {
   requireAdmin(req, reply);
@@ -10824,6 +10981,8 @@ async function renameDesktopResource(type: "vm" | "lxc" | "docker", node: string
   if (type === "vm") db.prepare("UPDATE qemu_vms SET vm_name = ? WHERE vm_name = ?").run(newName, oldKey);
   else db.prepare("UPDATE lxc_containers SET container_name = ? WHERE container_name = ?").run(newName, oldKey);
 
+  db.prepare("UPDATE guest_crash_policy SET resource_name = ? WHERE resource_type = ? AND resource_name = ?").run(newName, type, oldKey);
+  db.prepare("UPDATE guest_crash_events SET resource_name = ? WHERE resource_type = ? AND resource_name = ?").run(newName, type, oldKey);
   db.prepare("UPDATE snapshots SET resource_name = ? WHERE resource_type = ? AND resource_name = ?").run(newName, type, oldKey);
   db.prepare("UPDATE backups SET resource_name = ? WHERE resource_type = ? AND resource_name = ?").run(newName, type, oldKey);
   db.prepare("UPDATE user_resource_acl SET resource_name = ? WHERE resource_type = ? AND resource_name = ?").run(newName, type, oldKey);
@@ -11092,7 +11251,7 @@ registerDesktopApi({
     if (type === "lxc") {
       return remote
         ? fetchRemoteNode(remote, `/api/internal/lxc/${encodeURIComponent(name)}/${action}`, { method: "POST" })
-        : callRunner("lxc_action", { name, action });
+        : runLxcAction(name, action);
     }
     // docker (name === container id)
     return remote

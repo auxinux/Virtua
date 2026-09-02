@@ -10,7 +10,7 @@ import { useSimpleMode } from "../../utils/useSimpleMode";
 import {
   LayoutDashboard, Server, Database, Network, Shield,
   Monitor, Box, Package, Users, Activity, Settings,
-  Info, User, Terminal, ChevronRight, Plus
+  Info, User, Terminal, ChevronRight, Plus, AlertTriangle
 } from "lucide-react";
 
 interface SidebarVm { name: string; state: string }
@@ -321,6 +321,7 @@ export function Sidebar() {
       <div className="border-t border-surface-600 py-1 px-1">
         {!isSimpleMode && sections?.users && <SidebarItem to="/users" icon={<Users className="w-3.5 h-3.5" />} label={t("nav.users")} />}
         {!isSimpleMode && sections?.audit && <SidebarItem to="/audit" icon={<Activity className="w-3.5 h-3.5" />} label={t("nav.audit")} />}
+        {sections?.crashes && <SidebarItem to="/crashes" icon={<AlertTriangle className="w-3.5 h-3.5" />} label={t("nav.crashes")} />}
 
         <SidebarItem
           to="/account"

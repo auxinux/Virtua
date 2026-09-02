@@ -242,6 +242,7 @@ export async function handleQemu(action: string, params: unknown, emit?: Progres
     case "qemu_update_config": return updateVmConfig(p);
     case "qemu_stats": return getVmStats(p.name as string);
     case "qemu_logs": return getVmLogs(p.name as string, (p.tail as number) ?? 100);
+    case "qemu_stop_reason": return getDomainStopReason(p.name as string);
     case "qemu_attach_disk": return attachDisk(p);
     case "qemu_detach_disk": return detachDisk(p.name as string, p.device as string);
     case "qemu_resize_disk": return resizeDisk(p.name as string, p.device as string, p.sizeGb as number);
@@ -300,6 +301,20 @@ async function getDomainState(name: string) {
   } catch {
     return "unknown";
   }
+}
+
+/**
+ * Raison d'arrêt telle que libvirt la rapporte, ex. « shut off (crashed) ».
+ *
+ * `virsh domstate` seul ne dit que « shut off » : impossible d'y distinguer une
+ * extinction propre d'un plantage. Le drapeau --reason porte cette information,
+ * c'est elle qui permet au surveillant de pannes de ne pas relancer une VM que
+ * l'invité a éteinte lui-même.
+ */
+async function getDomainStopReason(name: string) {
+  const raw = (await virsh("domstate", name, "--reason").catch(() => "")).trim();
+  const match = raw.match(/\(([^)]+)\)\s*$/);
+  return { raw, state: normalizeState(raw), reason: match ? match[1].trim() : "" };
 }
 
 async function resumeIfUnexpectedlyPaused(name: string, initialState: string) {

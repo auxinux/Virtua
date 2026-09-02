@@ -6,6 +6,7 @@ export * from "./types/storage";
 export * from "./types/network";
 export * from "./types/system";
 export * from "./types/task";
+export * from "./types/crash";
 export * from "./types/firewall";
 export * from "./types/acl";
 export * from "./types/datacenter";

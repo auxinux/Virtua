@@ -30,6 +30,8 @@ export interface LxcContainer {
     devPaths: string[];
   }>;
   autostart: boolean;
+  /** Redémarrage automatique après une panne (null = défaut global du nœud). */
+  restartOnCrash?: boolean | null;
   userId?: number;
   description?: string;
 }

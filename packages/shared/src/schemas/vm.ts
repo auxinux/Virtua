@@ -36,6 +36,8 @@ export const UpdateVmConfigSchema = z.object({
   description: z.string().max(500).optional(),
   tags: z.array(z.string()).optional(),
   autostart: z.boolean().optional(),
+  // null remet la VM sur le défaut global du nœud.
+  restartOnCrash: z.boolean().nullable().optional(),
   uefi: z.boolean().optional(),
   secureBoot: z.boolean().optional(),
   bootDevice: z.enum(["hd", "cdrom", "network"]).optional(),
