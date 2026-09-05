@@ -1,0 +1,13 @@
+node_modules/
+dist/
+build-transfer/
+src-tauri/target/
+src-tauri/gen/
+NouvelGeneration/target/
+.DS_Store
+*.log
+.claude/settings.local.json
+.gemini/settings.json
+
+/test-results/
+/playwright-report/
