@@ -413,31 +413,33 @@ export function ResourceDetailPage({
               <input className="virtua-input w-full" disabled value={resource.node} />
             </label>
             {resource.source === "local" && resource.kind === "vm" ? (
+              <label className="space-y-1 text-xs text-virtua-muted">
+                Reseau
+                <select className="virtua-input w-full" disabled={!canModify} value={form.network} onChange={(event) => setForm((current) => ({ ...current, network: event.target.value }))}>
+                  <option value="user">NAT utilisateur</option>
+                  <option value="isolated">Isole - aucune carte reseau</option>
+                  <option value="vmnet-shared">macOS vmnet shared</option>
+                  <option value="vmnet-bridged">Bridge macOS en0</option>
+                </select>
+              </label>
+            ) : null}
+            {resource.kind === "vm" ? (
               <>
-                <label className="space-y-1 text-xs text-virtua-muted">
-                  Reseau
-                  <select className="virtua-input w-full" disabled={!canModify} value={form.network} onChange={(event) => setForm((current) => ({ ...current, network: event.target.value }))}>
-                    <option value="user">NAT utilisateur</option>
-                    <option value="isolated">Isole - aucune carte reseau</option>
-                    <option value="vmnet-shared">macOS vmnet shared</option>
-                    <option value="vmnet-bridged">Bridge macOS en0</option>
-                  </select>
-                </label>
                 <label className="space-y-1 text-xs text-virtua-muted">
                   Carte reseau
                   <select className="virtua-input w-full" disabled={!canModify} value={form.networkModel} onChange={(event) => setForm((current) => ({ ...current, networkModel: event.target.value }))}>
                     <option value="virtio">VirtIO</option>
                     <option value="e1000">Intel e1000{resource.architecture === "amd64" ? " - recommande AMD64" : ""}</option>
-                    <option value="rtl8139">Realtek RTL8139</option>
+                    {resource.source === "local" ? <option value="rtl8139">Realtek RTL8139</option> : null}
                   </select>
                 </label>
                 <label className="space-y-1 text-xs text-virtua-muted">
                   Carte graphique
                   <select className="virtua-input w-full" disabled={!canModify} value={form.gpuModel} onChange={(event) => setForm((current) => ({ ...current, gpuModel: event.target.value }))}>
                     <option value="virtio">VirtIO GPU</option>
-                    <option value="std">VGA standard</option>
-                    <option value="qxl">QXL</option>
-                    <option value="cirrus">Cirrus</option>
+                    <option value={resource.source === "local" ? "std" : "vga"}>VGA standard</option>
+                    <option value="qxl">QXL (acceleration via SPICE)</option>
+                    {resource.source === "local" ? <option value="cirrus">Cirrus</option> : null}
                   </select>
                 </label>
               </>

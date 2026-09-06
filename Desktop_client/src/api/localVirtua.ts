@@ -18,6 +18,7 @@ import type {
   VirtuaUser,
   VmArchitecture,
   PowerAction,
+  ConsoleMode,
 } from "@/types";
 import type { CreateResourcePayload } from "@/api/virtuaClient";
 
@@ -437,7 +438,17 @@ export const localVirtua = {
     }
   },
 
-  async getConsoleTicket(resourceId: string, mode: "graphical" | "text" = "graphical") {
+  async getConsoleTicket(resourceId: string, mode: ConsoleMode = "graphical") {
+    if (mode === "spice") {
+      const result = await invoke<{ url: string; password?: string }>("local_spice_console_url", { id: resourceId });
+      return {
+        ticket: "local",
+        url: result.url,
+        password: result.password,
+        expiresInMs: 60_000,
+        kind: mode,
+      };
+    }
     const url = await invoke<string>(mode === "text" ? "local_text_console_url" : "local_console_url", { id: resourceId });
     return {
       ticket: "local",

@@ -396,23 +396,23 @@ function CreateResourceDialog({
               <input className="virtua-input w-full" placeholder="bridge / network" value={form.network} onChange={(event) => setField("network", event.target.value)} />
             )}
           </label>
-          {usageMode === "local" && form.type === "vm" ? (
+          {form.type === "vm" ? (
             <>
               <label className="space-y-1 text-xs text-virtua-muted">
                 Carte reseau
                 <select className="virtua-input w-full" value={form.networkModel} onChange={(event) => setField("networkModel", event.target.value)}>
                   <option value="virtio">VirtIO</option>
                   <option value="e1000">Intel e1000{form.architecture === "amd64" ? " - recommande AMD64" : ""}</option>
-                  <option value="rtl8139">Realtek RTL8139</option>
+                  {usageMode === "local" ? <option value="rtl8139">Realtek RTL8139</option> : null}
                 </select>
               </label>
               <label className="space-y-1 text-xs text-virtua-muted">
                 Carte graphique
                 <select className="virtua-input w-full" value={form.gpuModel} onChange={(event) => setField("gpuModel", event.target.value)}>
                   <option value="virtio">VirtIO GPU</option>
-                  <option value="std">VGA standard</option>
-                  <option value="qxl">QXL</option>
-                  <option value="cirrus">Cirrus</option>
+                  <option value={usageMode === "local" ? "std" : "vga"}>VGA standard</option>
+                  <option value="qxl">QXL (acceleration via SPICE)</option>
+                  {usageMode === "local" ? <option value="cirrus">Cirrus</option> : null}
                 </select>
               </label>
             </>

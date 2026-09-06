@@ -1,10 +1,14 @@
 import RFB from "@novnc/novnc";
+import { SpiceMainConn, sendCtrlAltDel as spiceSendCtrlAltDel } from "spice-client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Maximize2, MousePointer2, RotateCcw, Send } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Maximize2, MousePointer2, RotateCcw, Send, Volume2 } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import { localVirtua } from "@/api/localVirtua";
 import { virtuaClient } from "@/api/virtuaClient";
-import type { PowerAction, VirtuaResource } from "@/types";
+import { installSpiceAudioFallback, resumeSpiceAudio } from "./spiceAudioFallback";
+import type { ConsoleMode, DesktopConsoleTicketResponse, PowerAction, VirtuaResource } from "@/types";
+
+installSpiceAudioFallback();
 
 type RfbInstance = RFB & {
   viewOnly: boolean;
@@ -13,6 +17,12 @@ type RfbInstance = RFB & {
   resizeSession: boolean;
   focus: (options?: FocusOptions) => void;
 };
+
+function fetchConsoleTicket(resource: VirtuaResource, mode: ConsoleMode): Promise<DesktopConsoleTicketResponse> {
+  return resource.source === "local"
+    ? localVirtua.getConsoleTicket(resource.id, mode)
+    : virtuaClient.getConsoleTicket(resource.id, mode);
+}
 
 function ConsoleButton({
   label,
@@ -46,14 +56,21 @@ function CloudGraphicalConsole({
   runResourceAction?: (resourceId: string, action: PowerAction) => Promise<unknown>;
   onChanged?: () => void | Promise<void>;
 }) {
+  const rawId = useId().replace(/[:]/g, "");
+  const screenId = `virtua-console-screen-${rawId}`;
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rfbRef = useRef<RfbInstance | null>(null);
+  const spiceRef = useRef<SpiceMainConn | null>(null);
   const statusTimerRef = useRef<number | null>(null);
   const toolbarTimerRef = useRef<number | null>(null);
+  const resizeTimerRef = useRef<number | null>(null);
   const [status, setStatus] = useState("Connexion graphique...");
   const [statusVisible, setStatusVisible] = useState(true);
   const [isConnected, setConnected] = useState(false);
+  const [protocol, setProtocol] = useState<"spice" | "vnc" | null>(null);
+  const [audioAvailable, setAudioAvailable] = useState(false);
+  const [audioPlaying, setAudioPlaying] = useState(false);
   const [isRestarting, setRestarting] = useState(false);
   const [isAppFullscreen, setAppFullscreen] = useState(false);
   const [isWindowFullscreen, setWindowFullscreen] = useState(false);
@@ -77,19 +94,74 @@ function CloudGraphicalConsole({
   const disconnectConsole = () => {
     rfbRef.current?.disconnect();
     rfbRef.current = null;
+    spiceRef.current?.stop();
+    spiceRef.current = null;
     setConnected(false);
+    setProtocol(null);
+    setAudioAvailable(false);
+    setAudioPlaying(false);
   };
 
   useEffect(() => {
     let disposed = false;
+    let resizeObserver: ResizeObserver | null = null;
+    let fitObserver: MutationObserver | null = null;
+    const normalizedCanvases = new Set<HTMLCanvasElement>();
 
-    const ticketPromise = resource.source === "local"
-      ? localVirtua.getConsoleTicket(resource.id)
-      : virtuaClient.getConsoleTicket(resource.id, "graphical");
+    const normalizePointer = (event: Event) => {
+      if (!(event instanceof MouseEvent) || !(event.currentTarget instanceof HTMLCanvasElement)) return;
+      const canvas = event.currentTarget;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const x = Math.max(0, Math.min(canvas.width - 1, (event.clientX - rect.left) * canvas.width / rect.width));
+      const y = Math.max(0, Math.min(canvas.height - 1, (event.clientY - rect.top) * canvas.height / rect.height));
+      Object.defineProperty(event, "offsetX", { configurable: true, value: x });
+      Object.defineProperty(event, "offsetY", { configurable: true, value: y });
+    };
 
-    void ticketPromise.then((ticket) => {
-      if (disposed || !containerRef.current) return;
-      disconnectConsole();
+    // SPICE's canvas doesn't auto-fit its container like noVNC's RFB does
+    // (rfb.scaleViewport handles that natively) — scale it manually and keep
+    // pointer coordinates mapped onto the true canvas resolution.
+    const fitSpiceDisplay = () => {
+      const screen = document.getElementById(screenId);
+      if (!screen) return;
+      for (const child of Array.from(screen.children)) {
+        if (!(child instanceof HTMLElement)) continue;
+        child.style.maxWidth = "100%";
+        child.style.maxHeight = "100%";
+        if (child instanceof HTMLCanvasElement) {
+          child.style.width = "auto";
+          child.style.height = "auto";
+          child.style.objectFit = "contain";
+          if (!normalizedCanvases.has(child)) {
+            for (const type of ["mousemove", "mousedown", "mouseup", "wheel"]) {
+              child.addEventListener(type, normalizePointer, { capture: true });
+            }
+            normalizedCanvases.add(child);
+          }
+        }
+      }
+      const audio = screen.querySelector("audio");
+      setAudioAvailable(!!audio);
+      setAudioPlaying(!!audio && !audio.paused);
+    };
+
+    const resizeSpiceGuest = () => {
+      const conn = spiceRef.current;
+      const container = containerRef.current;
+      if (!conn || !container) return;
+      const width = Math.max(640, Math.floor(container.clientWidth / 8) * 8);
+      const height = Math.max(480, Math.floor(container.clientHeight / 8) * 8);
+      conn.resize_window(0, width, height, 32, 0, 0);
+    };
+
+    const scheduleSpiceResize = () => {
+      if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
+      resizeTimerRef.current = window.setTimeout(resizeSpiceGuest, 200);
+    };
+
+    const mountVnc = (ticket: DesktopConsoleTicketResponse) => {
+      if (!containerRef.current) return;
       const rfb = new RFB(containerRef.current, ticket.url, { wsProtocols: ["binary"] }) as RfbInstance;
       rfb.viewOnly = false;
       rfb.clipViewport = true;
@@ -99,6 +171,7 @@ function CloudGraphicalConsole({
       rfb.qualityLevel = 7;
       rfb.compressionLevel = 2;
       rfb.addEventListener("connect", () => {
+        setProtocol("vnc");
         setConnected(true);
         showStatus("Console graphique connectee", 1200);
         rfb.focus();
@@ -111,15 +184,86 @@ function CloudGraphicalConsole({
         showStatus("Echec securite VNC");
       });
       rfbRef.current = rfb;
-    }).catch((error) => {
-      showStatus(error instanceof Error ? error.message : "Impossible d'ouvrir la console graphique");
-    });
+    };
+
+    const mountSpice = (ticket: DesktopConsoleTicketResponse) => {
+      const conn = new SpiceMainConn({
+        uri: ticket.url,
+        password: ticket.password ?? "",
+        screen_id: screenId,
+        scale_view: true,
+        onsuccess: () => {
+          if (disposed) return;
+          setProtocol("spice");
+          setConnected(true);
+          showStatus("Console graphique connectee", 1200);
+          scheduleSpiceResize();
+        },
+        onerror: (error: Error) => {
+          if (disposed) return;
+          setConnected(false);
+          showStatus(error?.message || "Console graphique deconnectee");
+        },
+      });
+      spiceRef.current = conn;
+      resizeObserver = new ResizeObserver(scheduleSpiceResize);
+      if (containerRef.current) resizeObserver.observe(containerRef.current);
+      const screen = document.getElementById(screenId);
+      if (screen) {
+        fitObserver = new MutationObserver(fitSpiceDisplay);
+        fitObserver.observe(screen, { childList: true });
+        fitSpiceDisplay();
+      }
+    };
+
+    const connect = async () => {
+      if (disposed || !containerRef.current) return;
+      disconnectConsole();
+      // Neither library guarantees it tears down its own DOM nodes on
+      // disconnect — clear the container so a protocol switch (e.g. SPICE
+      // becoming available after a VM restart) never leaves stale canvases.
+      containerRef.current.innerHTML = "";
+      showStatus("Connexion graphique...");
+      setStatusVisible(true);
+
+      // SPICE first (needed for qxl / audio); silent fallback to VNC if the
+      // server hasn't enabled SPICE for this VM yet.
+      try {
+        const ticket = await fetchConsoleTicket(resource, "spice");
+        if (disposed || !containerRef.current) return;
+        mountSpice(ticket);
+        return;
+      } catch {
+        // fall through to VNC
+      }
+
+      try {
+        const ticket = await fetchConsoleTicket(resource, "graphical");
+        if (disposed || !containerRef.current) return;
+        mountVnc(ticket);
+      } catch (error) {
+        if (disposed) return;
+        showStatus(error instanceof Error ? error.message : "Impossible d'ouvrir la console graphique");
+      }
+    };
+
+    void connect();
 
     return () => {
       disposed = true;
       if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+      if (resizeTimerRef.current) window.clearTimeout(resizeTimerRef.current);
+      fitObserver?.disconnect();
+      resizeObserver?.disconnect();
+      for (const canvas of normalizedCanvases) {
+        for (const type of ["mousemove", "mousedown", "mouseup", "wheel"]) {
+          canvas.removeEventListener(type, normalizePointer, { capture: true });
+        }
+      }
+      normalizedCanvases.clear();
       disconnectConsole();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resource.id, resource.state, connectionNonce]);
 
   useEffect(() => {
@@ -161,11 +305,31 @@ function CloudGraphicalConsole({
 
   const sendCtrlAltDel = () => {
     try {
-      rfbRef.current?.sendCtrlAltDel();
-      rfbRef.current?.focus();
+      if (protocol === "spice" && spiceRef.current) {
+        spiceSendCtrlAltDel(spiceRef.current);
+      } else {
+        rfbRef.current?.sendCtrlAltDel();
+        rfbRef.current?.focus();
+      }
     } catch {
       showStatus("Ctrl+Alt+Del impossible", 1800);
     }
+  };
+
+  const enableAudio = async () => {
+    const audio = document.getElementById(screenId)?.querySelector("audio");
+    if (audio) {
+      audio.muted = false;
+      audio.volume = 1;
+      try {
+        await audio.play();
+        setAudioPlaying(true);
+      } catch {
+        setAudioPlaying(false);
+      }
+      return;
+    }
+    setAudioPlaying(await resumeSpiceAudio(screenId).catch(() => false));
   };
 
   const restartResource = async () => {
@@ -283,9 +447,12 @@ function CloudGraphicalConsole({
       >
         <div className="flex items-center gap-2 text-xs text-virtua-muted">
           <span className="h-2 w-2 rounded-full bg-virtua-green" />
-          <span>{resource.name} / ecran virtuel</span>
+          <span>{resource.name} / ecran virtuel{protocol ? ` (${protocol === "spice" ? "SPICE" : "VNC"})` : ""}</span>
         </div>
         <div className="flex flex-wrap gap-2">
+          {protocol === "spice" && audioAvailable && !audioPlaying && (
+            <ConsoleButton label="Activer le son" icon={Volume2} onClick={() => void enableAudio()} />
+          )}
           <ConsoleButton label="Ctrl+Alt+Del" icon={Send} disabled={!isConnected} onClick={sendCtrlAltDel} />
           <ConsoleButton label="Redemarrer" icon={RotateCcw} disabled={!resource.permissions.canPower || isRestarting} onClick={() => void restartResource()} />
           <ConsoleButton label={isFullscreen ? "Quitter plein ecran" : "Plein ecran"} icon={Maximize2} onClick={() => void toggleFullscreen()} />
@@ -293,7 +460,7 @@ function CloudGraphicalConsole({
       </div>
 
       <div className={`relative min-h-0 flex-1 bg-black ${isFullscreen ? "h-screen" : ""}`}>
-        <div ref={containerRef} className="h-full w-full" />
+        <div ref={containerRef} id={screenId} className="h-full w-full" />
         {statusVisible && (
           <div className="absolute left-3 top-3 rounded bg-black/70 px-2 py-1 text-xs text-white">
             {status}

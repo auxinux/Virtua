@@ -4,7 +4,7 @@ export type ResourceState = string;
 
 export type VirtuaRole = "ADMIN" | "USER";
 
-export type ConsoleMode = "text" | "graphical";
+export type ConsoleMode = "text" | "graphical" | "spice";
 
 export type UsageMode = "local" | "cloud";
 
@@ -199,6 +199,8 @@ export interface DesktopConsoleTicketResponse {
   url: string;
   expiresInMs: number;
   kind: ConsoleMode;
+  /** SPICE session password (spice tickets only) — required for protocol auth */
+  password?: string;
 }
 
 export interface LocalBinaryStatus {

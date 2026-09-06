@@ -54,6 +54,8 @@ export interface DesktopConsoleTicket {
   ticketId: string;
   url: string;
   ttlMs: number;
+  /** SPICE session password (spice tickets only) — required for protocol auth */
+  password?: string;
 }
 
 export interface DesktopResourceRow {
@@ -67,6 +69,12 @@ export interface DesktopResourceRow {
   cpuPercent?: number;
   /** live memory usage 0–100 */
   memoryPercent?: number;
+  /** allocated vCPU count (static config) — VM and LXC only */
+  cpuCores?: number;
+  /** allocated memory in MiB (static config) — VM and LXC only */
+  memoryMib?: number;
+  /** allocated disk size in GiB (static config) — LXC only today */
+  diskGib?: number;
   ipAddress?: string;
   ipAddresses?: string[];
   uptimeSeconds?: number;
@@ -560,6 +568,9 @@ export function registerDesktopApi(deps: DesktopDeps): void {
       node: r.node,
       cpuPercent: r.cpuPercent,
       memoryPercent: r.memoryPercent,
+      cpuCores: r.cpuCores,
+      memoryMib: r.memoryMib,
+      diskGib: r.diskGib,
       ipAddress: r.ipAddress,
       ipAddresses: r.ipAddresses,
       uptimeSeconds: r.uptimeSeconds,
@@ -741,6 +752,6 @@ export function registerDesktopApi(deps: DesktopDeps): void {
     if (res.type !== "vm") fail(400, "SPICE console is only available for VMs");
     const ticket = await deps.issueConsoleTicket(req, { type: res.type, node: res.node, name: res.name, mode: "spice", userId: ctx.userId, deviceId: ctx.deviceId });
     audit(ctx, req, `desktop.${res.type}.console.spice`, { resourceType: res.type, resourceName: res.name });
-    return reply.send({ ticket: ticket.ticketId, url: ticket.url, expiresInMs: ticket.ttlMs, kind: "spice" });
+    return reply.send({ ticket: ticket.ticketId, url: ticket.url, expiresInMs: ticket.ttlMs, kind: "spice", password: ticket.password });
   }));
 }

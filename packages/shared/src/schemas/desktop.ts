@@ -96,6 +96,10 @@ export const DesktopCreateResourceSchema = z.object({
   secureBoot: z.boolean().optional(),
   qemuGuestAgent: z.boolean().optional(),
   autostart: z.boolean().optional(),
+  /** emulated video adapter (VM only) — served over SPICE for qxl to have any benefit */
+  gpuModel: z.enum(["vga", "virtio", "qxl"]).optional(),
+  /** NIC model (VM only) */
+  networkModel: z.enum(["virtio", "e1000", "rtl8139"]).optional(),
 
   // LXC-specific
   privileged: z.boolean().optional(),
@@ -120,6 +124,8 @@ export const DesktopUpdateResourceSchema = z.object({
   secureBoot: z.boolean().optional(),
   qemuGuestAgent: z.boolean().optional(),
   autostart: z.boolean().optional(),
+  gpuModel: z.enum(["vga", "virtio", "qxl"]).optional(),
+  networkModel: z.enum(["virtio", "e1000", "rtl8139"]).optional(),
 
   privileged: z.boolean().optional(),
   nesting: z.boolean().optional(),
@@ -216,6 +222,11 @@ export interface DesktopResource {
   /** live metrics (0–100) when the resource is running and reachable */
   cpuPercent?: number;
   memoryPercent?: number;
+  /** allocated size (static config, not live usage) — VM and LXC only */
+  cpuCores?: number;
+  memoryMib?: number;
+  /** allocated disk size — LXC only (not available for VM/Docker today) */
+  diskGib?: number;
   ipAddress?: string;
   ipAddresses?: string[];
   uptimeSeconds?: number;
@@ -254,4 +265,6 @@ export interface DesktopConsoleTicketResponse {
   /** ms until the ticket expires */
   expiresInMs: number;
   kind: "text" | "graphical" | "spice";
+  /** SPICE session password (spice tickets only) — required for protocol auth */
+  password?: string;
 }

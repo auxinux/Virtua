@@ -289,6 +289,10 @@ struct LocalVm {
     #[serde(default)]
     vnc_port: Option<u16>,
     #[serde(default)]
+    spice_port: Option<u16>,
+    #[serde(default)]
+    spice_password: Option<String>,
+    #[serde(default)]
     qmp_port: Option<u16>,
     #[serde(default)]
     qga_socket_path: Option<String>,
@@ -706,7 +710,7 @@ fn clear_vm_guest_agent_state(vm: &mut LocalVm) {
     vm.qga_last_probe_at = None;
 }
 
-async fn connect_vnc_with_retry(port: u16) -> Result<tokio::net::TcpStream, String> {
+async fn connect_local_port_with_retry(port: u16) -> Result<tokio::net::TcpStream, String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(8);
     loop {
         match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
@@ -715,7 +719,7 @@ async fn connect_vnc_with_retry(port: u16) -> Result<tokio::net::TcpStream, Stri
                 let _ = err;
                 tokio::time::sleep(tokio::time::Duration::from_millis(180)).await;
             }
-            Err(err) => return Err(format!("Port VNC local indisponible: {}", err)),
+            Err(err) => return Err(format!("Port local {} indisponible: {}", port, err)),
         }
     }
 }
@@ -779,6 +783,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
             } else {
                 vm.pid = None;
                 vm.vnc_port = None;
+                vm.spice_port = None;
                 vm.qmp_port = None;
                 clear_vm_guest_agent_state(vm);
                 vm.cpu_usage = None;
@@ -790,6 +795,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
             }
         } else {
             vm.vnc_port = None;
+            vm.spice_port = None;
             vm.qmp_port = None;
             vm.cpu_usage = None;
             vm.memory_usage = None;
@@ -1739,6 +1745,8 @@ fn import_template_archive(
         state: "stopped".to_string(),
         pid: None,
         vnc_port: None,
+        spice_port: None,
+        spice_password: None,
         qmp_port: None,
         qga_socket_path: None,
         guest_ip: None,
@@ -2181,6 +2189,8 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         state: "stopped".to_string(),
         pid: None,
         vnc_port: None,
+        spice_port: None,
+        spice_password: None,
         qmp_port: None,
         qga_socket_path: None,
         guest_ip: None,
@@ -2315,17 +2325,11 @@ async fn local_delete_container(id: String) -> Result<(), String> {
     .map_err(|err| err.to_string())?
 }
 
-#[tauri::command]
-async fn local_console_url(id: String) -> Result<String, String> {
-    let vms = read_local_vms()?;
-    let vm = vms
-        .iter()
-        .find(|vm| vm.id == id)
-        .ok_or_else(|| "VM locale introuvable".to_string())?;
-    if vm.state != "running" {
-        return Err("La VM doit etre demarree pour ouvrir la console.".to_string());
-    }
-    let vnc_port = vm.vnc_port.ok_or_else(|| "Cette VM a ete lancee avec l'ancien mode console. Redemarre-la pour utiliser la console integree.".to_string())?;
+/// Local, transport-agnostic TCP<->WebSocket relay. Binds an ephemeral local
+/// port, accepts one-time-token-authenticated WS connections for 45s, and
+/// pipes raw bytes both ways to `port` (VNC, SPICE, ... whatever speaks a
+/// plain TCP protocol on 127.0.0.1). Returns the `ws://` URL to connect to.
+async fn spawn_tcp_ws_relay(port: u16) -> Result<String, String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|err| err.to_string())?;
@@ -2364,7 +2368,7 @@ async fn local_console_url(id: String) -> Result<String, String> {
                 else {
                     return;
                 };
-                let Ok(tcp) = connect_vnc_with_retry(vnc_port).await else {
+                let Ok(tcp) = connect_local_port_with_retry(port).await else {
                     return;
                 };
 
@@ -2418,6 +2422,36 @@ async fn local_console_url(id: String) -> Result<String, String> {
     });
 
     Ok(format!("ws://127.0.0.1:{}/{}", proxy_port, token))
+}
+
+#[tauri::command]
+async fn local_console_url(id: String) -> Result<String, String> {
+    let vms = read_local_vms()?;
+    let vm = vms
+        .iter()
+        .find(|vm| vm.id == id)
+        .ok_or_else(|| "VM locale introuvable".to_string())?;
+    if vm.state != "running" {
+        return Err("La VM doit etre demarree pour ouvrir la console.".to_string());
+    }
+    let vnc_port = vm.vnc_port.ok_or_else(|| "Cette VM a ete lancee avec l'ancien mode console. Redemarre-la pour utiliser la console integree.".to_string())?;
+    spawn_tcp_ws_relay(vnc_port).await
+}
+
+#[tauri::command]
+async fn local_spice_console_url(id: String) -> Result<serde_json::Value, String> {
+    let vms = read_local_vms()?;
+    let vm = vms
+        .iter()
+        .find(|vm| vm.id == id)
+        .ok_or_else(|| "VM locale introuvable".to_string())?;
+    if vm.state != "running" {
+        return Err("La VM doit etre demarree pour ouvrir la console.".to_string());
+    }
+    let spice_port = vm.spice_port.ok_or_else(|| "SPICE n'est pas actif pour cette VM (redemarre-la).".to_string())?;
+    let password = vm.spice_password.clone().unwrap_or_default();
+    let url = spawn_tcp_ws_relay(spice_port).await?;
+    Ok(serde_json::json!({ "url": url, "password": password }))
 }
 
 fn text_console_command(id: &str) -> Result<tokio::process::Command, String> {
@@ -2642,11 +2676,19 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
                 .filter(|other| other.id != vm.id)
                 .filter_map(|other| other.qmp_port)
                 .collect();
+            let reserved_spice_ports: Vec<u16> = vms
+                .iter()
+                .filter(|other| other.id != vm.id)
+                .filter_map(|other| other.spice_port)
+                .collect();
             let vnc_port = find_free_port_excluding(5901, 5999, &reserved_vnc_ports)
                 .ok_or_else(|| "Aucun port console local disponible".to_string())?;
             let vnc_display = vnc_port - 5900;
             let qmp_port = find_free_port_excluding(6001, 6099, &reserved_qmp_ports)
                 .ok_or_else(|| "Aucun port controle QEMU local disponible".to_string())?;
+            let spice_port = find_free_port_excluding(5701, 5799, &reserved_spice_ports)
+                .ok_or_else(|| "Aucun port SPICE local disponible".to_string())?;
+            let spice_password = random_token();
 
             let qemu_path = if vm.architecture == "arm64" {
                 diagnostics.qemu_system_arm64.path
@@ -2723,15 +2765,19 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
                 &vm.network_model,
             );
 
-            if env::consts::OS == "macos" {
-                command
-                    .arg("-audiodev")
-                    .arg("coreaudio,id=audio0")
-                    .arg("-device")
-                    .arg("intel-hda")
-                    .arg("-device")
-                    .arg("hda-duplex,audiodev=audio0");
-            }
+            command.arg("-spice").arg(format!(
+                "port={},addr=127.0.0.1,disable-ticketing=off,password={}",
+                spice_port, spice_password
+            ));
+            // Audio streams through the SPICE channel to whatever client is
+            // attached (local relay or, once implemented, a remote one) —
+            // same mechanism and same client-side decoder on every OS,
+            // replacing the previous macOS-only CoreAudio device.
+            command
+                .arg("-audiodev")
+                .arg("spice,id=audioSpice")
+                .arg("-device")
+                .arg("hda-duplex,audiodev=audioSpice");
 
             if let Some(iso_path) = &vm.iso_path {
                 if !iso_path.trim().is_empty() {
@@ -2769,6 +2815,8 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
             }
             vm.pid = Some(child.id());
             vm.vnc_port = Some(vnc_port);
+            vm.spice_port = Some(spice_port);
+            vm.spice_password = Some(spice_password);
             vm.qmp_port = Some(qmp_port);
             vm.qga_socket_path = Some(qga_socket_path.to_string_lossy().to_string());
             vm.guest_ip = None;
@@ -2785,6 +2833,7 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
                 if !process_is_alive(pid) {
                     vm.pid = None;
                     vm.vnc_port = None;
+                    vm.spice_port = None;
                     vm.qmp_port = None;
                     clear_vm_guest_agent_state(&mut vm);
                     vm.cpu_usage = None;
@@ -2814,6 +2863,7 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
             }
             vm.pid = None;
             vm.vnc_port = None;
+            vm.spice_port = None;
             vm.qmp_port = None;
             clear_vm_guest_agent_state(&mut vm);
             vm.cpu_usage = None;
@@ -2832,6 +2882,7 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
             }
             vm.pid = None;
             vm.vnc_port = None;
+            vm.spice_port = None;
             vm.qmp_port = None;
             clear_vm_guest_agent_state(&mut vm);
             vm.cpu_usage = None;
@@ -2940,6 +2991,7 @@ pub fn run() {
             local_delete_vm,
             local_delete_container,
             local_console_url,
+            local_spice_console_url,
             local_text_console_url,
             local_run_action,
             local_run_container_action,

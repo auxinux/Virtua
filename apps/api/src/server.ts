@@ -11057,6 +11057,36 @@ function parseDesktopPorts(ports?: string): Array<{ hostPort: number; containerP
   }
   return out;
 }
+/**
+ * Apply a bridge/NIC-model change to a VM's primary (first) network interface
+ * from the desktop path. VMs may have several NICs identified by MAC — the
+ * desktop API only exposes a single flat `network`/`networkModel` field, so
+ * this scopes itself to the first NIC (the common single-NIC desktop case),
+ * mirroring the panel's per-MAC `PUT /api/vms/:name/network/:mac` endpoint.
+ */
+async function applyDesktopVmNetworkModel(
+  targetNode: DatacenterNode,
+  key: string,
+  network: string | undefined,
+  networkModel: "virtio" | "e1000" | "rtl8139" | undefined,
+): Promise<void> {
+  if (network === undefined && networkModel === undefined) return;
+  type VmNic = { mac?: string };
+  const info = targetNode.isLocal
+    ? await callRunner<{ networks?: VmNic[] }>("qemu_info", { name: key }).catch(() => null)
+    : await fetchRemoteNode<{ networks?: VmNic[] }>(targetNode, `/api/internal/vms/${encodeURIComponent(key)}`).catch(() => null);
+  const mac = info?.networks?.[0]?.mac;
+  if (!mac) desktopErr("VM has no network interface to update", 400);
+  if (targetNode.isLocal) {
+    await callRunner("qemu_update_network", { name: key, mac, bridge: network, model: networkModel });
+  } else {
+    await fetchRemoteNode(targetNode, `/api/internal/vms/${encodeURIComponent(key)}/network/${encodeURIComponent(mac)}`, {
+      method: "PUT",
+      body: JSON.stringify({ bridge: network, model: networkModel }),
+    });
+  }
+}
+
 /** Build the create-options catalog (nodes/images/networks/defaults) for a type. */
 async function buildDesktopCreateOptions(type: "vm" | "lxc" | "docker"): Promise<import("@auxinux/shared").DesktopCreateOptions> {
   const nodes = listDatacenterNodes()
@@ -11160,6 +11190,9 @@ registerDesktopApi({
             qemuGuestAgentEnabled: agentEnabled,
             qemuGuestAgentRunning: false,
             qemuGuestAgentStatus: agentEnabled ? (state === "running" ? "unknown" : "stopped") : "not-installed",
+            // Static allocated size (not live usage) — already on the list item.
+            cpuCores: typeof v.vcpus === "number" ? v.vcpus : undefined,
+            memoryMib: typeof v.memoryMb === "number" ? v.memoryMb : undefined,
           };
           out.push(row);
           if (state === "running") enrich.push((async () => {
@@ -11195,6 +11228,10 @@ registerDesktopApi({
             displayName: lxcDisplay.get(name),
             ipAddress: rawIp || undefined, ipAddresses: rawIp ? [rawIp] : undefined,
             owner: desktopUsernameById(lxcOwners.get(name)), assignedUsers: desktopAssignedUsers("lxc", name),
+            // Static allocated size (not live usage) — already on the list item.
+            cpuCores: typeof c.cpus === "number" ? c.cpus : undefined,
+            memoryMib: typeof c.memoryMb === "number" ? c.memoryMb : typeof c.memoryMiB === "number" ? c.memoryMiB : undefined,
+            diskGib: typeof c.diskGb === "number" ? c.diskGb : typeof c.rootfsSizeGb === "number" ? c.rootfsSizeGb : undefined,
           };
           out.push(row);
           if (row.state === "running") enrich.push((async () => {
@@ -11304,11 +11341,17 @@ registerDesktopApi({
         ...(input.tpm2 !== undefined ? { tpmEnabled: input.tpm2 } : {}),
         ...(input.qemuGuestAgent !== undefined ? { qemuAgentEnabled: input.qemuGuestAgent } : {}),
         ...(input.autostart !== undefined ? { autostart: input.autostart } : {}),
+        ...(input.gpuModel ? { videoModel: input.gpuModel } : {}),
       });
       if (targetNode.isLocal) await callRunner("qemu_create", await prepareVmCreatePayload(payload));
       else await fetchRemoteNode(targetNode, "/api/internal/vms", { method: "POST", body: JSON.stringify(payload) });
       db.prepare("INSERT INTO qemu_vms (vm_name, user_id, node_name) VALUES (?, ?, ?) ON CONFLICT(vm_name) DO UPDATE SET user_id = excluded.user_id, node_name = excluded.node_name")
         .run(payload.name, ctx.userId, targetNode.name);
+      if (input.networkModel) {
+        // Best-effort: the VM already exists at this point, so a NIC-model
+        // mismatch here shouldn't fail the whole creation.
+        await applyDesktopVmNetworkModel(targetNode, payload.name, undefined, input.networkModel).catch(() => undefined);
+      }
       return { node: targetNode.name, name: payload.name };
     }
 
@@ -11392,10 +11435,15 @@ registerDesktopApi({
       if (patch.secureBoot !== undefined) cfg.secureBoot = patch.secureBoot; // the runner derives uefi from it
       if (patch.qemuGuestAgent !== undefined) cfg.qemuAgentEnabled = patch.qemuGuestAgent;
       if (patch.autostart !== undefined) cfg.autostart = patch.autostart;
+      if (patch.gpuModel !== undefined) cfg.videoModel = patch.gpuModel;
       if (Object.keys(cfg).length > 0) {
         const v = UpdateVmConfigSchema.parse(cfg);
         if (remote) await fetchRemoteNode(remote, `/api/internal/vms/${encodeURIComponent(key)}/config`, { method: "PUT", body: JSON.stringify(v) });
         else await callRunner("qemu_update_config", { name: key, ...v });
+      }
+      if (patch.network !== undefined || patch.networkModel !== undefined) {
+        if (!dc) desktopErr("Target node not found", 404);
+        await applyDesktopVmNetworkModel(dc, key, patch.network, patch.networkModel);
       }
       return { node: res.node, name: key };
     }
@@ -11489,15 +11537,17 @@ registerDesktopApi({
     const proxyNode = isRemote ? node : undefined;
     let kind: ConsoleTicketKind;
     let wsPath: string;
+    let spicePassword: string | undefined;
     if (mode === "spice") {
       if (type !== "vm") desktopErr("SPICE console is only available for VMs", 400);
       if (isRemote) {
         try {
-          await fetchRemoteNode<unknown>(
+          const remote = await fetchRemoteNode<{ ticket: string; url: string; password?: string }>(
             dc,
             `/api/internal/vms/${encodeURIComponent(name)}/spice-ticket`,
             { method: "POST" },
           );
+          spicePassword = remote.password;
         } catch (error) {
           desktopErr(error instanceof Error ? error.message : "Remote SPICE console is not active", 409);
         }
@@ -11517,6 +11567,7 @@ registerDesktopApi({
             409,
           );
         }
+        spicePassword = info.spicePassword;
         kind = "vm-spice";
       }
       wsPath = "/api/ws/spice";
@@ -11541,7 +11592,7 @@ registerDesktopApi({
     } catch (error) {
       desktopErr(error instanceof Error ? error.message : "Unable to build desktop WebSocket URL", 500);
     }
-    return { ticketId: ticket.id, url, ttlMs: WS_TICKET_TTL_MS };
+    return { ticketId: ticket.id, url, ttlMs: WS_TICKET_TTL_MS, password: spicePassword };
   },
 });
 
