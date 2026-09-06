@@ -379,7 +379,7 @@ function CreateResourceDialog({
                   <button type="button" className="virtua-button shrink-0" onClick={() => void browseIso()}>Parcourir</button>
                 </div>
               ) : (
-                <input className="virtua-input w-full" placeholder={form.type === "docker" ? "nginx:latest" : "Selection via API Virtua requise"} value={form.image} onChange={(event) => setField("image", event.target.value)} />
+                <input className="virtua-input w-full" placeholder={form.type === "docker" ? "nginx:latest" : form.type === "vm" ? "Aucune ISO disponible sur le serveur" : "Aucun template LXC disponible sur le serveur"} value={form.image} onChange={(event) => setField("image", event.target.value)} />
               )
             )}
           </label>
