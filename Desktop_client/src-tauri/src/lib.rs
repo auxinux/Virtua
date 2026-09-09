@@ -15,11 +15,10 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,14 +26,14 @@ use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, 
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalBinaryStatus {
     path: Option<String>,
     available: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalQemuDiagnostics {
     os: String,
@@ -279,6 +278,8 @@ struct LocalVm {
     network_model: String,
     #[serde(default = "default_gpu_model")]
     gpu_model: String,
+    #[serde(default = "default_disk_bus")]
+    disk_bus: String,
     #[serde(default)]
     tpm2: bool,
     #[serde(default)]
@@ -295,7 +296,7 @@ struct LocalVm {
     #[serde(default)]
     qmp_port: Option<u16>,
     #[serde(default)]
-    qga_socket_path: Option<String>,
+    qga_port: Option<u16>,
     #[serde(default)]
     guest_ip: Option<String>,
     #[serde(default)]
@@ -308,6 +309,10 @@ struct LocalVm {
     memory_usage: Option<f32>,
     #[serde(default)]
     uptime_seconds: Option<u64>,
+    /// What the last start had to give up on (acceleration, SPICE, audio…) so
+    /// the UI can explain a degraded VM instead of leaving the user guessing.
+    #[serde(default)]
+    startup_notes: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -324,6 +329,7 @@ struct LocalCreateVmPayload {
     network: Option<String>,
     network_model: Option<String>,
     gpu_model: Option<String>,
+    disk_bus: Option<String>,
     tpm2: Option<bool>,
     secure_boot: Option<bool>,
 }
@@ -338,6 +344,7 @@ struct LocalUpdateVmPayload {
     network: Option<String>,
     network_model: Option<String>,
     gpu_model: Option<String>,
+    disk_bus: Option<String>,
     tpm2: Option<bool>,
     secure_boot: Option<bool>,
 }
@@ -425,6 +432,31 @@ fn default_gpu_model() -> String {
     "virtio".to_string()
 }
 
+fn default_disk_bus() -> String {
+    "virtio".to_string()
+}
+
+fn normalize_disk_bus(architecture: &str, value: Option<String>) -> String {
+    // The `virt` machine has no AHCI controller: ARM64 guests are always virtio.
+    if architecture == "arm64" {
+        return "virtio".to_string();
+    }
+    match value.unwrap_or_else(default_disk_bus).as_str() {
+        "sata" | "ide" | "ahci" => "sata".to_string(),
+        _ => "virtio".to_string(),
+    }
+}
+
+/// Fresh x86 VMs installed from an ISO get a SATA disk: no mainstream OS
+/// installer ships virtio-blk drivers, and "no disk found" was the single most
+/// common way a local VM looked broken. Templates keep their virtio disk.
+fn default_disk_bus_for_new_vm(architecture: &str, iso_path: Option<&str>) -> String {
+    if architecture != "arm64" && iso_path.map(|p| !p.trim().is_empty()).unwrap_or(false) {
+        return "sata".to_string();
+    }
+    "virtio".to_string()
+}
+
 fn normalize_network_mode(value: Option<String>) -> String {
     match value.unwrap_or_else(|| "user".to_string()).as_str() {
         "isolated" => "isolated".to_string(),
@@ -464,6 +496,7 @@ fn effective_network_model(architecture: &str, model: &str) -> String {
 
 fn append_gpu_args(command: &mut Command, architecture: &str, gpu_model: &str) {
     let device = match normalize_gpu_model(Some(gpu_model.to_string())).as_str() {
+        "std" if architecture == "arm64" => "ramfb",
         "std" => "VGA",
         "qxl" => "qxl-vga",
         "cirrus" => "cirrus-vga",
@@ -471,6 +504,25 @@ fn append_gpu_args(command: &mut Command, architecture: &str, gpu_model: &str) {
         _ => "virtio-vga",
     };
     command.arg("-device").arg(device);
+}
+
+fn append_disk_args(command: &mut Command, disk_path: &str, disk_bus: &str) {
+    if disk_bus == "sata" {
+        command.arg("-drive").arg(format!(
+            "file={},if=none,id=virtua-disk0,format=qcow2,cache=writeback,discard=unmap",
+            disk_path
+        ));
+        command
+            .arg("-device")
+            .arg("ich9-ahci,id=virtua-ahci")
+            .arg("-device")
+            .arg("ide-hd,drive=virtua-disk0,bus=virtua-ahci.0,bootindex=1");
+        return;
+    }
+    command.arg("-drive").arg(format!(
+        "file={},if=virtio,format=qcow2,cache=writeback,discard=unmap",
+        disk_path
+    ));
 }
 
 fn append_network_args(command: &mut Command, architecture: &str, mode: &str, model: &str) {
@@ -498,78 +550,14 @@ fn append_network_args(command: &mut Command, architecture: &str, mode: &str, mo
     command.arg("-device").arg(device);
 }
 
-fn candidate_paths(binary: &str) -> Vec<PathBuf> {
-    platform::candidates(binary)
-}
-
 fn find_binary(binary: &str) -> Option<String> {
-    candidate_paths(binary)
-        .into_iter()
-        .find(|path| path.is_file())
-        .map(|path| path.to_string_lossy().to_string())
+    platform::resolve(binary)
 }
 
 fn find_free_port_excluding(start: u16, end: u16, reserved: &[u16]) -> Option<u16> {
     (start..=end)
         .filter(|port| !reserved.contains(port))
         .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
-}
-
-fn process_is_alive(pid: u32) -> bool {
-    platform::alive(pid)
-}
-
-fn read_process_metrics(pid: u32, memory_mib: u32) -> (Option<f32>, Option<f32>, Option<u64>) {
-    let Ok(output) = Command::new("ps")
-        .arg("-p")
-        .arg(pid.to_string())
-        .args(["-o", "%cpu=", "-o", "rss=", "-o", "etime="])
-        .output()
-    else {
-        return (None, None, None);
-    };
-
-    if !output.status.success() {
-        return (None, None, None);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.split_whitespace().collect();
-    if parts.len() < 3 {
-        return (None, None, None);
-    }
-
-    let cpu = parts[0]
-        .parse::<f32>()
-        .ok()
-        .map(|value| value.clamp(0.0, 100.0));
-    let memory = parts[1].parse::<f32>().ok().map(|rss_kib| {
-        let total_kib = (memory_mib as f32 * 1024.0).max(1.0);
-        ((rss_kib / total_kib) * 100.0).clamp(0.0, 100.0)
-    });
-    let uptime = parse_ps_elapsed(parts[2]);
-
-    (cpu, memory, uptime)
-}
-
-fn parse_ps_elapsed(value: &str) -> Option<u64> {
-    let mut days = 0_u64;
-    let time_part = if let Some((day_part, tail)) = value.split_once('-') {
-        days = day_part.parse::<u64>().ok()?;
-        tail
-    } else {
-        value
-    };
-    let parts: Vec<u64> = time_part
-        .split(':')
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect();
-    let seconds = match parts.as_slice() {
-        [minutes, seconds] => minutes * 60 + seconds,
-        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
-        _ => return None,
-    };
-    Some(days * 86400 + seconds)
 }
 
 fn tail_file(path: &Path, max_bytes: usize) -> Option<String> {
@@ -605,12 +593,12 @@ fn qmp_execute(port: u16, execute: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn qga_execute(socket_path: &str, execute: &str) -> Result<serde_json::Value, String> {
-    if !PathBuf::from(socket_path).exists() {
-        return Err("Socket QGA introuvable".to_string());
-    }
-    let mut stream = UnixStream::connect(socket_path)
+/// The guest agent is reached over a loopback TCP chardev rather than a Unix
+/// socket: QEMU on Windows cannot serve `socket,path=…`, so the previous
+/// implementation silently disabled the agent (and therefore guest IPs) there.
+fn qga_execute(port: u16, execute: &str) -> Result<serde_json::Value, String> {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(600))
         .map_err(|err| format!("Connexion QEMU guest agent impossible: {}", err))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(650)))
@@ -618,6 +606,11 @@ fn qga_execute(socket_path: &str, execute: &str) -> Result<serde_json::Value, St
     stream
         .set_write_timeout(Some(Duration::from_millis(650)))
         .map_err(|err| err.to_string())?;
+
+    // Flush anything the agent queued before we attached.
+    let _ = stream.write_all(b"\xff{\"execute\":\"guest-sync\",\"arguments\":{\"id\":1}}\n");
+    let mut discard = [0_u8; 4096];
+    let _ = stream.read(&mut discard);
 
     let command = format!(r#"{{"execute":"{}"}}"#, execute);
     stream
@@ -649,7 +642,7 @@ fn qga_execute(socket_path: &str, execute: &str) -> Result<serde_json::Value, St
     let line = raw
         .lines()
         .rev()
-        .find(|line| line.trim_start().starts_with('{'))
+        .find(|line| line.trim_start().starts_with('{') && line.contains("\"return\""))
         .unwrap_or(raw.trim());
     if line.is_empty() {
         return Err("Reponse QGA vide".to_string());
@@ -657,13 +650,8 @@ fn qga_execute(socket_path: &str, execute: &str) -> Result<serde_json::Value, St
     serde_json::from_str(line).map_err(|err| format!("Reponse QGA invalide: {}", err))
 }
 
-#[cfg(not(unix))]
-fn qga_execute(_socket_path: &str, _execute: &str) -> Result<serde_json::Value, String> {
-    Err("QEMU guest agent local indisponible sur cet OS".to_string())
-}
-
-fn qga_guest_ip(socket_path: &str) -> Option<String> {
-    let response = qga_execute(socket_path, "guest-network-get-interfaces").ok()?;
+fn qga_guest_ip(port: u16) -> Option<String> {
+    let response = qga_execute(port, "guest-network-get-interfaces").ok()?;
     let interfaces = response.get("return")?.as_array()?;
     for interface in interfaces {
         let name = interface
@@ -696,18 +684,26 @@ fn qga_guest_ip(socket_path: &str) -> Option<String> {
     None
 }
 
-fn qga_is_running(socket_path: &str) -> bool {
-    qga_execute(socket_path, "guest-ping").is_ok()
+fn qga_is_running(port: u16) -> bool {
+    qga_execute(port, "guest-ping").is_ok()
 }
 
 fn clear_vm_guest_agent_state(vm: &mut LocalVm) {
-    if let Some(socket_path) = &vm.qga_socket_path {
-        let _ = fs::remove_file(socket_path);
-    }
-    vm.qga_socket_path = None;
+    vm.qga_port = None;
     vm.guest_ip = None;
     vm.guest_agent_running = false;
     vm.qga_last_probe_at = None;
+}
+
+/// One writer at a time for the on-disk inventory. Every mutating command used
+/// to read/modify/write `local-vms.json` concurrently with the 7 s UI refresh,
+/// which is how a VM could vanish from the list or come back with stale ports.
+static INVENTORY_LOCK: Mutex<()> = Mutex::new(());
+
+fn inventory_guard() -> std::sync::MutexGuard<'static, ()> {
+    INVENTORY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 async fn connect_local_port_with_retry(port: u16) -> Result<tokio::net::TcpStream, String> {
@@ -744,62 +740,88 @@ fn negotiate_binary_protocol(
     Ok(response)
 }
 
+/// A PID alone is not proof a VM is alive: the OS recycles PIDs, and a
+/// recycled one used to make Virtua believe a stopped VM was running (and then
+/// try to talk QMP to an unrelated process). Match the QEMU `-name` too.
+fn vm_process_alive(vm: &LocalVm) -> bool {
+    let Some(pid) = vm.pid else {
+        return false;
+    };
+    platform::named_qemu_alive(pid, &vm.id) || platform::named_qemu_alive(pid, &vm.name)
+}
+
 fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
     let mut changed = false;
+    let live_pids: Vec<u32> = vms
+        .iter()
+        .filter(|vm| vm_process_alive(vm))
+        .filter_map(|vm| vm.pid)
+        .collect();
+    let metrics = platform::process_metrics(&live_pids);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+
     for vm in &mut vms {
-        if let Some(pid) = vm.pid {
-            if process_is_alive(pid) {
-                if vm.state != "running" && vm.state != "stopping" {
-                    vm.state = "running".to_string();
-                    changed = true;
-                }
-                let (cpu_usage, memory_usage, uptime_seconds) =
-                    read_process_metrics(pid, vm.memory_mib);
-                vm.cpu_usage = cpu_usage;
-                vm.memory_usage = memory_usage;
-                vm.uptime_seconds = uptime_seconds;
-                if let Some(socket_path) = &vm.qga_socket_path {
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|duration| duration.as_secs())
-                        .unwrap_or(0);
-                    let should_probe = vm
-                        .qga_last_probe_at
-                        .map(|last| now.saturating_sub(last) >= 10)
-                        .unwrap_or(true);
-                    if should_probe {
-                        vm.guest_agent_running = qga_is_running(socket_path);
-                        if vm.guest_agent_running {
-                            vm.guest_ip = qga_guest_ip(socket_path);
-                        }
-                        vm.qga_last_probe_at = Some(now);
-                        changed = true;
-                    }
-                } else {
-                    vm.guest_agent_running = false;
-                    vm.guest_ip = None;
-                    vm.qga_last_probe_at = None;
-                }
-            } else {
-                vm.pid = None;
-                vm.vnc_port = None;
-                vm.spice_port = None;
-                vm.qmp_port = None;
-                clear_vm_guest_agent_state(vm);
-                vm.cpu_usage = None;
-                vm.memory_usage = None;
-                vm.uptime_seconds = None;
-                vm.state = "stopped".to_string();
-                vm.updated_at = now_string();
-                changed = true;
-            }
-        } else {
+        if vm.pid.is_none() {
             vm.vnc_port = None;
             vm.spice_port = None;
             vm.qmp_port = None;
             vm.cpu_usage = None;
             vm.memory_usage = None;
             vm.uptime_seconds = None;
+            continue;
+        }
+        if !vm_process_alive(vm) {
+            vm.pid = None;
+            vm.vnc_port = None;
+            vm.spice_port = None;
+            vm.spice_password = None;
+            vm.qmp_port = None;
+            clear_vm_guest_agent_state(vm);
+            vm.cpu_usage = None;
+            vm.memory_usage = None;
+            vm.uptime_seconds = None;
+            vm.state = "stopped".to_string();
+            vm.updated_at = now_string();
+            changed = true;
+            continue;
+        }
+
+        if vm.state != "running" && vm.state != "stopping" {
+            vm.state = "running".to_string();
+            changed = true;
+        }
+        if let Some((cpu, memory_bytes, uptime)) = vm.pid.and_then(|pid| metrics.get(&pid).copied())
+        {
+            let budget = (vm.memory_mib as f32 * 1024.0 * 1024.0).max(1.0);
+            vm.cpu_usage = Some(cpu);
+            vm.memory_usage = Some(((memory_bytes as f32 / budget) * 100.0).clamp(0.0, 100.0));
+            vm.uptime_seconds = Some(uptime);
+        }
+        match vm.qga_port {
+            Some(port) => {
+                let should_probe = vm
+                    .qga_last_probe_at
+                    .map(|last| now.saturating_sub(last) >= 10)
+                    .unwrap_or(true);
+                if should_probe {
+                    vm.guest_agent_running = qga_is_running(port);
+                    vm.guest_ip = if vm.guest_agent_running {
+                        qga_guest_ip(port)
+                    } else {
+                        None
+                    };
+                    vm.qga_last_probe_at = Some(now);
+                    changed = true;
+                }
+            }
+            None => {
+                vm.guest_agent_running = false;
+                vm.guest_ip = None;
+                vm.qga_last_probe_at = None;
+            }
         }
     }
     if changed {
@@ -911,18 +933,43 @@ fn read_local_vms() -> Result<Vec<LocalVm>, String> {
     if !path.exists() {
         return Ok(vec![]);
     }
-    let raw = fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let vms: Vec<LocalVm> = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    let raw = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let vms: Vec<LocalVm> = match serde_json::from_str(&raw) {
+        Ok(vms) => vms,
+        Err(err) => {
+            // Keep the damaged file for support, but let the app start.
+            let _ = fs::rename(&path, path.with_extension("json.corrupt"));
+            return Err(format!(
+                "Inventaire local illisible ({}). Il a ete mis de cote; les disques sont conserves.",
+                err
+            ));
+        }
+    };
     refresh_vm_states(vms)
+}
+
+/// Write through a temporary file: a crash (or a Windows "not responding" kill)
+/// in the middle of a plain `fs::write` truncated the inventory and lost every
+/// registered VM.
+fn write_json_atomic(path: &Path, raw: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, raw).map_err(|err| err.to_string())?;
+    // Windows refuses to rename onto an existing file.
+    if cfg!(windows) && path.exists() {
+        fs::copy(&temp, path).map_err(|err| err.to_string())?;
+        let _ = fs::remove_file(&temp);
+        return Ok(());
+    }
+    fs::rename(&temp, path).map_err(|err| err.to_string())
 }
 
 fn write_local_vms(vms: &[LocalVm]) -> Result<(), String> {
     let path = inventory_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
     let raw = serde_json::to_string_pretty(vms).map_err(|err| err.to_string())?;
-    fs::write(path, raw).map_err(|err| err.to_string())
+    write_json_atomic(&path, &raw)
 }
 
 fn read_local_snapshots() -> Result<Vec<LocalSnapshot>, String> {
@@ -941,11 +988,8 @@ fn read_local_snapshots() -> Result<Vec<LocalSnapshot>, String> {
 
 fn write_local_snapshots(snapshots: &[LocalSnapshot]) -> Result<(), String> {
     let path = snapshots_index_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
     let raw = serde_json::to_string_pretty(snapshots).map_err(|err| err.to_string())?;
-    fs::write(path, raw).map_err(|err| err.to_string())
+    write_json_atomic(&path, &raw)
 }
 
 fn safe_file_name(name: &str) -> Result<String, String> {
@@ -1000,29 +1044,6 @@ fn safe_download_name(name: &str) -> Result<String, String> {
     Ok(candidate)
 }
 
-/// Construit un chemin de socket dans un dossier runtime restreint (0700 sous Unix)
-/// au lieu d'un chemin previsible et partage dans /tmp.
-#[cfg(unix)]
-fn secure_socket_path(prefix: &str) -> Result<PathBuf, String> {
-    use std::os::unix::fs::DirBuilderExt;
-    let dir = PathBuf::from("/tmp").join("auxinux-virtua-run");
-    if !dir.exists() {
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&dir)
-            .map_err(|err| format!("Dossier runtime impossible: {}", err))?;
-    } else {
-        let _ = fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    }
-    Ok(dir.join(format!("{}-{}.sock", prefix, random_token())))
-}
-
-#[cfg(not(unix))]
-fn secure_socket_path(prefix: &str) -> Result<PathBuf, String> {
-    Ok(env::temp_dir().join(format!("{}-{}.sock", prefix, random_token())))
-}
-
 fn file_modified_string(metadata: &fs::Metadata) -> Option<String> {
     metadata
         .modified()
@@ -1062,22 +1083,15 @@ fn scan_files(dir: &str, extensions: &[&str]) -> Vec<LocalStorageFile> {
 }
 
 fn docker_images() -> Vec<LocalDockerImage> {
-    let Ok(output) = Command::new("docker")
-        .args([
-            "images",
-            "--format",
-            "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}",
-        ])
-        .output()
-    else {
+    let Ok(raw) = docker::probe(&[
+        "images",
+        "--format",
+        "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}",
+    ]) else {
         return vec![];
     };
-    if !output.status.success() {
-        return vec![];
-    }
 
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
+    raw.lines()
         .filter_map(|line| {
             let mut parts = line.split('\t');
             Some(LocalDockerImage {
@@ -1225,10 +1239,20 @@ fn template_stem(name: &str) -> String {
     }
 }
 
-fn fetch_template_metadata(url: &str) -> Result<TemplateMetadata, String> {
-    let response = reqwest::blocking::Client::builder()
+/// Every repository call goes through a client with real timeouts: a hung
+/// mirror used to block the calling thread — and, for the synchronous
+/// commands, the whole UI — until the OS gave up.
+fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(timeout)
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.1")
         .build()
-        .map_err(|err| err.to_string())?
+        .map_err(|err| format!("Client HTTP impossible: {}", err))
+}
+
+fn fetch_template_metadata(url: &str) -> Result<TemplateMetadata, String> {
+    let response = http_client(Duration::from_secs(15))?
         .get(url)
         .send()
         .map_err(|err| err.to_string())?;
@@ -1243,9 +1267,7 @@ fn download_small_file(url: &str, destination: &Path) -> Result<(), String> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    let mut response = reqwest::blocking::Client::builder()
-        .build()
-        .map_err(|err| err.to_string())?
+    let mut response = http_client(Duration::from_secs(60))?
         .get(url)
         .send()
         .map_err(|err| err.to_string())?;
@@ -1295,9 +1317,7 @@ fn download_file_with_progress(
             .unwrap_or_default()
     ));
 
-    let mut response = reqwest::blocking::Client::builder()
-        .build()
-        .map_err(|err| format!("Client HTTP impossible: {}", err))?
+    let mut response = http_client(Duration::from_secs(7200))?
         .get(url)
         .send()
         .map_err(|err| format!("Telechargement impossible: {}", err))?;
@@ -1368,6 +1388,71 @@ fn download_file_with_progress(
     Ok(())
 }
 
+/// Templates are packed/unpacked in-process. Windows only ships bsdtar (with a
+/// different option set) and macOS/Linux `tar` behaviour varies, so shelling
+/// out was the least portable step of the whole import path.
+/// Refuse absolute paths, `..` and Windows drive prefixes: an untrusted
+/// archive must not be able to write outside the extraction directory.
+fn tar_entry_is_safe(path: &Path) -> bool {
+    !path.is_absolute()
+        && path.components().all(|part| {
+            matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn extract_tar_gz(archive: &Path, destination: &Path) -> Result<(), String> {
+    let file =
+        fs::File::open(archive).map_err(|err| format!("Ouverture template impossible: {}", err))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    archive.set_overwrite(true);
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_mtime(false);
+    for entry in archive
+        .entries()
+        .map_err(|err| format!("Template illisible: {}", err))?
+    {
+        let mut entry = entry.map_err(|err| format!("Template illisible: {}", err))?;
+        let path = entry
+            .path()
+            .map_err(|err| format!("Chemin invalide dans le template: {}", err))?
+            .into_owned();
+        if !tar_entry_is_safe(&path) {
+            return Err(format!("Entree de template refusee: {}", path.display()));
+        }
+        if !matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Regular | tar::EntryType::Directory
+        ) {
+            continue;
+        }
+        entry
+            .unpack_in(destination)
+            .map_err(|err| format!("Extraction template impossible: {}", err))?;
+    }
+    Ok(())
+}
+
+fn create_tar_gz(archive: &Path, root: &Path, files: &[&str]) -> Result<(), String> {
+    let file =
+        fs::File::create(archive).map_err(|err| format!("Creation archive impossible: {}", err))?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(false);
+    for name in files {
+        builder
+            .append_path_with_name(root.join(name), name)
+            .map_err(|err| format!("Compression template impossible: {}", err))?;
+    }
+    builder
+        .into_inner()
+        .and_then(|encoder| encoder.finish())
+        .map_err(|err| format!("Compression template impossible: {}", err))?;
+    Ok(())
+}
+
 fn read_template_config(path: &Path) -> Result<std::collections::HashMap<String, String>, String> {
     let raw = fs::read_to_string(path)
         .map_err(|err| format!("Lecture config.virtua impossible: {}", err))?;
@@ -1408,14 +1493,14 @@ fn is_path_inside(child: &Path, parent: &Path) -> bool {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_refresh_token(token: String) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, REFRESH_TOKEN_ACCOUNT)
         .map_err(|err| err.to_string())?;
     entry.set_password(&token).map_err(|err| err.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_refresh_token() -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, REFRESH_TOKEN_ACCOUNT)
         .map_err(|err| err.to_string())?;
@@ -1426,7 +1511,7 @@ fn load_refresh_token() -> Result<Option<String>, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_refresh_token() -> Result<(), String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, REFRESH_TOKEN_ACCOUNT)
         .map_err(|err| err.to_string())?;
@@ -1436,14 +1521,14 @@ fn clear_refresh_token() -> Result<(), String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_desktop_setting(key: String, value: String) -> Result<(), String> {
     let account = account_for_key(&key)?;
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|err| err.to_string())?;
     entry.set_password(&value).map_err(|err| err.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_desktop_setting(key: String) -> Result<Option<String>, String> {
     let account = account_for_key(&key)?;
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|err| err.to_string())?;
@@ -1454,7 +1539,7 @@ fn load_desktop_setting(key: String) -> Result<Option<String>, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_desktop_setting(key: String) -> Result<(), String> {
     let account = account_for_key(&key)?;
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, account).map_err(|err| err.to_string())?;
@@ -1491,7 +1576,37 @@ async fn local_qemu_diagnostics() -> Result<LocalQemuDiagnostics, String> {
         .map_err(|e| e.to_string())?
 }
 
+static DIAGNOSTICS_CACHE: Mutex<Option<(u64, LocalQemuDiagnostics)>> = Mutex::new(None);
+const DIAGNOSTICS_TTL_SECONDS: u64 = 5;
+
+/// Drop the cached QEMU probe: an engine installation changes the answer.
+fn forget_diagnostics() {
+    if let Ok(mut cache) = DIAGNOSTICS_CACHE.lock() {
+        *cache = None;
+    }
+    platform::forget_caches();
+}
+
 fn qemu_diagnostics_blocking() -> Result<LocalQemuDiagnostics, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    if let Ok(cache) = DIAGNOSTICS_CACHE.lock() {
+        if let Some((stamp, diagnostics)) = cache.as_ref() {
+            if now.saturating_sub(*stamp) < DIAGNOSTICS_TTL_SECONDS {
+                return Ok(diagnostics.clone());
+            }
+        }
+    }
+    let diagnostics = probe_qemu_diagnostics()?;
+    if let Ok(mut cache) = DIAGNOSTICS_CACHE.lock() {
+        *cache = Some((now, diagnostics.clone()));
+    }
+    Ok(diagnostics)
+}
+
+fn probe_qemu_diagnostics() -> Result<LocalQemuDiagnostics, String> {
     let host_arch = normalize_arch(env::consts::ARCH);
     let qemu_img = binary_status("qemu-img");
     let qemu_system_arm64 = binary_status("qemu-system-aarch64");
@@ -1519,14 +1634,14 @@ fn qemu_diagnostics_blocking() -> Result<LocalQemuDiagnostics, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn local_load_storage_config() -> Result<LocalStorageConfig, String> {
     let config = read_storage_config()?;
     ensure_storage_dirs(&config)?;
     Ok(config)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn local_save_storage_config(config: LocalStorageConfig) -> Result<LocalStorageConfig, String> {
     ensure_storage_dirs(&config)?;
     let path = storage_config_path()?;
@@ -1539,7 +1654,13 @@ fn local_save_storage_config(config: LocalStorageConfig) -> Result<LocalStorageC
 }
 
 #[tauri::command]
-fn local_storage_inventory() -> Result<LocalStorageInventory, String> {
+async fn local_storage_inventory() -> Result<LocalStorageInventory, String> {
+    tauri::async_runtime::spawn_blocking(local_storage_inventory_blocking)
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+fn local_storage_inventory_blocking() -> Result<LocalStorageInventory, String> {
     let config = read_storage_config()?;
     ensure_storage_dirs(&config)?;
     let template_dir = template_cache_dir()?;
@@ -1558,24 +1679,28 @@ fn local_storage_inventory() -> Result<LocalStorageInventory, String> {
 }
 
 #[tauri::command]
-fn local_list_remote_templates(
+async fn local_list_remote_templates(
+    request: RemoteTemplateRequest,
+) -> Result<Vec<RemoteTemplateItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || local_list_remote_templates_blocking(request))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+fn local_list_remote_templates_blocking(
     request: RemoteTemplateRequest,
 ) -> Result<Vec<RemoteTemplateItem>, String> {
     let base_url = repository_url(&request.category, &request.architecture)?;
-    let output = Command::new("curl")
-        .args(["-L", "--fail", "--silent", "--show-error"])
-        .arg(&base_url)
-        .output()
+    let response = http_client(Duration::from_secs(20))?
+        .get(&base_url)
+        .send()
         .map_err(|err| format!("Depot inaccessible: {}", err))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "Depot inaccessible".to_string()
-        } else {
-            stderr
-        });
+    if !response.status().is_success() {
+        return Err(format!("Depot inaccessible: HTTP {}", response.status()));
     }
-    let html = String::from_utf8_lossy(&output.stdout);
+    let html = response
+        .text()
+        .map_err(|err| format!("Depot illisible: {}", err))?;
     Ok(parse_nginx_listing(
         &html,
         &base_url,
@@ -1589,9 +1714,12 @@ async fn local_download_template(
     app: tauri::AppHandle,
     payload: DownloadTemplatePayload,
 ) -> Result<Option<LocalVm>, String> {
-    tauri::async_runtime::spawn_blocking(move || local_download_template_blocking(app, payload))
-        .await
-        .map_err(|err| err.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_download_template_blocking(app, payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 fn local_download_template_blocking(
@@ -1653,6 +1781,17 @@ fn local_download_template_blocking(
     Ok(Some(vm))
 }
 
+/// Deletes the extraction directory on the way out, whatever happened. A
+/// template holds a full disk image: leaving one behind on an error silently
+/// doubled the space the import cost.
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn import_template_archive(
     archive_path: &Path,
     mut architecture: String,
@@ -1671,17 +1810,8 @@ fn import_template_archive(
     fs::create_dir_all(&template_dir).map_err(|err| err.to_string())?;
     let extract_root = template_dir.join(format!("{}-{}", safe_name, now_string()));
     fs::create_dir_all(&extract_root).map_err(|err| err.to_string())?;
-    let output = Command::new("tar")
-        .args(["-xzf"])
-        .arg(archive_path)
-        .arg("--no-same-owner")
-        .arg("-C")
-        .arg(&extract_root)
-        .output()
-        .map_err(|err| format!("Extraction template impossible: {}", err))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
+    let _scratch = ScratchDir(extract_root.clone());
+    extract_tar_gz(archive_path, &extract_root)?;
 
     let config_path = extract_root.join("config.virtua");
     if !config_path.exists() {
@@ -1740,6 +1870,7 @@ fn import_template_archive(
         network: "user".to_string(),
         network_model: default_network_model(),
         gpu_model: default_gpu_model(),
+        disk_bus: default_disk_bus(),
         tpm2,
         secure_boot,
         state: "stopped".to_string(),
@@ -1748,13 +1879,14 @@ fn import_template_archive(
         spice_port: None,
         spice_password: None,
         qmp_port: None,
-        qga_socket_path: None,
+        qga_port: None,
         guest_ip: None,
         guest_agent_running: false,
         qga_last_probe_at: None,
         cpu_usage: None,
         memory_usage: None,
         uptime_seconds: None,
+        startup_notes: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -1766,6 +1898,7 @@ fn import_template_archive(
 #[tauri::command]
 async fn local_import_vm_template(payload: ImportTemplatePayload) -> Result<LocalVm, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
         import_template_archive(
             &PathBuf::from(payload.template_path),
             normalize_arch(&payload.architecture),
@@ -1779,9 +1912,12 @@ async fn local_import_vm_template(payload: ImportTemplatePayload) -> Result<Loca
 async fn local_export_vm_template(
     payload: ExportTemplatePayload,
 ) -> Result<LocalStorageFile, String> {
-    tauri::async_runtime::spawn_blocking(move || local_export_vm_template_blocking(payload))
-        .await
-        .map_err(|err| err.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_export_vm_template_blocking(payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 fn local_export_vm_template_blocking(
@@ -1803,6 +1939,7 @@ fn local_export_vm_template_blocking(
     let template_name = safe_file_name(&payload.template_name)?;
     let work_dir = template_dir.join(format!("{}-work-{}", template_name, now_string()));
     fs::create_dir_all(&work_dir).map_err(|err| err.to_string())?;
+    let _scratch = ScratchDir(work_dir.clone());
     let source_disk = PathBuf::from(&vm.disk_path);
     let disk_name = source_disk
         .file_name()
@@ -1839,19 +1976,7 @@ fn local_export_vm_template_blocking(
     let metadata_raw = serde_json::to_string_pretty(&metadata).map_err(|err| err.to_string())?;
     fs::write(&metadata_path, metadata_raw).map_err(|err| err.to_string())?;
 
-    let output = Command::new("tar")
-        .arg("-czf")
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(&work_dir)
-        .arg("config.virtua")
-        .arg(&disk_name)
-        .output()
-        .map_err(|err| format!("Compression template impossible: {}", err))?;
-    let _ = fs::remove_dir_all(&work_dir);
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
+    create_tar_gz(&archive_path, &work_dir, &["config.virtua", &disk_name])?;
     let metadata = fs::metadata(&archive_path).map_err(|err| err.to_string())?;
     Ok(LocalStorageFile {
         name: archive_path
@@ -1865,7 +1990,16 @@ fn local_export_vm_template_blocking(
 }
 
 #[tauri::command]
-fn local_delete_storage_file(payload: DeleteStorageFilePayload) -> Result<(), String> {
+async fn local_delete_storage_file(payload: DeleteStorageFilePayload) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_delete_storage_file_blocking(payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn local_delete_storage_file_blocking(payload: DeleteStorageFilePayload) -> Result<(), String> {
     let config = read_storage_config()?;
     ensure_storage_dirs(&config)?;
     let kind = payload.kind.to_lowercase();
@@ -1921,7 +2055,7 @@ fn local_delete_storage_file(payload: DeleteStorageFilePayload) -> Result<(), St
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn local_list_snapshots(vm_id: String) -> Result<Vec<LocalSnapshot>, String> {
     let mut snapshots: Vec<LocalSnapshot> = read_local_snapshots()?
         .into_iter()
@@ -1932,7 +2066,16 @@ fn local_list_snapshots(vm_id: String) -> Result<Vec<LocalSnapshot>, String> {
 }
 
 #[tauri::command]
-fn local_create_snapshot(payload: CreateSnapshotPayload) -> Result<LocalSnapshot, String> {
+async fn local_create_snapshot(payload: CreateSnapshotPayload) -> Result<LocalSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_create_snapshot_blocking(payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn local_create_snapshot_blocking(payload: CreateSnapshotPayload) -> Result<LocalSnapshot, String> {
     let config = read_storage_config()?;
     ensure_storage_dirs(&config)?;
     let vms = read_local_vms()?;
@@ -1974,7 +2117,16 @@ fn local_create_snapshot(payload: CreateSnapshotPayload) -> Result<LocalSnapshot
 }
 
 #[tauri::command]
-fn local_delete_snapshot(payload: SnapshotActionPayload) -> Result<(), String> {
+async fn local_delete_snapshot(payload: SnapshotActionPayload) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_delete_snapshot_blocking(payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn local_delete_snapshot_blocking(payload: SnapshotActionPayload) -> Result<(), String> {
     let mut snapshots = read_local_snapshots()?;
     let index = snapshots
         .iter()
@@ -1990,7 +2142,16 @@ fn local_delete_snapshot(payload: SnapshotActionPayload) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn local_rollback_snapshot(payload: SnapshotActionPayload) -> Result<(), String> {
+async fn local_rollback_snapshot(payload: SnapshotActionPayload) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_rollback_snapshot_blocking(payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn local_rollback_snapshot_blocking(payload: SnapshotActionPayload) -> Result<(), String> {
     let config = read_storage_config()?;
     ensure_storage_dirs(&config)?;
     let mut vms = read_local_vms()?;
@@ -2019,9 +2180,12 @@ fn local_rollback_snapshot(payload: SnapshotActionPayload) -> Result<(), String>
 
 #[tauri::command]
 async fn local_list_vms() -> Result<Vec<LocalVm>, String> {
-    tauri::async_runtime::spawn_blocking(read_local_vms)
-        .await
-        .map_err(|err| err.to_string())?
+    tauri::async_runtime::spawn_blocking(|| {
+        let _guard = inventory_guard();
+        read_local_vms()
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -2114,9 +2278,12 @@ fn local_create_container_blocking(
 
 #[tauri::command]
 async fn local_create_vm(payload: LocalCreateVmPayload) -> Result<LocalVm, String> {
-    tauri::async_runtime::spawn_blocking(move || local_create_vm_blocking(payload))
-        .await
-        .map_err(|err| err.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_create_vm_blocking(payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, String> {
@@ -2161,29 +2328,40 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         .path
         .ok_or_else(|| "qemu-img est introuvable".to_string())?;
     let size = format!("{}G", payload.disk_gib);
-    let output = Command::new(qemu_img)
+    let mut create_disk = platform::command(&qemu_img);
+    create_disk
         .args(["create", "-f", "qcow2"])
         .arg(&disk_path)
-        .arg(size)
-        .output()
-        .map_err(|err| format!("qemu-img impossible a lancer: {}", err))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
+        .arg(size);
+    platform::output(create_disk, Duration::from_secs(120))
+        .map_err(|err| format!("Creation du disque impossible: {}", err))?;
 
     let timestamp = now_string();
+    let iso_path = payload
+        .iso_path
+        .clone()
+        .filter(|value| !value.trim().is_empty());
     let vm = LocalVm {
         id,
         name: payload.name.trim().to_string(),
-        architecture,
+        architecture: architecture.clone(),
         cpu: payload.cpu,
         memory_mib: payload.memory_mib,
         disk_gib: payload.disk_gib,
         disk_path: disk_path.to_string_lossy().to_string(),
-        iso_path: payload.iso_path.filter(|value| !value.trim().is_empty()),
+        iso_path: iso_path.clone(),
         network: normalize_network_mode(payload.network),
         network_model: normalize_network_model(payload.network_model),
         gpu_model: normalize_gpu_model(payload.gpu_model),
+        disk_bus: normalize_disk_bus(
+            &architecture,
+            payload.disk_bus.or_else(|| {
+                Some(default_disk_bus_for_new_vm(
+                    &architecture,
+                    iso_path.as_deref(),
+                ))
+            }),
+        ),
         tpm2: payload.tpm2.unwrap_or(false),
         secure_boot: payload.secure_boot.unwrap_or(false),
         state: "stopped".to_string(),
@@ -2192,13 +2370,14 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         spice_port: None,
         spice_password: None,
         qmp_port: None,
-        qga_socket_path: None,
+        qga_port: None,
         guest_ip: None,
         guest_agent_running: false,
         qga_last_probe_at: None,
         cpu_usage: None,
         memory_usage: None,
         uptime_seconds: None,
+        startup_notes: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2208,7 +2387,16 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
 }
 
 #[tauri::command]
-fn local_update_vm(id: String, payload: LocalUpdateVmPayload) -> Result<LocalVm, String> {
+async fn local_update_vm(id: String, payload: LocalUpdateVmPayload) -> Result<LocalVm, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_update_vm_blocking(id, payload)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn local_update_vm_blocking(id: String, payload: LocalUpdateVmPayload) -> Result<LocalVm, String> {
     let mut vms = read_local_vms()?;
     let index = vms
         .iter()
@@ -2261,6 +2449,13 @@ fn local_update_vm(id: String, payload: LocalUpdateVmPayload) -> Result<LocalVm,
         vm.gpu_model = normalize_gpu_model(Some(gpu_model));
     }
 
+    if let Some(disk_bus) = payload.disk_bus {
+        if vm_process_alive(&vm) {
+            return Err("Arrete la VM avant de changer le bus disque".to_string());
+        }
+        vm.disk_bus = normalize_disk_bus(&vm.architecture, Some(disk_bus));
+    }
+
     if let Some(tpm2) = payload.tpm2 {
         vm.tpm2 = tpm2;
     }
@@ -2276,7 +2471,16 @@ fn local_update_vm(id: String, payload: LocalUpdateVmPayload) -> Result<LocalVm,
 }
 
 #[tauri::command]
-fn local_delete_vm(id: String, delete_disks: bool) -> Result<(), String> {
+async fn local_delete_vm(id: String, delete_disks: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        local_delete_vm_blocking(id, delete_disks)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn local_delete_vm_blocking(id: String, delete_disks: bool) -> Result<(), String> {
     let config = read_storage_config()?;
     let disk_root = PathBuf::from(&config.disk_dir);
     let mut vms = read_local_vms()?;
@@ -2289,18 +2493,35 @@ fn local_delete_vm(id: String, delete_disks: bool) -> Result<(), String> {
     if let Some(pid) = vm.pid {
         if let Some(qmp_port) = vm.qmp_port {
             let _ = qmp_execute(qmp_port, "quit");
-        } else {
+        }
+        // Deleting the disk while QEMU still holds it fails outright on Windows
+        // and corrupts nothing but the user's expectations elsewhere: wait for
+        // the process to go, then force it.
+        for _ in 0..30 {
+            if !vm_process_alive(&vm) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if vm_process_alive(&vm) {
             platform::terminate(pid)?;
+            for _ in 0..20 {
+                if !vm_process_alive(&vm) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
-    if let Some(socket_path) = &vm.qga_socket_path {
-        let _ = fs::remove_file(socket_path);
-    }
-
     if delete_disks {
         let disk_path = PathBuf::from(&vm.disk_path);
         if disk_path.exists() && is_path_inside(&disk_path, &disk_root) {
-            fs::remove_file(disk_path).map_err(|err| err.to_string())?;
+            fs::remove_file(disk_path).map_err(|err| {
+                format!(
+                    "Suppression du disque impossible ({}). La VM est conservee.",
+                    err
+                )
+            })?;
         }
     }
 
@@ -2424,31 +2645,40 @@ async fn spawn_tcp_ws_relay(port: u16) -> Result<String, String> {
     Ok(format!("ws://127.0.0.1:{}/{}", proxy_port, token))
 }
 
+/// Reading the inventory touches the filesystem and probes processes; doing it
+/// straight from an async command stalled a Tokio worker on every console open.
+async fn running_vm(id: String) -> Result<LocalVm, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        let vms = read_local_vms()?;
+        let vm = vms
+            .into_iter()
+            .find(|vm| vm.id == id)
+            .ok_or_else(|| "VM locale introuvable".to_string())?;
+        if vm.state != "running" {
+            return Err("La VM doit etre demarree pour ouvrir la console.".to_string());
+        }
+        Ok(vm)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 #[tauri::command]
 async fn local_console_url(id: String) -> Result<String, String> {
-    let vms = read_local_vms()?;
-    let vm = vms
-        .iter()
-        .find(|vm| vm.id == id)
-        .ok_or_else(|| "VM locale introuvable".to_string())?;
-    if vm.state != "running" {
-        return Err("La VM doit etre demarree pour ouvrir la console.".to_string());
-    }
+    let vm = running_vm(id).await?;
     let vnc_port = vm.vnc_port.ok_or_else(|| "Cette VM a ete lancee avec l'ancien mode console. Redemarre-la pour utiliser la console integree.".to_string())?;
     spawn_tcp_ws_relay(vnc_port).await
 }
 
 #[tauri::command]
 async fn local_spice_console_url(id: String) -> Result<serde_json::Value, String> {
-    let vms = read_local_vms()?;
-    let vm = vms
-        .iter()
-        .find(|vm| vm.id == id)
-        .ok_or_else(|| "VM locale introuvable".to_string())?;
-    if vm.state != "running" {
-        return Err("La VM doit etre demarree pour ouvrir la console.".to_string());
-    }
-    let spice_port = vm.spice_port.ok_or_else(|| "SPICE n'est pas actif pour cette VM (redemarre-la).".to_string())?;
+    let vm = running_vm(id).await?;
+    let spice_port = vm.spice_port.ok_or_else(|| {
+        vm.startup_notes
+            .clone()
+            .unwrap_or_else(|| "SPICE n'est pas actif pour cette VM (redemarre-la).".to_string())
+    })?;
     let password = vm.spice_password.clone().unwrap_or_default();
     let url = spawn_tcp_ws_relay(spice_port).await?;
     Ok(serde_json::json!({ "url": url, "password": password }))
@@ -2649,9 +2879,363 @@ async fn local_text_console_url(id: String) -> Result<String, String> {
     Ok(format!("ws://127.0.0.1:{}/{}", proxy_port, token))
 }
 
-#[tauri::command]
-fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
+/// How the SPICE session is authenticated. `password-secret` is the modern
+/// form; `password=` still exists on older builds, and some Windows packages
+/// ship QEMU without SPICE at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpiceMode {
+    Secret,
+    Inline,
+    Off,
+}
+
+/// One attempt at launching a VM. Features are dropped one at a time when a
+/// build of QEMU (or a host) cannot provide them, instead of leaving the user
+/// with a VM that "does not start" and no explanation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LaunchPlan {
+    accelerator: String,
+    spice: SpiceMode,
+    audio: bool,
+    usb_tablet: bool,
+    gpu_model: String,
+    note: Option<&'static str>,
+}
+
+/// The degradation ladder, most capable first. A failed attempt costs almost
+/// nothing (QEMU rejects an unknown option in milliseconds), so trying the
+/// full feature set first is free.
+fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
+    let chain = platform::accelerator_chain(architecture);
+    let preferred = chain.first().cloned().unwrap_or_else(|| "tcg".to_string());
+    let base = LaunchPlan {
+        accelerator: preferred.clone(),
+        spice: SpiceMode::Secret,
+        audio: true,
+        usb_tablet: true,
+        gpu_model: gpu_model.to_string(),
+        note: None,
+    };
+    let mut plans = vec![
+        base.clone(),
+        LaunchPlan {
+            spice: SpiceMode::Inline,
+            note: Some("QEMU ancien: mot de passe SPICE transmis en ligne"),
+            ..base.clone()
+        },
+        LaunchPlan {
+            audio: false,
+            note: Some("audio SPICE indisponible sur cette installation de QEMU"),
+            ..base.clone()
+        },
+        LaunchPlan {
+            spice: SpiceMode::Off,
+            audio: false,
+            note: Some("SPICE indisponible sur cette installation de QEMU (console VNC utilisee)"),
+            ..base.clone()
+        },
+        LaunchPlan {
+            spice: SpiceMode::Off,
+            audio: false,
+            gpu_model: "std".to_string(),
+            note: Some("carte graphique virtio indisponible (VGA standard utilisee)"),
+            ..base.clone()
+        },
+        LaunchPlan {
+            spice: SpiceMode::Off,
+            audio: false,
+            usb_tablet: false,
+            gpu_model: "std".to_string(),
+            note: Some("peripheriques USB emules indisponibles (pointeur relatif)"),
+            ..base.clone()
+        },
+    ];
+    for fallback in chain.into_iter().skip(1) {
+        plans.push(LaunchPlan {
+            accelerator: fallback,
+            spice: SpiceMode::Off,
+            audio: false,
+            usb_tablet: false,
+            gpu_model: "std".to_string(),
+            note: Some(
+                "acceleration materielle indisponible: la VM tourne en emulation logicielle (TCG)",
+            ),
+        });
+    }
+    plans
+}
+
+struct LaunchPorts {
+    vnc_display: u16,
+    spice_port: u16,
+    spice_password: String,
+    qmp_port: u16,
+    qga_port: u16,
+}
+
+fn build_qemu_command(
+    qemu_path: &str,
+    vm: &LocalVm,
+    ports: &LaunchPorts,
+    plan: &LaunchPlan,
+) -> Result<Command, String> {
+    let mut command = platform::command(qemu_path);
+    command
+        .arg("-name")
+        .arg(&vm.id)
+        .arg("-m")
+        .arg(vm.memory_mib.to_string())
+        .arg("-smp")
+        .arg(vm.cpu.to_string());
+
+    platform::machine_args(&mut command, &vm.architecture, &plan.accelerator);
+    if vm.architecture == "arm64" {
+        let firmware = find_qemu_firmware(&vm.architecture).ok_or(
+            "Firmware ARM64 QEMU absent (EDK2/AAVMF). Installez QEMU depuis Configuration.",
+        )?;
+        command.arg("-bios").arg(firmware);
+        // `virt` has no built-in input: without a USB controller an ARM64 guest
+        // has neither keyboard nor mouse in the console.
+        command.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
+        if plan.usb_tablet {
+            command.args(["-device", "usb-tablet"]);
+        }
+    } else if plan.usb_tablet {
+        // An absolute pointing device is what keeps the VNC/SPICE cursor
+        // aligned with the guest cursor.
+        command.args(["-device", "usb-ehci", "-device", "usb-tablet"]);
+    }
+
+    append_disk_args(&mut command, &vm.disk_path, &vm.disk_bus);
+    append_gpu_args(&mut command, &vm.architecture, &plan.gpu_model);
+    append_network_args(
+        &mut command,
+        &vm.architecture,
+        &vm.network,
+        &vm.network_model,
+    );
+
+    // Guest agent over loopback TCP: identical on macOS, Linux and Windows.
+    command
+        .arg("-chardev")
+        .arg(format!(
+            "socket,host=127.0.0.1,port={},server=on,wait=off,id=qga0",
+            ports.qga_port
+        ))
+        .args([
+            "-device",
+            "virtio-serial-pci",
+            "-device",
+            "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0",
+        ]);
+
+    match plan.spice {
+        SpiceMode::Secret => {
+            command.arg("-object").arg(format!(
+                "secret,id=virtua-spice-secret,data={}",
+                ports.spice_password
+            ));
+            command.arg("-spice").arg(format!(
+                "port={},addr=127.0.0.1,disable-ticketing=off,password-secret=virtua-spice-secret",
+                ports.spice_port
+            ));
+        }
+        SpiceMode::Inline => {
+            command.arg("-spice").arg(format!(
+                "port={},addr=127.0.0.1,disable-ticketing=off,password={}",
+                ports.spice_port, ports.spice_password
+            ));
+        }
+        SpiceMode::Off => {}
+    }
+    if plan.audio {
+        // `hda-duplex` is a codec: without its `intel-hda` controller QEMU
+        // refuses to start with "No 'HDA bus' bus found".
+        command
+            .arg("-audiodev")
+            .arg("spice,id=audioSpice")
+            .arg("-device")
+            .arg("intel-hda")
+            .arg("-device")
+            .arg("hda-duplex,audiodev=audioSpice");
+    }
+
+    if let Some(iso_path) = &vm.iso_path {
+        if !iso_path.trim().is_empty() {
+            if iso_path.contains(',') || iso_path.contains('\n') || iso_path.contains('\r') {
+                return Err("Chemin ISO invalide".to_string());
+            }
+            // `order=dc` falls through to the disk when the ISO is not
+            // bootable, instead of the old `-boot d` which pinned the VM to a
+            // CD-ROM it could never leave.
+            command
+                .arg("-cdrom")
+                .arg(iso_path)
+                .arg("-boot")
+                .arg("order=dc,menu=on");
+        }
+    }
+
+    command
+        .arg("-display")
+        .arg("none")
+        .arg("-vnc")
+        .arg(format!(
+            "127.0.0.1:{},share=force-shared",
+            ports.vnc_display
+        ))
+        .arg("-qmp")
+        .arg(format!(
+            "tcp:127.0.0.1:{},server=on,wait=off",
+            ports.qmp_port
+        ));
+    Ok(command)
+}
+
+/// Give QEMU time to fail: reading the log after 350 ms reported "started" for
+/// commands that died a second later (a missing accelerator on Windows is the
+/// usual case), leaving a phantom running VM in the inventory.
+fn wait_for_qemu(child: &mut std::process::Child) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(2500);
+    while std::time::Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return Err(status.to_string()),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
     let diagnostics = qemu_diagnostics_blocking()?;
+    let qemu_path = match vm.architecture.as_str() {
+        "arm64" => diagnostics.qemu_system_arm64.path,
+        "amd64" => diagnostics.qemu_system_amd64.path,
+        _ => None,
+    }
+    .ok_or_else(|| {
+        format!(
+            "QEMU system pour {} est introuvable. Installez-le depuis Configuration → Moteurs locaux.",
+            vm.architecture
+        )
+    })?;
+
+    if !Path::new(&vm.disk_path).is_file() {
+        return Err(format!("Disque introuvable: {}", vm.disk_path));
+    }
+    // QEMU splits drive/cdrom options on commas.
+    if vm.disk_path.contains(',') {
+        return Err("Chemin de disque invalide (',' non autorise)".to_string());
+    }
+
+    let reserved = |pick: fn(&LocalVm) -> Option<u16>| -> Vec<u16> {
+        others.iter().filter_map(pick).collect()
+    };
+    let vnc_port = find_free_port_excluding(5901, 5999, &reserved(|vm| vm.vnc_port))
+        .ok_or_else(|| "Aucun port console local disponible".to_string())?;
+    let qmp_port = find_free_port_excluding(6001, 6099, &reserved(|vm| vm.qmp_port))
+        .ok_or_else(|| "Aucun port controle QEMU local disponible".to_string())?;
+    let spice_port = find_free_port_excluding(5701, 5799, &reserved(|vm| vm.spice_port))
+        .ok_or_else(|| "Aucun port SPICE local disponible".to_string())?;
+    let qga_port = find_free_port_excluding(6201, 6299, &reserved(|vm| vm.qga_port))
+        .ok_or_else(|| "Aucun port agent invite disponible".to_string())?;
+    let ports = LaunchPorts {
+        vnc_display: vnc_port - 5900,
+        spice_port,
+        spice_password: random_token(),
+        qmp_port,
+        qga_port,
+    };
+
+    let log_dir = local_state_dir()?.join("Logs");
+    fs::create_dir_all(&log_dir).map_err(|err| err.to_string())?;
+    let log_path = log_dir.join(format!("{}-qemu.log", safe_file_name(&vm.name)?));
+    // Keep only the last run: the log is what the fallback ladder reports on.
+    let _ = fs::write(&log_path, b"");
+
+    let mut notes: Vec<String> = vec![];
+    if vm.tpm2 {
+        notes.push("TPM 2.0 n'est pas emule en mode local (option ignoree)".to_string());
+    }
+    let mut failures: Vec<String> = vec![];
+
+    for plan in launch_plans(&vm.architecture, &vm.gpu_model) {
+        let mut command = build_qemu_command(&qemu_path, vm, &ports, &plan)?;
+        let log_file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|err| format!("Log QEMU impossible: {}", err))?;
+        let log_error = log_file
+            .try_clone()
+            .map_err(|err| format!("Log QEMU impossible: {}", err))?;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_error));
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                failures.push(format!("Lancement QEMU impossible: {}", err));
+                continue;
+            }
+        };
+        match wait_for_qemu(&mut child) {
+            Ok(()) => {
+                if let Some(note) = plan.note {
+                    notes.push(note.to_string());
+                }
+                vm.pid = Some(child.id());
+                vm.vnc_port = Some(vnc_port);
+                let spice_enabled = plan.spice != SpiceMode::Off;
+                vm.spice_port = spice_enabled.then_some(spice_port);
+                vm.spice_password = spice_enabled.then(|| ports.spice_password.clone());
+                vm.qmp_port = Some(qmp_port);
+                vm.qga_port = Some(qga_port);
+                vm.guest_ip = None;
+                vm.guest_agent_running = false;
+                vm.qga_last_probe_at = None;
+                vm.cpu_usage = Some(0.0);
+                vm.memory_usage = Some(0.0);
+                vm.uptime_seconds = Some(0);
+                vm.state = "running".to_string();
+                vm.startup_notes = (!notes.is_empty()).then(|| notes.join(" · "));
+                vm.updated_at = now_string();
+                return Ok(());
+            }
+            Err(status) => {
+                let details = tail_file(&log_path, 1200)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(status);
+                failures.push(details);
+                let _ = fs::write(&log_path, b"");
+            }
+        }
+    }
+
+    Err(format!(
+        "QEMU a quitte au demarrage, y compris apres repli sans SPICE/audio et sans accélération. Dernier journal: {}",
+        failures.last().cloned().unwrap_or_default()
+    ))
+}
+
+fn stop_local_vm_fields(vm: &mut LocalVm) {
+    vm.pid = None;
+    vm.vnc_port = None;
+    vm.spice_port = None;
+    vm.spice_password = None;
+    vm.qmp_port = None;
+    clear_vm_guest_agent_state(vm);
+    vm.cpu_usage = None;
+    vm.memory_usage = None;
+    vm.uptime_seconds = None;
+    vm.state = "stopped".to_string();
+    vm.updated_at = now_string();
+}
+
+fn run_vm_action(id: &str, action: &str) -> Result<LocalVm, String> {
     let mut vms = read_local_vms()?;
     let index = vms
         .iter()
@@ -2659,241 +3243,69 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
         .ok_or_else(|| "VM locale introuvable".to_string())?;
     let mut vm = vms[index].clone();
 
-    match action.as_str() {
+    match action {
         "start" => {
-            if let Some(pid) = vm.pid {
-                if process_is_alive(pid) {
-                    return Ok(vm);
-                }
+            if vm_process_alive(&vm) {
+                return Ok(vm);
             }
-            let reserved_vnc_ports: Vec<u16> = vms
+            let others: Vec<LocalVm> = vms
                 .iter()
                 .filter(|other| other.id != vm.id)
-                .filter_map(|other| other.vnc_port)
+                .cloned()
                 .collect();
-            let reserved_qmp_ports: Vec<u16> = vms
-                .iter()
-                .filter(|other| other.id != vm.id)
-                .filter_map(|other| other.qmp_port)
-                .collect();
-            let reserved_spice_ports: Vec<u16> = vms
-                .iter()
-                .filter(|other| other.id != vm.id)
-                .filter_map(|other| other.spice_port)
-                .collect();
-            let vnc_port = find_free_port_excluding(5901, 5999, &reserved_vnc_ports)
-                .ok_or_else(|| "Aucun port console local disponible".to_string())?;
-            let vnc_display = vnc_port - 5900;
-            let qmp_port = find_free_port_excluding(6001, 6099, &reserved_qmp_ports)
-                .ok_or_else(|| "Aucun port controle QEMU local disponible".to_string())?;
-            let spice_port = find_free_port_excluding(5701, 5799, &reserved_spice_ports)
-                .ok_or_else(|| "Aucun port SPICE local disponible".to_string())?;
-            let spice_password = random_token();
-
-            let qemu_path = if vm.architecture == "arm64" {
-                diagnostics.qemu_system_arm64.path
-            } else if vm.architecture == "amd64" {
-                diagnostics.qemu_system_amd64.path
-            } else {
-                None
-            }
-            .ok_or_else(|| format!("QEMU system pour {} est introuvable", vm.architecture))?;
-
-            let log_dir = local_state_dir()?.join("Logs");
-            fs::create_dir_all(&log_dir).map_err(|err| err.to_string())?;
-            let log_path = log_dir.join(format!("{}-qemu.log", safe_file_name(&vm.name)?));
-            let qga_socket_path = secure_socket_path(&format!("qga-{}-{}", qmp_port, vnc_port))?;
-            let _ = fs::remove_file(&qga_socket_path);
-            let log_file = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .map_err(|err| format!("Log QEMU impossible: {}", err))?;
-            let log_error = log_file
-                .try_clone()
-                .map_err(|err| format!("Log QEMU impossible: {}", err))?;
-
-            // QEMU separe les options par des virgules: un chemin contenant ','
-            // pourrait injecter des options de drive/cdrom arbitraires.
-            if vm.disk_path.contains(',') {
-                return Err("Chemin de disque invalide (',' non autorise)".to_string());
-            }
-
-            let mut command = platform::command(&qemu_path);
-            command
-                .arg("-name")
-                .arg(&vm.name)
-                .arg("-m")
-                .arg(vm.memory_mib.to_string())
-                .arg("-smp")
-                .arg(vm.cpu.to_string())
-                .arg("-drive")
-                .arg(format!("file={},if=virtio,format=qcow2", vm.disk_path));
-
-            #[cfg(unix)]
-            command
-                .arg("-chardev")
-                .arg(format!(
-                    "socket,path={},server=on,wait=off,id=qga0",
-                    qga_socket_path.to_string_lossy()
-                ))
-                .args([
-                    "-device",
-                    "virtio-serial-pci",
-                    "-device",
-                    "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0",
-                ]);
-            platform::machine_args(&mut command, &vm.architecture);
-            if vm.architecture == "arm64" {
-                let firmware = find_qemu_firmware(&vm.architecture)
-                    .ok_or("Firmware ARM64 QEMU absent (EDK2/AAVMF)")?;
-                command.arg("-bios").arg(firmware);
-                command.args([
-                    "-device",
-                    "qemu-xhci",
-                    "-device",
-                    "usb-kbd",
-                    "-device",
-                    "usb-tablet",
-                ]);
-            }
-            append_gpu_args(&mut command, &vm.architecture, &vm.gpu_model);
-            append_network_args(
-                &mut command,
-                &vm.architecture,
-                &vm.network,
-                &vm.network_model,
-            );
-
-            command.arg("-spice").arg(format!(
-                "port={},addr=127.0.0.1,disable-ticketing=off,password={}",
-                spice_port, spice_password
-            ));
-            // Audio streams through the SPICE channel to whatever client is
-            // attached (local relay or, once implemented, a remote one) —
-            // same mechanism and same client-side decoder on every OS,
-            // replacing the previous macOS-only CoreAudio device.
-            command
-                .arg("-audiodev")
-                .arg("spice,id=audioSpice")
-                .arg("-device")
-                .arg("hda-duplex,audiodev=audioSpice");
-
-            if let Some(iso_path) = &vm.iso_path {
-                if !iso_path.trim().is_empty() {
-                    if iso_path.contains(',') || iso_path.contains('\n') || iso_path.contains('\r')
-                    {
-                        return Err("Chemin ISO invalide".to_string());
-                    }
-                    command.arg("-cdrom").arg(iso_path).arg("-boot").arg("d");
-                }
-            }
-
-            command
-                .arg("-display")
-                .arg("none")
-                .arg("-vnc")
-                .arg(format!("127.0.0.1:{}", vnc_display))
-                .arg("-qmp")
-                .arg(format!("tcp:127.0.0.1:{},server,nowait", qmp_port))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::from(log_file))
-                .stderr(std::process::Stdio::from(log_error));
-
-            let mut child = command
-                .spawn()
-                .map_err(|err| format!("Lancement QEMU impossible: {}", err))?;
-            std::thread::sleep(std::time::Duration::from_millis(350));
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|err| format!("Verification QEMU impossible: {}", err))?
-            {
-                let details = tail_file(&log_path, 1600)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| status.to_string());
-                return Err(format!("QEMU a quitte au demarrage: {}", details));
-            }
-            vm.pid = Some(child.id());
-            vm.vnc_port = Some(vnc_port);
-            vm.spice_port = Some(spice_port);
-            vm.spice_password = Some(spice_password);
-            vm.qmp_port = Some(qmp_port);
-            vm.qga_socket_path = Some(qga_socket_path.to_string_lossy().to_string());
-            vm.guest_ip = None;
-            vm.guest_agent_running = false;
-            vm.qga_last_probe_at = None;
-            vm.cpu_usage = Some(0.0);
-            vm.memory_usage = Some(0.0);
-            vm.uptime_seconds = Some(0);
-            vm.state = "running".to_string();
-            vm.updated_at = now_string();
+            // Persist the stopped state before a long start attempt so a crash
+            // mid-launch cannot leave a bogus PID behind.
+            start_local_vm(&mut vm, &others)?;
         }
         "shutdown" => {
-            if let Some(pid) = vm.pid {
-                if !process_is_alive(pid) {
-                    vm.pid = None;
-                    vm.vnc_port = None;
-                    vm.spice_port = None;
-                    vm.qmp_port = None;
-                    clear_vm_guest_agent_state(&mut vm);
-                    vm.cpu_usage = None;
-                    vm.memory_usage = None;
-                    vm.uptime_seconds = None;
-                    vm.state = "stopped".to_string();
-                    vm.updated_at = now_string();
-                } else if let Some(qmp_port) = vm.qmp_port {
-                    qmp_execute(qmp_port, "system_powerdown")?;
-                    vm.state = "stopping".to_string();
-                    vm.updated_at = now_string();
-                } else {
-                    return Err("Cette VM a ete lancee sans controle QMP. Redemarre-la pour utiliser l'arret propre.".to_string());
-                }
-            } else {
-                vm.state = "stopped".to_string();
+            if !vm_process_alive(&vm) {
+                stop_local_vm_fields(&mut vm);
+            } else if let Some(qmp_port) = vm.qmp_port {
+                qmp_execute(qmp_port, "system_powerdown")?;
+                vm.state = "stopping".to_string();
                 vm.updated_at = now_string();
+            } else {
+                return Err("Cette VM a ete lancee sans controle QMP. Redemarre-la pour utiliser l'arret propre.".to_string());
             }
         }
         "stop" => {
             if let Some(pid) = vm.pid {
                 if let Some(qmp_port) = vm.qmp_port {
                     let _ = qmp_execute(qmp_port, "quit");
-                } else {
+                }
+                // QMP `quit` is best-effort: make sure the process is really gone.
+                for _ in 0..20 {
+                    if !vm_process_alive(&vm) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if vm_process_alive(&vm) {
                     platform::terminate(pid)?;
                 }
             }
-            vm.pid = None;
-            vm.vnc_port = None;
-            vm.spice_port = None;
-            vm.qmp_port = None;
-            clear_vm_guest_agent_state(&mut vm);
-            vm.cpu_usage = None;
-            vm.memory_usage = None;
-            vm.uptime_seconds = None;
-            vm.state = "stopped".to_string();
-            vm.updated_at = now_string();
+            stop_local_vm_fields(&mut vm);
         }
         "restart" => {
             if let Some(pid) = vm.pid {
                 if let Some(qmp_port) = vm.qmp_port {
                     let _ = qmp_execute(qmp_port, "quit");
-                } else {
+                }
+                for _ in 0..30 {
+                    if !vm_process_alive(&vm) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if vm_process_alive(&vm) {
                     platform::terminate(pid)?;
                 }
             }
-            vm.pid = None;
-            vm.vnc_port = None;
-            vm.spice_port = None;
-            vm.qmp_port = None;
-            clear_vm_guest_agent_state(&mut vm);
-            vm.cpu_usage = None;
-            vm.memory_usage = None;
-            vm.uptime_seconds = None;
-            vm.state = "stopped".to_string();
-            vm.updated_at = now_string();
+            stop_local_vm_fields(&mut vm);
             vms[index] = vm;
             write_local_vms(&vms)?;
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            return local_run_action(id, "start".to_string());
+            std::thread::sleep(Duration::from_millis(700));
+            return run_vm_action(id, "start");
         }
         _ => return Err("Action locale inconnue".to_string()),
     }
@@ -2901,6 +3313,16 @@ fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
     vms[index] = vm.clone();
     write_local_vms(&vms)?;
     Ok(vm)
+}
+
+#[tauri::command]
+async fn local_run_action(id: String, action: String) -> Result<LocalVm, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = inventory_guard();
+        run_vm_action(&id, &action)
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
@@ -2955,8 +3377,57 @@ async fn local_run_container_action(
     .map_err(|err| err.to_string())?
 }
 
+/// Append one line to `<data dir>/Logs/desktop.log`. Windows gives no console
+/// and no crash report for a packaged Tauri app: without this, "ça plante" was
+/// unreproducible.
+fn log_line(message: &str) {
+    let Ok(dir) = local_state_dir().map(|dir| dir.join("Logs")) else {
+        return;
+    };
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("desktop.log");
+    // Keep the log bounded so it can never fill the user's disk.
+    if fs::metadata(&path)
+        .map(|m| m.len() > 2 * 1024 * 1024)
+        .unwrap_or(false)
+    {
+        let _ = fs::rename(&path, dir.join("desktop.log.1"));
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{}] {}", now_string(), message);
+    }
+}
+
+fn install_crash_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_string());
+        log_line(&format!("PANIC {location} — {payload}"));
+        previous(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_crash_log();
+    log_line(&format!(
+        "demarrage {} {} sur {}/{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        env::consts::OS,
+        env::consts::ARCH
+    ));
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
@@ -3001,5 +3472,218 @@ pub fn run() {
             companion::local_lxc_logs,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running AuxiNux Virtua Desktop");
+        .unwrap_or_else(|error| {
+            log_line(&format!("arret fatal: {error}"));
+            // On Windows this is almost always a missing WebView2 runtime.
+            panic!("AuxiNux Virtua Desktop n'a pas pu demarrer: {error}");
+        });
+}
+
+#[cfg(test)]
+mod local_mode_tests {
+    use super::*;
+
+    #[test]
+    fn every_launch_ladder_ends_without_optional_features() {
+        let plans = launch_plans("amd64", "virtio");
+        let first = plans.first().expect("at least one plan");
+        assert_eq!(first.spice, SpiceMode::Secret);
+        assert!(first.audio && first.usb_tablet);
+        assert_eq!(first.gpu_model, "virtio");
+
+        let last = plans.last().expect("at least one plan");
+        assert_eq!(last.spice, SpiceMode::Off);
+        assert!(!last.audio);
+        assert_eq!(last.gpu_model, "std");
+        // Only the first attempt is silent; every degradation is explained.
+        assert!(plans.iter().skip(1).all(|plan| plan.note.is_some()));
+    }
+
+    #[test]
+    fn audio_always_carries_its_hda_controller() {
+        let vm = sample_vm("amd64", "virtio");
+        let ports = sample_ports();
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        let hda = args
+            .iter()
+            .position(|a| a == "intel-hda")
+            .expect("controller");
+        let codec = args
+            .iter()
+            .position(|a| a.starts_with("hda-duplex"))
+            .expect("codec");
+        assert!(hda < codec, "the codec needs its bus declared first");
+    }
+
+    #[test]
+    fn a_spice_less_plan_emits_no_spice_option() {
+        let vm = sample_vm("amd64", "virtio");
+        let ports = sample_ports();
+        let plan = LaunchPlan {
+            accelerator: "tcg".into(),
+            spice: SpiceMode::Off,
+            audio: false,
+            usb_tablet: false,
+            gpu_model: "std".into(),
+            note: None,
+        };
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(!args.iter().any(|a| a == "-spice"));
+        assert!(!args.iter().any(|a| a == "-audiodev"));
+        // The guest agent and the VNC console stay available in every plan.
+        assert!(args.iter().any(|a| a.contains("org.qemu.guest_agent.0")));
+        assert!(args.iter().any(|a| a == "-vnc"));
+    }
+
+    #[test]
+    fn the_spice_password_never_leaks_on_the_command_line_by_default() {
+        let vm = sample_vm("amd64", "virtio");
+        let ports = sample_ports();
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(args
+            .iter()
+            .any(|a| a.contains("password-secret=virtua-spice-secret")));
+    }
+
+    #[test]
+    fn an_iso_boot_falls_back_to_the_disk() {
+        let mut vm = sample_vm("amd64", "virtio");
+        vm.iso_path = Some("/tmp/installer.iso".into());
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap());
+        assert!(args.iter().any(|a| a == "order=dc,menu=on"));
+    }
+
+    #[test]
+    fn arm64_disks_are_always_virtio() {
+        assert_eq!(normalize_disk_bus("arm64", Some("sata".into())), "virtio");
+        assert_eq!(normalize_disk_bus("amd64", Some("sata".into())), "sata");
+        assert_eq!(normalize_disk_bus("amd64", None), "virtio");
+    }
+
+    #[test]
+    fn x86_installers_get_a_bus_their_drivers_know() {
+        assert_eq!(
+            default_disk_bus_for_new_vm("amd64", Some("/iso/debian.iso")),
+            "sata"
+        );
+        assert_eq!(default_disk_bus_for_new_vm("amd64", None), "virtio");
+        assert_eq!(
+            default_disk_bus_for_new_vm("arm64", Some("/iso/debian.iso")),
+            "virtio"
+        );
+    }
+
+    #[test]
+    fn a_sata_disk_declares_its_controller() {
+        let mut cmd = Command::new("qemu");
+        append_disk_args(&mut cmd, "/disks/vm.qcow2", "sata");
+        let args = command_args(&cmd);
+        assert!(args.iter().any(|a| a.starts_with("ich9-ahci")));
+        assert!(args.iter().any(|a| a.contains("bus=virtua-ahci.0")));
+    }
+
+    #[test]
+    fn templates_round_trip_without_the_system_tar() {
+        let root = env::temp_dir().join(format!("virtua-tar-{}", random_token()));
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("config.virtua"), "[CONFIG]\nDISK=disk.qcow2\n").unwrap();
+        fs::write(work.join("disk.qcow2"), b"not-really-a-disk").unwrap();
+        let archive = root.join("template.tar.gz");
+        create_tar_gz(&archive, &work, &["config.virtua", "disk.qcow2"]).unwrap();
+
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        extract_tar_gz(&archive, &out).unwrap();
+        assert_eq!(
+            fs::read(out.join("disk.qcow2")).unwrap(),
+            b"not-really-a-disk"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_traversing_archive_entry_is_refused() {
+        assert!(!tar_entry_is_safe(Path::new("../escaped.txt")));
+        assert!(!tar_entry_is_safe(Path::new("nested/../../escaped.txt")));
+        assert!(!tar_entry_is_safe(Path::new("/etc/passwd")));
+        assert!(tar_entry_is_safe(Path::new("config.virtua")));
+        assert!(tar_entry_is_safe(Path::new("./disks/disk.qcow2")));
+    }
+
+    #[test]
+    fn an_interrupted_write_never_truncates_the_inventory() {
+        let dir = env::temp_dir().join(format!("virtua-json-{}", random_token()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        write_json_atomic(&path, "[1]").unwrap();
+        write_json_atomic(&path, "[1,2]").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "[1,2]");
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remote_file_names_stay_inside_the_download_directory() {
+        // A hostile listing entry is reduced to its final component.
+        assert_eq!(safe_download_name("../../etc/passwd").unwrap(), "passwd");
+        assert!(safe_download_name("..").is_err());
+        assert!(safe_download_name("   ").is_err());
+        assert_eq!(safe_download_name(" debian.iso ").unwrap(), "debian.iso");
+    }
+
+    fn sample_vm(architecture: &str, gpu_model: &str) -> LocalVm {
+        LocalVm {
+            id: "local-vm-1".into(),
+            name: "Test".into(),
+            architecture: architecture.into(),
+            cpu: 2,
+            memory_mib: 2048,
+            disk_gib: 20,
+            disk_path: "/disks/vm.qcow2".into(),
+            iso_path: None,
+            network: "user".into(),
+            network_model: "virtio".into(),
+            gpu_model: gpu_model.into(),
+            disk_bus: "virtio".into(),
+            tpm2: false,
+            secure_boot: false,
+            state: "stopped".into(),
+            pid: None,
+            vnc_port: None,
+            spice_port: None,
+            spice_password: None,
+            qmp_port: None,
+            qga_port: None,
+            guest_ip: None,
+            guest_agent_running: false,
+            qga_last_probe_at: None,
+            cpu_usage: None,
+            memory_usage: None,
+            uptime_seconds: None,
+            startup_notes: None,
+            created_at: "0".into(),
+            updated_at: "0".into(),
+        }
+    }
+
+    fn sample_ports() -> LaunchPorts {
+        LaunchPorts {
+            vnc_display: 1,
+            spice_port: 5701,
+            spice_password: "secret".into(),
+            qmp_port: 6001,
+            qga_port: 6201,
+        }
+    }
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
+    }
 }

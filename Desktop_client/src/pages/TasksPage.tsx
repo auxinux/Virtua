@@ -22,11 +22,16 @@ export function TasksPage({ tasks, onClear, onChanged }: { tasks: VirtuaTask[]; 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">Taches</h1>
-          <p className="mt-1 text-sm text-virtua-muted">Historique local des operations lancees par ce client.</p>
+          <p className="mt-1 text-sm text-virtua-muted">Operations en cours cote Virtua et historique des actions lancees depuis ce poste.</p>
         </div>
-        <button disabled={tasks.length === 0} onClick={clearTasks} className="virtua-button">
+        <button
+          disabled={!tasks.some((task) => task.source !== "server")}
+          onClick={clearTasks}
+          className="virtua-button"
+          title="Efface uniquement l'historique de ce poste"
+        >
           <Trash2 className="mr-2 h-4 w-4" />
-          Vider
+          Vider l'historique local
         </button>
       </div>
 
@@ -38,7 +43,7 @@ export function TasksPage({ tasks, onClear, onChanged }: { tasks: VirtuaTask[]; 
                 <Clock className="h-5 w-5" />
               </div>
               <p className="font-medium">Aucune operation</p>
-              <p className="mt-1 text-sm text-virtua-muted">Les actions console, power, snapshot, creation, edition et suppression apparaitront ici.</p>
+              <p className="mt-1 text-sm text-virtua-muted">Les taches serveur et les actions console, power, snapshot, creation, edition et suppression apparaitront ici.</p>
             </div>
           </div>
         ) : tasks.map((task) => (
@@ -48,6 +53,9 @@ export function TasksPage({ tasks, onClear, onChanged }: { tasks: VirtuaTask[]; 
                 <div className="flex items-center gap-2">
                   <CheckCircle2 className={`h-4 w-4 ${task.status === "completed" ? "text-virtua-green" : "text-virtua-muted"}`} />
                   <p className="font-medium">{task.label}</p>
+                  <span className="rounded bg-black/25 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-virtua-muted">
+                    {task.source === "server" ? "serveur" : "ce poste"}
+                  </span>
                 </div>
                 <p className="mt-1 text-xs text-virtua-muted">{formatDate(task.createdAt)} / {task.target}</p>
               </div>

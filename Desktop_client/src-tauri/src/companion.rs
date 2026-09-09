@@ -290,7 +290,8 @@ fn prepare_inner(report: &dyn Fn(&str)) -> Result<(), String> {
             "qemu-system-x86_64"
         };
         let mut cmd = platform::command(binary);
-        platform::machine_args(&mut cmd, &arch);
+        let accelerator = platform::accelerator(&arch);
+        platform::machine_args(&mut cmd, &arch, &accelerator);
         if arch == "arm64" {
             let firmware = platform::firmware(&arch)
                 .ok_or("Firmware ARM64 QEMU absent. Installez le paquet EDK2/AAVMF.")?;
@@ -412,7 +413,7 @@ pub async fn local_stop_lxc_vm() -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn local_lxc_logs() -> Result<String, String> {
     let dir = directory()?;
     Ok(format!(

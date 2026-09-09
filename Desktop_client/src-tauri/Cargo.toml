@@ -1,6 +1,6 @@
 [package]
 name = "auxinux-virtua-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Client Desktop pour AuxiNux Virtua"
 authors = ["AuxiNux"]
 edition = "2021"
@@ -28,6 +28,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 fatfs = "0.3"
 sysinfo = "0.33"
+tar = "0.4"
+flate2 = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

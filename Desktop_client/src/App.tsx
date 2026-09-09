@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Route, Routes } from "react-router-dom";
 import { EngineSetup } from "@/components/EngineSetup";
 import { Layout } from "@/components/Layout";
-import { localVirtua, modeStore } from "@/api/localVirtua";
+import { localVirtua, modeStore, type EngineInstallPrompt } from "@/api/localVirtua";
 import { getRuntimePlatform } from "@/api/runtime";
 import { virtuaClient } from "@/api/virtuaClient";
 import { AuthPage } from "@/pages/AuthPage";
@@ -16,6 +16,18 @@ import { StoragePage } from "@/pages/StoragePage";
 import { TasksPage } from "@/pages/TasksPage";
 import { UsageModePage } from "@/pages/UsageModePage";
 import type { UsageMode, VirtuaConnection, VirtuaNode, VirtuaResource, VirtuaTask, VirtuaUser } from "@/types";
+
+const engineLabels = { qemu: "QEMU", lxc: "LXC (Incus)", docker: "Docker" } as const;
+
+/**
+ * Local mode installs what a requested feature needs — but an installation can
+ * raise an administrator prompt, so it is always the user's call.
+ */
+const confirmEngineInstall: EngineInstallPrompt = (engine, detail) =>
+  window.confirm(
+    `${engineLabels[engine]} est requis pour cette action.\n\n${detail}\n\n` +
+      "Installer et preparer maintenant ? Votre systeme peut demander une autorisation administrateur.",
+  );
 
 function nodesFromResources(resources: VirtuaResource[]): VirtuaNode[] {
   const names = Array.from(new Set(resources.map((resource) => resource.node)));
@@ -221,12 +233,22 @@ export default function App() {
 
   useEffect(() => {
     if (!isAuthenticated) return;
-    const interval = window.setInterval(() => {
-      if (document.hidden) return;
-      void refreshInventory({ silent: true });
-    }, usageMode === "local" ? 7000 : 3000);
-    return () => window.clearInterval(interval);
-  }, [isAuthenticated, refreshInventory]);
+    let disposed = false;
+    let timer = 0;
+    const period = usageMode === "local" ? 7000 : 3000;
+    // A chained timeout (rather than setInterval) cannot pile refreshes up when
+    // one poll takes longer than the period — a slow host used to queue them
+    // until the UI stopped responding.
+    const tick = async () => {
+      if (!document.hidden) await refreshInventory({ silent: true });
+      if (!disposed) timer = window.setTimeout(() => void tick(), period);
+    };
+    timer = window.setTimeout(() => void tick(), period);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [isAuthenticated, refreshInventory, usageMode]);
 
   const logout = async () => {
     if (usageMode === "cloud") {
@@ -275,7 +297,7 @@ export default function App() {
 
   if (usageMode === "local" && needsLocalSetup) {
     return <div className="min-h-screen bg-virtua-bg p-8 text-virtua-text"><div className="mx-auto max-w-3xl space-y-4">
-      <h1 className="text-2xl font-semibold">Virtua Desktop 0.2.0</h1>
+      <h1 className="text-2xl font-semibold">Virtua Desktop {__APP_VERSION__}</h1>
       <EngineSetup requiredOnly onReady={() => void loadLocalData()} />
       <button className="virtua-button" onClick={backToModeSelection}>Retour au choix Local / Cloud</button>
     </div></div>;
@@ -293,11 +315,11 @@ export default function App() {
           : <ConsolePage resources={resources} user={user} onChanged={() => refreshInventory()} />} />
         <Route path="/console/:resourceId" element={<ConsolePage resources={resources} user={user} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
         <Route path="/dashboard" element={<Dashboard connection={connection} nodes={nodes} resources={resources} tasks={tasks} usageMode={usageMode} />} />
-        <Route path="/inventory" element={<ResourcePage kind="all" resources={resources} user={user} usageMode={usageMode} hostArch={hostArch} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
-        <Route path="/vms" element={<ResourcePage kind="vm" resources={resources} user={user} usageMode={usageMode} hostArch={hostArch} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
-        <Route path="/lxc" element={<ResourcePage kind="lxc" resources={resources} user={user} usageMode={usageMode} hostArch={hostArch} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
-        <Route path="/docker" element={<ResourcePage kind="docker" resources={resources} user={user} usageMode={usageMode} hostArch={hostArch} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
-        <Route path="/resources/:resourceId" element={<ResourceDetailPage resources={resources} user={user} updateResource={usageMode === "local" ? (resourceId, payload) => localVirtua.updateResource(resourceId, payload) : undefined} deleteResource={usageMode === "local" ? (resourceId, deleteDisks) => localVirtua.deleteResource(resourceId, Boolean(deleteDisks)) : undefined} listSnapshots={usageMode === "local" ? (resourceId) => localVirtua.listSnapshots(resourceId) : undefined} createSnapshot={usageMode === "local" ? (resourceId, name) => localVirtua.createSnapshot(resourceId, name) : undefined} deleteSnapshot={usageMode === "local" ? (resourceId, snapshotId) => localVirtua.deleteSnapshot(resourceId, snapshotId) : undefined} rollbackSnapshot={usageMode === "local" ? (resourceId, snapshotId) => localVirtua.rollbackSnapshot(resourceId, snapshotId) : undefined} onChanged={() => refreshInventory()} />} />
+        <Route path="/inventory" element={<ResourcePage kind="all" resources={resources} user={user} usageMode={usageMode} hostArch={usageMode === "local" ? hostArch : null} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload, confirmEngineInstall) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
+        <Route path="/vms" element={<ResourcePage kind="vm" resources={resources} user={user} usageMode={usageMode} hostArch={usageMode === "local" ? hostArch : null} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload, confirmEngineInstall) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
+        <Route path="/lxc" element={<ResourcePage kind="lxc" resources={resources} user={user} usageMode={usageMode} hostArch={usageMode === "local" ? hostArch : null} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload, confirmEngineInstall) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
+        <Route path="/docker" element={<ResourcePage kind="docker" resources={resources} user={user} usageMode={usageMode} hostArch={usageMode === "local" ? hostArch : null} listCreateOptions={usageMode === "local" ? (type) => localVirtua.listCreateOptions(type) : undefined} createResource={usageMode === "local" ? (payload) => localVirtua.createResource(payload, confirmEngineInstall) : undefined} runResourceAction={usageMode === "local" ? (resourceId, action) => localVirtua.runAction(resourceId, action) : undefined} onChanged={() => refreshInventory()} />} />
+        <Route path="/resources/:resourceId" element={<ResourceDetailPage resources={resources} user={user} updateResource={usageMode === "local" ? (resourceId, payload) => localVirtua.updateResource(resourceId, payload) : undefined} deleteResource={usageMode === "local" ? (resourceId, deleteDisks) => localVirtua.deleteResource(resourceId, Boolean(deleteDisks)) : undefined} listSnapshots={usageMode === "local" ? (resourceId) => localVirtua.listSnapshots(resourceId) : undefined} createSnapshot={usageMode === "local" ? (resourceId, name) => localVirtua.createSnapshot(resourceId, name) : (resourceId, name) => virtuaClient.snapshot(resourceId, name)} deleteSnapshot={usageMode === "local" ? (resourceId, snapshotId) => localVirtua.deleteSnapshot(resourceId, snapshotId) : undefined} rollbackSnapshot={usageMode === "local" ? (resourceId, snapshotId) => localVirtua.rollbackSnapshot(resourceId, snapshotId) : undefined} onChanged={() => refreshInventory()} />} />
         <Route path="/storage" element={usageMode === "local" ? <StoragePage resources={resources} hostArch={hostArch} onChanged={() => refreshInventory()} /> : <ResourcePage kind="all" resources={resources} user={user} onChanged={() => refreshInventory()} />} />
         <Route path="/tasks" element={<TasksPage tasks={tasks} onClear={() => usageMode === "local" ? localVirtua.clearTasks() : virtuaClient.clearTasks()} onChanged={() => usageMode === "local" ? setTasks(localVirtua.listTasks()) : void virtuaClient.listTasks().then(setTasks)} />} />
         <Route path="/settings" element={usageMode === "local" ? <LocalSettingsPage /> : <SettingsPage connection={connection} />} />

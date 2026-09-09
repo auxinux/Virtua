@@ -16,6 +16,8 @@ export interface VirtuaUser {
   username: string;
   displayName: string;
   role: VirtuaRole;
+  /** Server-declared creation rights, per resource kind. */
+  canCreate?: Partial<Record<ResourceKind, boolean>>;
 }
 
 export interface VirtuaConnection {
@@ -67,8 +69,11 @@ export interface VirtuaResource {
   network?: string;
   networkModel?: string;
   gpuModel?: string;
+  diskBus?: string;
   tpm2?: boolean;
   secureBoot?: boolean;
+  /** Features the last local start had to give up on (SPICE, audio, KVM…). */
+  startupNotes?: string;
   owner?: string;
   assignedUsers?: string[];
   guestAgent?: {
@@ -95,6 +100,8 @@ export interface VirtuaTask {
   status: "queued" | "running" | "completed" | "failed";
   progress: number;
   createdAt: string;
+  /** "server" for operations Virtua runs itself, "device" for this client's. */
+  source?: "server" | "device";
 }
 
 export interface DesktopDeviceInfo {
@@ -115,7 +122,10 @@ export interface DesktopTokenResponse {
 export interface DesktopMeResponse {
   user: { id: number; username: string; displayName: string | null; role: VirtuaRole };
   device: DesktopDeviceInfo;
-  capabilities: { isAdmin: boolean };
+  capabilities: {
+    isAdmin: boolean;
+    canCreate?: Partial<Record<ResourceKind, boolean>>;
+  };
 }
 
 export interface DesktopResourceResponse {
@@ -298,18 +308,20 @@ export interface LocalVm {
   network: string;
   networkModel?: string | null;
   gpuModel?: string | null;
+  diskBus?: string | null;
   tpm2?: boolean | null;
   secureBoot?: boolean | null;
   state: ResourceState;
   pid?: number | null;
   vncPort?: number | null;
   qmpPort?: number | null;
-  qgaSocketPath?: string | null;
+  qgaPort?: number | null;
   guestIp?: string | null;
   guestAgentRunning?: boolean | null;
   cpuUsage?: number | null;
   memoryUsage?: number | null;
   uptimeSeconds?: number | null;
+  startupNotes?: string | null;
   createdAt: string;
   updatedAt: string;
 }

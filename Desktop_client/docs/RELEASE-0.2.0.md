@@ -38,4 +38,5 @@
   QEMU local; ne pas les considérer comme garanties par leurs anciens champs.
 - Le QEMU Guest Agent via socket Unix fonctionne sur Mac/Linux; son transport
   Windows reste à compléter. Les consoles VNC et le contrôle QMP utilisent TCP local.
+  *(Corrigé en 0.2.1 : l'agent invité passe par un chardev TCP sur les trois OS.)*
 - Les paquets ne sont ni signés ni notarisés et aucune publication n’est effectuée.

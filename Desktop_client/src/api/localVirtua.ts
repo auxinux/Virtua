@@ -22,12 +22,19 @@ import type {
 } from "@/types";
 import type { CreateResourcePayload } from "@/api/virtuaClient";
 
+/** Asks the user before a setup that may raise an administrator prompt. */
+export type EngineInstallPrompt = (
+  engine: "qemu" | "lxc" | "docker",
+  detail: string,
+) => boolean | Promise<boolean>;
+
 const modeKey = "auxinux-virtua-desktop-mode";
 const taskKey = "auxinux-virtua-local-tasks";
 
 function pushTask(task: Omit<VirtuaTask, "id" | "createdAt">) {
   const tasks = listLocalTasks();
   const nextTask: VirtuaTask = {
+    source: "device",
     ...task,
     id: `local-task-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     createdAt: new Date().toISOString(),
@@ -90,14 +97,17 @@ function mapLocalVm(vm: LocalVm): VirtuaResource {
     network: vm.network,
     networkModel: vm.networkModel ?? "virtio",
     gpuModel: vm.gpuModel ?? "virtio",
+    diskBus: vm.diskBus ?? "virtio",
     tpm2: Boolean(vm.tpm2),
     secureBoot: Boolean(vm.secureBoot),
+    startupNotes: vm.startupNotes ?? undefined,
     owner: "local",
     guestAgent: {
       installed: vm.guestAgentRunning ?? false,
       running: vm.guestAgentRunning ?? false,
       status: vm.guestAgentRunning ? "actif" : "non installe",
     },
+    // SPICE is preferred and falls back to VNC inside the graphical console.
     consoleModes: ["graphical"],
     permissions: {
       canView: true,
@@ -244,15 +254,13 @@ export const localVirtua = {
     return [...vms.map(mapLocalVm), ...containers.map(mapLocalContainer)];
   },
 
-  async createResource(payload: CreateResourcePayload) {
+  async createResource(
+    payload: CreateResourcePayload,
+    confirmInstall?: EngineInstallPrompt,
+  ) {
     const taskId = pushTask({ label: payload.type === "vm" ? "Creation VM locale" : `Creation ${payload.type.toUpperCase()} local`, target: payload.name, status: "running", progress: 20 });
     try {
-      if (payload.type !== "vm") {
-        const status = await engines.status();
-        if (status.engines.find(e => e.id === payload.type)?.state !== "ready") {
-          throw new Error(`Activez ${payload.type === "lxc" ? "LXC" : "Docker"} dans Configuration → Moteurs locaux avant de créer un conteneur.`);
-        }
-      }
+      await this.ensureEngineReady(payload.type, confirmInstall);
       if (payload.type === "lxc" || payload.type === "docker") {
         const resource = await invoke<LocalContainerResource>("local_create_container", {
           payload: {
@@ -310,6 +318,7 @@ export const localVirtua = {
           network: payload.network || "user",
           networkModel: (payload as CreateResourcePayload & { networkModel?: string }).networkModel || "virtio",
           gpuModel: (payload as CreateResourcePayload & { gpuModel?: string }).gpuModel || "virtio",
+          diskBus: (payload as CreateResourcePayload & { diskBus?: string }).diskBus,
           tpm2: payload.tpm2 ?? false,
           secureBoot: payload.secureBoot ?? false,
         },
@@ -338,7 +347,7 @@ export const localVirtua = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
     const taskId = pushTask({ label: "Modification VM locale", target: resourceId, status: "running", progress: 25 });
     try {
       const vm = await invoke<LocalVm>("local_update_vm", {
@@ -351,12 +360,52 @@ export const localVirtua = {
           network: payload.network,
           networkModel: payload.networkModel,
           gpuModel: payload.gpuModel,
+          diskBus: payload.diskBus,
           tpm2: payload.tpm2,
           secureBoot: payload.secureBoot,
         },
       });
       updateTask(taskId, { status: "completed", progress: 100 });
       return { ok: true, resource: mapLocalVm(vm) };
+    } catch (error) {
+      updateTask(taskId, { status: "failed", progress: 100 });
+      throw new Error(error instanceof Error ? error.message : String(error));
+    }
+  },
+
+  /**
+   * Make sure the engine a requested feature needs is installed and running.
+   * `confirmInstall` lets the UI ask before a setup that may raise an
+   * administrator prompt; without a handler nothing is installed silently.
+   */
+  async ensureEngineReady(kind: "vm" | "lxc" | "docker", confirmInstall: EngineInstallPrompt = () => false) {
+    const engineId = kind === "vm" ? "qemu" : kind;
+    const labels = { qemu: "QEMU", lxc: "LXC", docker: "Docker" } as const;
+
+    // QEMU has its own cheap diagnostic; the full engine overview also probes
+    // Docker and the LXC companion VM, which is slow and irrelevant here.
+    if (engineId === "qemu" && (await this.diagnostics()).ready) return;
+
+    let engine = engineId === "qemu"
+      ? undefined
+      : (await engines.status()).engines.find((item) => item.id === engineId);
+    if (engine?.state === "ready") return;
+
+    const detail = engine?.detail ?? `${labels[engineId]} n'est pas encore disponible.`;
+    if (!(await confirmInstall(engineId, detail))) {
+      throw new Error(
+        `${labels[engineId]} n'est pas prêt : ${detail} Ouvrez Configuration → Moteurs locaux pour l'installer.`,
+      );
+    }
+
+    const taskId = pushTask({ label: `Installation ${labels[engineId]}`, target: labels[engineId], status: "running", progress: 10 });
+    try {
+      const status = await engines.prepare(engineId);
+      engine = status.engines.find((item) => item.id === engineId);
+      if (engine?.state !== "ready") {
+        throw new Error(engine?.detail ?? `${labels[engineId]} reste indisponible.`);
+      }
+      updateTask(taskId, { status: "completed", progress: 100 });
     } catch (error) {
       updateTask(taskId, { status: "failed", progress: 100 });
       throw new Error(error instanceof Error ? error.message : String(error));

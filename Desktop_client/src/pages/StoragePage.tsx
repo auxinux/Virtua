@@ -172,6 +172,14 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
     return nextInventory;
   };
 
+  const loadInventory = async () => {
+    try {
+      await refreshInventory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Inventaire de stockage illisible");
+    }
+  };
+
   const refreshRemote = async () => {
     setPending("remote");
     setError(null);
@@ -197,10 +205,11 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
   };
 
   useEffect(() => {
-    void refreshInventory();
+    void loadInventory();
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | null = null;
     void listen<DownloadProgressEvent>("local-download-progress", (event) => {
       setDownloadProgress((current) => ({
@@ -208,16 +217,22 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
         [event.payload.id]: event.payload,
       }));
     }).then((handler) => {
-      unlisten = handler;
+      // Unmounting before the registration resolves used to leak the listener.
+      if (disposed) handler();
+      else unlisten = handler;
     });
     return () => {
+      disposed = true;
       unlisten?.();
     };
   }, []);
 
   useEffect(() => {
+    // Only reach for the remote repository once the user opens that tab: an
+    // offline machine should not greet the storage page with a network error.
+    if (activeTab !== "depot") return;
     void refreshRemote();
-  }, [category, architecture]);
+  }, [activeTab, category, architecture]);
 
   useEffect(() => {
     if (!inventory || remoteItems.length === 0) return;

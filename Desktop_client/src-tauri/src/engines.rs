@@ -170,6 +170,10 @@ pub async fn local_prepare_engine(
             }
             _ => return Err("Moteur inconnu".into()),
         }
+        // A fresh install changes what QEMU can do; drop every cached probe and
+        // pick up the PATH the installer just wrote.
+        platform::refresh_path_from_registry();
+        forget_diagnostics();
         progress(&app, &engine, "Vérification du moteur…");
         drop(_guard);
         overview()
@@ -231,6 +235,22 @@ fn linux_script(script: &str) -> Result<(), String> {
     cmd.args(["-ec", script]);
     platform::output(cmd, Duration::from_secs(3600)).map(|_| ())
 }
+/// winget reports "nothing to do" through an exit code, not a success: treat
+/// "already installed" and "no applicable upgrade" as the wins they are.
+fn winget_is_already_satisfied(message: &str) -> bool {
+    let lowered = message.to_lowercase();
+    [
+        "0x8a15002b",
+        "0x8a150061",
+        "no applicable upgrade",
+        "already installed",
+        "déjà installé",
+        "deja installe",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
+}
+
 fn winget(id: &str) -> Result<(), String> {
     if find_binary("winget").is_none() {
         return Err(
@@ -238,6 +258,9 @@ fn winget(id: &str) -> Result<(), String> {
         );
     }
     let mut cmd = platform::command("winget");
+    // No --disable-interactivity: the installer must be able to raise its own
+    // UAC prompt, otherwise winget just fails on a machine that would have
+    // succeeded with one click.
     cmd.args([
         "install",
         "--id",
@@ -245,16 +268,23 @@ fn winget(id: &str) -> Result<(), String> {
         "--exact",
         "--source",
         "winget",
+        "--silent",
         "--accept-source-agreements",
         "--accept-package-agreements",
-        "--disable-interactivity",
     ]);
-    platform::output(cmd, Duration::from_secs(3600)).map(|_| ())
+    match platform::output(cmd, Duration::from_secs(3600)) {
+        Ok(_) => Ok(()),
+        Err(message) if winget_is_already_satisfied(&message) => Ok(()),
+        Err(message) => Err(format!(
+            "Installation winget de {id} impossible : {message}"
+        )),
+    }
 }
 fn brew_prefix() -> &'static str {
     "if ! command -v brew >/dev/null 2>&1; then\n /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o \"${TMPDIR:-/tmp}/virtua-homebrew-install.sh\"\n /bin/bash \"${TMPDIR:-/tmp}/virtua-homebrew-install.sh\"\nfi\n"
 }
 pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
+    forget_diagnostics();
     if qemu_diagnostics_blocking()?.ready {
         return Ok(());
     }
@@ -270,6 +300,8 @@ pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
             "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 qemu-system-arm qemu-utils qemu-efi-aarch64 ovmf"
         } else if find_binary("dnf").is_some() {
             "dnf install -y qemu-system-x86 qemu-system-aarch64 qemu-img edk2-aarch64 edk2-ovmf"
+        } else if find_binary("zypper").is_some() {
+            "zypper --non-interactive install qemu qemu-x86 qemu-arm qemu-tools qemu-ovmf-x86_64 qemu-uefi-aarch64"
         } else if find_binary("pacman").is_some() {
             "pacman -S --needed --noconfirm qemu-full edk2-aarch64 edk2-ovmf"
         } else {
@@ -277,10 +309,24 @@ pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
         })?,
         _ => return Err("Système non pris en charge".into()),
     }
-    if !qemu_diagnostics_blocking()?.ready {
-        return Err(
-            "QEMU reste introuvable ou incompatible. Relancez Virtua si le PATH a changé.".into(),
-        );
+    platform::refresh_path_from_registry();
+    forget_diagnostics();
+    let diagnostics = qemu_diagnostics_blocking()?;
+    if !diagnostics.ready {
+        return Err(format!(
+            "QEMU reste introuvable ou incompatible (qemu-img: {}, qemu-system: {}). \
+             Redémarrez Virtua si l'installation vient de modifier le PATH.",
+            if diagnostics.qemu_img.available {
+                "trouvé"
+            } else {
+                "absent"
+            },
+            if diagnostics.qemu_system_arm64.available || diagnostics.qemu_system_amd64.available {
+                "trouvé"
+            } else {
+                "absent"
+            },
+        ));
     }
     Ok(())
 }
@@ -403,4 +449,19 @@ fn ensure_ssh(app: &tauri::AppHandle) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn winget_treats_an_existing_installation_as_success() {
+        assert!(winget_is_already_satisfied(
+            "No applicable upgrade found (0x8A15002B)"
+        ));
+        assert!(winget_is_already_satisfied("Le paquet est déjà installé"));
+        assert!(!winget_is_already_satisfied(
+            "Installer failed with exit code 1"
+        ));
+    }
 }

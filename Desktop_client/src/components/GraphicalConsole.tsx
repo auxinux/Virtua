@@ -187,6 +187,10 @@ function CloudGraphicalConsole({
     };
 
     const mountSpice = (ticket: DesktopConsoleTicketResponse) => {
+      // A SPICE ticket only proves the server issued one. If the session itself
+      // never comes up (SPICE disabled on the VM, proxy refusing the protocol),
+      // fall back to VNC instead of leaving a dead screen.
+      let spiceEverConnected = false;
       const conn = new SpiceMainConn({
         uri: ticket.url,
         password: ticket.password ?? "",
@@ -194,6 +198,7 @@ function CloudGraphicalConsole({
         scale_view: true,
         onsuccess: () => {
           if (disposed) return;
+          spiceEverConnected = true;
           setProtocol("spice");
           setConnected(true);
           showStatus("Console graphique connectee", 1200);
@@ -202,6 +207,11 @@ function CloudGraphicalConsole({
         onerror: (error: Error) => {
           if (disposed) return;
           setConnected(false);
+          if (!spiceEverConnected) {
+            showStatus("SPICE indisponible, bascule sur VNC...");
+            void fallbackToVnc();
+            return;
+          }
           showStatus(error?.message || "Console graphique deconnectee");
         },
       });
@@ -213,6 +223,25 @@ function CloudGraphicalConsole({
         fitObserver = new MutationObserver(fitSpiceDisplay);
         fitObserver.observe(screen, { childList: true });
         fitSpiceDisplay();
+      }
+    };
+
+    const fallbackToVnc = async () => {
+      spiceRef.current?.stop();
+      spiceRef.current = null;
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+      fitObserver?.disconnect();
+      fitObserver = null;
+      if (disposed || !containerRef.current) return;
+      containerRef.current.innerHTML = "";
+      try {
+        const ticket = await fetchConsoleTicket(resource, "graphical");
+        if (disposed || !containerRef.current) return;
+        mountVnc(ticket);
+      } catch (error) {
+        if (disposed) return;
+        showStatus(error instanceof Error ? error.message : "Impossible d'ouvrir la console graphique");
       }
     };
 

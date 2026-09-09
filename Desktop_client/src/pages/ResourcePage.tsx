@@ -136,12 +136,16 @@ function CreateResourceDialog({
   const [form, setForm] = useState({
     type: defaultKind,
     name: "",
-    architecture: (hostArch === "amd64" ? "amd64" : "arm64") as VmArchitecture,
+    // hostArch is only meaningful in local mode (it's the Mac running the Desktop
+    // Client, not the target of the VM). Cloud nodes are virtualized servers whose
+    // architecture has nothing to do with the client's own hardware.
+    architecture: (usageMode === "local" && hostArch === "amd64" ? "amd64" : usageMode === "local" ? "arm64" : "amd64") as VmArchitecture,
     node: "",
     image: "",
     network: "",
     networkModel: "virtio",
     gpuModel: "virtio",
+    diskBus: "virtio",
     cpu: "2",
     memory: "2048",
     disk: "20",
@@ -168,10 +172,13 @@ function CreateResourceDialog({
   const nodes = options.nodes?.length ? options.nodes : fallbackNodes;
   const images = options.images ?? [];
   const networks = options.networks ?? [];
-  const hostArchitecture = normalizeHostArch(hostArch);
-  const architectures = options.architectures?.length ? options.architectures : [
+  const hostArchitecture = usageMode === "local" ? normalizeHostArch(hostArch) : null;
+  const architectures = options.architectures?.length ? options.architectures : usageMode === "local" ? [
     { id: "arm64", name: "ARM64", label: "ARM64 - natif sur Apple Silicon" },
     { id: "amd64", name: "AMD64", label: "AMD64 / x86_64 - emulation" },
+  ] : [
+    { id: "amd64", name: "AMD64", label: "AMD64 / x86_64" },
+    { id: "arm64", name: "ARM64", label: "ARM64 / aarch64 (emulation)" },
   ];
   const isEmulatedArchitecture = form.type === "vm" && hostArchitecture !== null && hostArchitecture !== form.architecture;
   const selectedImage = images.find((image) => image.id === form.image);
@@ -185,6 +192,15 @@ function CreateResourceDialog({
       const next = { ...current, [field]: value };
       if (field === "architecture" && usageMode === "local" && current.type === "vm" && !dirtyFieldsRef.current.has("networkModel")) {
         next.networkModel = value === "amd64" ? "e1000" : "virtio";
+      }
+      if (field === "architecture" && usageMode === "local" && value === "arm64" && !dirtyFieldsRef.current.has("diskBus")) {
+        next.diskBus = "virtio";
+      }
+      if (field === "image" && usageMode === "local" && !dirtyFieldsRef.current.has("diskBus")) {
+        // A template ships an installed disk (virtio drivers included); an ISO
+        // means an installer, which almost never carries virtio-blk drivers.
+        next.diskBus =
+          next.architecture !== "arm64" && String(value).startsWith("iso:") ? "sata" : "virtio";
       }
       return next;
     });
@@ -236,6 +252,7 @@ function CreateResourceDialog({
         network: form.network.trim() || undefined,
         networkModel: form.type === "vm" ? form.networkModel : undefined,
         gpuModel: form.type === "vm" ? form.gpuModel : undefined,
+        diskBus: form.type === "vm" && usageMode === "local" ? form.diskBus : undefined,
         cpu: Number(form.cpu),
         memory: Number(form.memory),
         disk: usageMode === "local" && form.type === "lxc" ? 0 : Number(form.disk),
@@ -415,6 +432,15 @@ function CreateResourceDialog({
                   {usageMode === "local" ? <option value="cirrus">Cirrus</option> : null}
                 </select>
               </label>
+              {usageMode === "local" && form.architecture !== "arm64" ? (
+                <label className="space-y-1 text-xs text-virtua-muted">
+                  Bus disque
+                  <select className="virtua-input w-full" value={form.diskBus} onChange={(event) => setField("diskBus", event.target.value)}>
+                    <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option>
+                    <option value="virtio">VirtIO - rapide, pilotes requis</option>
+                  </select>
+                </label>
+              ) : null}
             </>
           ) : null}
           <label className="space-y-1 text-xs text-virtua-muted">
@@ -548,7 +574,16 @@ export function ResourcePage({
   const [showCreate, setShowCreate] = useState(false);
   const [showStopChoice, setShowStopChoice] = useState(false);
   const selectedResource = visibleResources.find((resource) => resource.id === selectedId) ?? visibleResources[0];
-  const canCreate = user?.role === "ADMIN" || resources.some((resource) => resource.permissions.canCreate);
+  // The server declares creation rights per kind in /api/desktop/me; falling
+  // back to "does the user already own something" hid the button from users who
+  // simply had nothing yet.
+  const declaredCreateRights = user?.canCreate;
+  const canCreate = user?.role === "ADMIN"
+    || (declaredCreateRights
+      ? (kind === "all"
+        ? Object.values(declaredCreateRights).some(Boolean)
+        : Boolean(declaredCreateRights[kind]))
+      : resources.some((resource) => resource.permissions.canCreate));
   const canPower = Boolean(selectedResource?.permissions.canPower) && pendingAction === null;
   const canStart = Boolean(selectedResource && canPower && isStopped(selectedResource.state));
   const canStop = Boolean(selectedResource && canPower && isRunning(selectedResource.state));

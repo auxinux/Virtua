@@ -47,6 +47,8 @@ export type CreateResourcePayload = {
   network?: string;
   networkModel?: string;
   gpuModel?: string;
+  /** Local mode only: virtio (fast) or sata (compatible with OS installers). */
+  diskBus?: string;
   cpu?: number;
   memory?: number;
   disk?: number;
@@ -190,6 +192,7 @@ function writeTasks(tasks: VirtuaTask[]) {
 
 function pushTask(task: Omit<VirtuaTask, "id" | "createdAt">) {
   const nextTask: VirtuaTask = {
+    source: "device",
     ...task,
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     createdAt: new Date().toISOString(),
@@ -417,6 +420,9 @@ export const virtuaClient = {
       username: me.user.username,
       displayName: me.user.displayName ?? me.user.username,
       role: me.user.role,
+      // The server is the authority on who may create what; without this the
+      // client offered "New VM" to users the API would refuse.
+      canCreate: me.capabilities?.canCreate,
     };
   },
 
@@ -458,6 +464,14 @@ export const virtuaClient = {
   async listAccessibleResources() {
     const resources = await request<DesktopResourceResponse[]>("/api/desktop/resources");
     return resources.map(mapResource);
+  },
+
+  /** Fresh view of one resource, straight from the hypervisor. */
+  async getResource(resourceId: string): Promise<VirtuaResource> {
+    const resource = await request<DesktopResourceResponse>(
+      `/api/desktop/resources/${encodeURIComponent(resourceId)}`,
+    );
+    return mapResource(resource);
   },
 
   async listCreateOptions(type: ResourceKind): Promise<DesktopCreateOptionsResponse> {
@@ -513,10 +527,38 @@ export const virtuaClient = {
     }
   },
 
+  /**
+   * Server-side operations first (Virtua runs creations, migrations and
+   * snapshots asynchronously), then this device's own history. Only the local
+   * half was ever shown, so a long server job looked like nothing happening.
+   */
   async listTasks(): Promise<VirtuaTask[]> {
-    return readTasks();
+    const deviceTasks = readTasks();
+    try {
+      const serverTasks = await request<VirtuaTask[]>("/api/desktop/tasks");
+      if (!Array.isArray(serverTasks)) return deviceTasks;
+      const merged = [
+        ...serverTasks.map((task) => ({ ...task, source: "server" as const })),
+        ...deviceTasks,
+      ];
+      return merged
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        .slice(0, 100);
+    } catch {
+      // An older server has no /tasks route; the device history still stands.
+      return deviceTasks;
+    }
   },
 
+  async getTask(taskId: string): Promise<VirtuaTask | null> {
+    try {
+      return await request<VirtuaTask>(`/api/desktop/tasks/${encodeURIComponent(taskId)}`);
+    } catch {
+      return null;
+    }
+  },
+
+  /** Only this device's history is ours to clear; server tasks belong to Virtua. */
   clearTasks() {
     writeTasks([]);
   },

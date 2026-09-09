@@ -72,6 +72,7 @@ do_build_native() {
     --exclude='packaging/deb/out' \
     --exclude='packaging/deb/repo' \
     --exclude='Client_Desktop' \
+    --exclude='Desktop_client' \
     --exclude='target' \
     --exclude='*.iso' \
     --exclude='*.deb' \

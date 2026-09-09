@@ -24,7 +24,7 @@ rsync -a "$ROOT_DIR/" "$STAGE_DIR/" \
   --exclude "src-tauri/target/" \
   --exclude "*.log"
 
-chmod +x "$STAGE_DIR/scripts/build-linux.sh" || true
+chmod +x "$STAGE_DIR/scripts/build-linux.sh" "$STAGE_DIR/scripts/build-macos.sh" || true
 
 (
   cd "$OUT_DIR"
@@ -34,6 +34,11 @@ chmod +x "$STAGE_DIR/scripts/build-linux.sh" || true
 
 echo "Archive prete:"
 echo "$ZIP_PATH"
+echo
+echo "Sur macOS (Apple Silicon ou Intel):"
+echo "  unzip $(basename "$ZIP_PATH")"
+echo "  cd ${APP_NAME}-build-source"
+echo "  ./scripts/build-macos.sh"
 echo
 echo "Sur Linux:"
 echo "  unzip $(basename "$ZIP_PATH")"

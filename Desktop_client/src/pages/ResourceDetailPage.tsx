@@ -74,6 +74,7 @@ type UpdateResourcePayload = {
   network?: string;
   networkModel?: string;
   gpuModel?: string;
+  diskBus?: string;
   tpm2?: boolean;
   secureBoot?: boolean;
 };
@@ -94,7 +95,7 @@ export function ResourceDetailPage({
   updateResource?: (resourceId: string, payload: UpdateResourcePayload) => Promise<unknown>;
   deleteResource?: (resourceId: string, deleteDisks?: boolean) => Promise<unknown>;
   listSnapshots?: (resourceId: string) => Promise<LocalSnapshot[]>;
-  createSnapshot?: (resourceId: string, name: string) => Promise<LocalSnapshot>;
+  createSnapshot?: (resourceId: string, name: string) => Promise<unknown>;
   deleteSnapshot?: (resourceId: string, snapshotId: string) => Promise<void>;
   rollbackSnapshot?: (resourceId: string, snapshotId: string) => Promise<void>;
   onChanged?: () => void | Promise<void>;
@@ -112,6 +113,7 @@ export function ResourceDetailPage({
     network: resource?.network ?? "user",
     networkModel: resource?.networkModel ?? "virtio",
     gpuModel: resource?.gpuModel ?? "virtio",
+    diskBus: resource?.diskBus ?? "virtio",
     tpm2: Boolean(resource?.tpm2),
     secureBoot: Boolean(resource?.secureBoot),
   });
@@ -138,6 +140,7 @@ export function ResourceDetailPage({
       network: resource.network ?? "user",
       networkModel: resource.networkModel ?? "virtio",
       gpuModel: resource.gpuModel ?? "virtio",
+      diskBus: resource.diskBus ?? "virtio",
       tpm2: Boolean(resource.tpm2),
       secureBoot: Boolean(resource.secureBoot),
     });
@@ -189,8 +192,10 @@ export function ResourceDetailPage({
   const Icon = icons[resource.kind];
   const canModify = user?.role === "ADMIN" || Boolean(resource.permissions.canModify);
   const canDelete = user?.role === "ADMIN" || Boolean(resource.permissions.canDelete);
-  const canSnapshot = Boolean(resource.permissions.canSnapshot && listSnapshots && createSnapshot && deleteSnapshot && rollbackSnapshot);
-  const snapshotsAllowedNow = isStoppedState(resource.state);
+  const isLocal = resource.source === "local";
+  const canSnapshot = Boolean(resource.permissions.canSnapshot && createSnapshot && resource.kind !== "docker");
+  const canManageSnapshots = Boolean(canSnapshot && listSnapshots && deleteSnapshot && rollbackSnapshot);
+  const snapshotsAllowedNow = !isLocal || isStoppedState(resource.state);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -211,6 +216,7 @@ export function ResourceDetailPage({
       if (form.network !== (resource.network ?? "user")) payload.network = form.network;
       if (form.networkModel !== (resource.networkModel ?? "virtio")) payload.networkModel = form.networkModel;
       if (form.gpuModel !== (resource.gpuModel ?? "virtio")) payload.gpuModel = form.gpuModel;
+      if (form.diskBus !== (resource.diskBus ?? "virtio")) payload.diskBus = form.diskBus;
       if (form.tpm2 !== Boolean(resource.tpm2)) payload.tpm2 = form.tpm2;
       if (form.secureBoot !== Boolean(resource.secureBoot)) payload.secureBoot = form.secureBoot;
 
@@ -269,6 +275,8 @@ export function ResourceDetailPage({
     if (!listSnapshots) return;
     setSnapshots(await listSnapshots(resource.id));
   };
+
+  const startupNotes = resource.startupNotes;
 
   const submitSnapshot = async () => {
     if (!canSnapshot || !createSnapshot || snapshotPending || !snapshotName.trim()) return;
@@ -351,6 +359,11 @@ export function ResourceDetailPage({
       </div>
 
       {error ? <div className="rounded border border-virtua-red/50 bg-virtua-red/15 px-3 py-2 text-sm text-virtua-red">{error}</div> : null}
+      {startupNotes ? (
+        <div className="rounded border border-virtua-yellow/50 bg-virtua-yellow/10 px-3 py-2 text-sm text-virtua-yellow">
+          Demarrage adapte a cet ordinateur : {startupNotes}.
+        </div>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[1fr_22rem]">
         {isEditing ? (
@@ -442,6 +455,15 @@ export function ResourceDetailPage({
                     {resource.source === "local" ? <option value="cirrus">Cirrus</option> : null}
                   </select>
                 </label>
+                {isLocal && resource.architecture !== "arm64" ? (
+                  <label className="space-y-1 text-xs text-virtua-muted">
+                    Bus disque
+                    <select className="virtua-input w-full" disabled={!canModify} value={form.diskBus} onChange={(event) => setForm((current) => ({ ...current, diskBus: event.target.value }))}>
+                      <option value="virtio">VirtIO - rapide, pilotes requis</option>
+                      <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option>
+                    </select>
+                  </label>
+                ) : null}
               </>
             ) : null}
             <label className="space-y-1 text-xs text-virtua-muted">
@@ -497,6 +519,9 @@ export function ResourceDetailPage({
               ["Reseau", resource.network ?? "n/a"],
               ["Carte reseau", resource.networkModel ?? "n/a"],
               ["Carte graphique", resource.gpuModel ?? "n/a"],
+              ...(resource.source === "local" && resource.kind === "vm"
+                ? ([["Bus disque", resource.diskBus ?? "virtio"]] as Array<[string, string]>)
+                : []),
               ["TPM 2.0", yesNo(resource.tpm2)],
               ["Secure Boot", yesNo(resource.secureBoot)],
               ["Image", resource.image ?? "n/a"],
@@ -550,7 +575,7 @@ export function ResourceDetailPage({
             <div className="rounded border border-virtua-border bg-virtua-panel p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold">Snapshots</h2>
-                <span className="text-xs text-virtua-muted">{snapshots.length}</span>
+                <span className="text-xs text-virtua-muted">{canManageSnapshots ? snapshots.length : "serveur"}</span>
               </div>
               <div className="flex gap-2">
                 <input
@@ -566,10 +591,12 @@ export function ResourceDetailPage({
                   disabled={!snapshotsAllowedNow || !snapshotName.trim() || snapshotPending === "create"}
                   className="virtua-button-primary shrink-0"
                   title={snapshotsAllowedNow ? "Creer un snapshot" : "Arreter la VM avant un snapshot local"}
+                  aria-label="Creer un snapshot"
                 >
                   <Camera className="h-4 w-4" />
                 </button>
               </div>
+              {canManageSnapshots ? (
               <div className="mt-3 max-h-72 overflow-auto divide-y divide-virtua-border rounded border border-virtua-border bg-black/15">
                 {snapshots.map((snapshot) => (
                   <div key={snapshot.id} className="p-3">
@@ -600,6 +627,12 @@ export function ResourceDetailPage({
                 ))}
                 {snapshots.length === 0 ? <div className="px-3 py-8 text-center text-sm text-virtua-muted">Aucun snapshot.</div> : null}
               </div>
+              ) : (
+                <p className="mt-3 text-xs text-virtua-muted">
+                  Virtua conserve et restaure les snapshots de cette machine cote serveur. Leur
+                  liste reste visible dans le panneau web.
+                </p>
+              )}
               {!snapshotsAllowedNow ? <p className="mt-2 text-xs text-virtua-muted">Snapshots locaux disponibles quand la VM est arretee.</p> : null}
             </div>
           ) : null}

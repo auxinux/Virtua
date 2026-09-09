@@ -41,7 +41,16 @@ export function TextConsole({ resource }: { resource: VirtuaResource }) {
 
     terminal.loadAddon(fitAddon);
     terminal.open(host);
-    fitAddon.fit();
+    // fit() throws when the host has not been laid out yet (hidden tab,
+    // zero-height flex parent) and the exception used to take the page down.
+    const fit = () => {
+      try {
+        fitAddon.fit();
+      } catch {
+        // Nothing to fit to yet; the ResizeObserver will retry.
+      }
+    };
+    fit();
     terminal.focus();
 
     const maskTicket = (url: string) => url.replace(/ticket=[^&]+/, "ticket=...");
@@ -101,7 +110,7 @@ export function TextConsole({ resource }: { resource: VirtuaResource }) {
       }
     });
 
-    const resizeObserver = new ResizeObserver(() => fitAddon.fit());
+    const resizeObserver = new ResizeObserver(fit);
     resizeObserver.observe(host);
 
     return () => {

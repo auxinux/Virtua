@@ -1,4 +1,4 @@
-# AuxiNux Virtua Desktop 0.2.0
+# AuxiNux Virtua Desktop
 
 Client React + Tauri 2 / Rust pour gérer des ressources locales ou se connecter
 à l’API Desktop d’un serveur Virtua. Ce dossier est autonome; il ne dépend ni du
@@ -29,7 +29,8 @@ pas encore proposée. Le stockage LXC `dir` est partagé, sans quota individuel.
 
 Prérequis de compilation : Node.js 22+, Rust stable, bibliothèques Tauri propres
 au système. Ce sont les prérequis du développeur; les utilisateurs finaux n’ont
-pas besoin de Node ou Rust.
+pas besoin de Node ou Rust. Les scripts `scripts/build-macos.sh`,
+`scripts/build-windows.ps1` et `scripts/build-linux.sh` les installent tout seuls.
 
 ```sh
 npm ci
@@ -73,5 +74,5 @@ ou le service de secrets Linux. Ne pas exécuter l’interface entière en root.
 Les installations Linux peuvent nécessiter une reconnexion de session pour
 activer les groupes `docker` et `incus-admin`.
 
-Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.2.0](docs/RELEASE-0.2.0.md)
-et [la validation](docs/VALIDATION-0.2.0.md).
+Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.2.1](docs/RELEASE-0.2.1.md)
+et [les notes 0.2.0](docs/RELEASE-0.2.0.md).
