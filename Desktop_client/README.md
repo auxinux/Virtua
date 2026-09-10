@@ -6,8 +6,10 @@ monorepo Virtua ni de la réécriture `NouvelGeneration`.
 
 ## Utilisation
 
-- **Cloud** : connexion par mot de passe ou pairing, ressources et consoles
-  autorisées par le serveur. Aucun moteur local requis.
+- **Cloud** : connexion par mot de passe ou pairing à un nœud Virtua
+  (`https://hote:8441`) ou à un VDM (`http://hote:8440`), qui donne accès aux
+  machines de tous ses nœuds. Ressources et consoles autorisées par le serveur.
+  Aucun moteur local requis.
 - **Local** : QEMU est vérifié avant d’ouvrir l’inventaire. L’assistant installe
   les composants manquants à la demande, avec les dialogues système nécessaires.
 - **Docker** : activation dans Configuration → Moteurs locaux. Réutilisation
@@ -74,5 +76,5 @@ ou le service de secrets Linux. Ne pas exécuter l’interface entière en root.
 Les installations Linux peuvent nécessiter une reconnexion de session pour
 activer les groupes `docker` et `incus-admin`.
 
-Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.2.1](docs/RELEASE-0.2.1.md)
-et [les notes 0.2.0](docs/RELEASE-0.2.0.md).
+Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.2.2](docs/RELEASE-0.2.2.md),
+[0.2.1](docs/RELEASE-0.2.1.md) et [0.2.0](docs/RELEASE-0.2.0.md).

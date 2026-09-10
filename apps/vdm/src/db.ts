@@ -183,6 +183,51 @@ function migrate(db: Database.Database) {
       metadata TEXT
     );
 
+    -- ── Virtua Desktop clients paired with this manager ────────────────────
+    -- Same model as a Virtua node: one revocable device per installation,
+    -- rotating refresh tokens stored only as hashes, short-lived pairing codes
+    -- minted from the web panel, and opaque handles so the client never sends
+    -- a real (node, name) pair back to us.
+    CREATE TABLE IF NOT EXISTS vdm_desktop_devices (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES vdm_users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      installation_id TEXT,
+      fingerprint TEXT,
+      revoked INTEGER NOT NULL DEFAULT 0,
+      revoked_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_seen_at TEXT,
+      last_ip TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS vdm_desktop_refresh_tokens (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL REFERENCES vdm_desktop_devices(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      revoked INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS vdm_desktop_pairing_codes (
+      id TEXT PRIMARY KEY,
+      code_hash TEXT NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL REFERENCES vdm_users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS vdm_desktop_resource_handles (
+      id TEXT PRIMARY KEY,
+      resource_type TEXT NOT NULL,
+      node_name TEXT NOT NULL,
+      resource_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(resource_type, node_name, resource_name)
+    );
+
     CREATE TABLE IF NOT EXISTS vdm_audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT,
@@ -209,6 +254,9 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_vdm_backup_items_resource ON vdm_backup_items(resource_type, resource_name, created_at);
     CREATE INDEX IF NOT EXISTS idx_vdm_backup_jobs_next_run ON vdm_backup_jobs(enabled, next_run_at);
     CREATE INDEX IF NOT EXISTS idx_vdm_audit_created ON vdm_audit_log(created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vdm_desktop_devices_installation
+      ON vdm_desktop_devices(user_id, installation_id) WHERE installation_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_vdm_desktop_refresh_device ON vdm_desktop_refresh_tokens(device_id);
     CREATE INDEX IF NOT EXISTS idx_vdm_logs_ts ON vdm_logs(ts);
     -- Dedupe key for node log polling (re-polls must not duplicate rows).
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vdm_logs_dedupe ON vdm_logs(source, ts, message);

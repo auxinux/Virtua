@@ -12,6 +12,26 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.2",
+      items: fr
+        ? [
+            "VDM : le client Desktop peut enfin s'y connecter. Le VDM n'exposait aucune API Desktop, et sa protection CSRF rejetait toute tentative avec « Missing csrf secret » — le client authentifie par jeton porteur, pour lequel le CSRF ne s'applique pas.",
+            "VDM : appairage d'un client Desktop depuis Configuration → Virtua Desktop Client. Code à usage unique valable 10 minutes, liste des appareils appairés avec leur dernière activité, et révocation immédiate.",
+            "VDM : connecté à un VDM, le client Desktop voit les machines de tous les nœuds gérés, avec leur nœud d'origine. Inventaire, allumage/arrêt, snapshots, création, modification, suppression, tâches du gestionnaire et consoles terminal/VNC/SPICE relayées par le VDM.",
+            "VDM : un compte `admin` peut tout faire depuis le client, un compte `viewer` consulte et ouvre les consoles — exactement les mêmes droits que dans le panneau web.",
+            "VDM : un compte qui n'a pas encore changé son mot de passe temporaire est refusé avec un message explicite au lieu d'une erreur technique.",
+            "Client Desktop 0.2.2 : la page Connexion affichait un formulaire factice; elle montre maintenant le serveur, son type (nœud ou VDM), le compte, le rôle, l'appareil enregistré, et permet de renommer l'appareil.",
+          ]
+        : [
+            "VDM: the Desktop Client can finally connect to it. The VDM exposed no Desktop API, and its CSRF protection rejected every attempt with \"Missing csrf secret\" — the client authenticates with a bearer token, which CSRF does not apply to.",
+            "VDM: pair a Desktop Client from Settings → Virtua Desktop Client. Single-use code valid for 10 minutes, list of paired devices with their last activity, and instant revocation.",
+            "VDM: connected to a VDM, the Desktop Client sees the machines of every managed node, each tagged with its node. Inventory, power, snapshots, create, modify, delete, manager tasks, and terminal/VNC/SPICE consoles relayed by the VDM.",
+            "VDM: an `admin` account can do everything from the client, a `viewer` account browses and opens consoles — exactly the rights it has in the web panel.",
+            "VDM: an account that has not changed its temporary password yet is refused with a clear message instead of a technical error.",
+            "Desktop Client 0.2.2: the Connection page showed a mock form; it now reports the server, its kind (node or VDM), the account, the role, the registered device, and lets you rename the device.",
+          ],
+    },
+    {
       v: "0.8.1",
       items: fr
         ? [

@@ -7,7 +7,7 @@ VDM is a **vSphere-like centralized management interface** for AuxiNux nodes. It
 - **Port**: `8440` (HTTP frontend + API)
 - **Type**: Systemd service in LXC container
 - **Database**: SQLite3 (`/var/lib/auxinux-vdm/vdm.sqlite`)
-- **Auth**: Session-based with CSRF protection
+- **Auth**: Session-based with CSRF protection (web) + bearer tokens (Desktop Client)
 - **Default Credentials**: `admin` / `admin123` (password change is required on first login)
 - **Compatible Virtua version**: `0.7.32` or newer
 - **Network policy**: Host and nodes must use stable IPs (static IP or DHCP reservation)
@@ -137,6 +137,32 @@ The installer prints the detected LXC IP at the end. Access VDM at:
 ```
 http://<LXC-IP>:8440
 ```
+
+### Virtua Desktop Client
+
+The Desktop Client connects to a VDM exactly as it connects to a node, and then
+sees every machine of every node the manager knows about.
+
+1. In VDM, open **Settings → Virtua Desktop Client** and click
+   *Générer un code d'appairage*. The code is valid 10 minutes, once.
+2. In the Desktop Client, choose **Cloud**, open *Options* and set the server to
+   `http://<LXC-IP>:8440` (the scheme matters — without it the client assumes
+   `https`). Then use the **Code pairing** tab and enter the code.
+
+A username/password login works too, but the account must have changed its
+temporary password in the web panel first — a brand-new `admin` is refused with
+that exact message.
+
+The same Settings card lists every paired device with its last activity, and
+revokes any of them instantly (access and refresh tokens die with the device).
+
+| VDM role | From the Desktop Client |
+| --- | --- |
+| `admin` | Everything: power, snapshot, create, modify, delete, consoles |
+| `viewer` | Inventory and consoles, read-only |
+
+Consoles (terminal, VNC, SPICE) are relayed by the VDM to the owning node, so
+the client never needs a route to the nodes themselves — only to port 8440.
 
 ### Service Management
 

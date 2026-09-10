@@ -1,6 +1,6 @@
 {
   "name": "@auxinux/vdm",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "type": "module",
   "scripts": {
     "build": "tsc",

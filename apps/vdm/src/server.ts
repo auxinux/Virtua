@@ -19,6 +19,7 @@ import { fetchNode, tryFetchNode, pingNode, type VdmNodeRow } from "./nodeClient
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { parseLogSettings, serializeLogSettings, shouldLog, recordVdmLog, purgeOldLogs, LOG_SETTINGS_KEY, type VdmLogLevel, type VdmLogCategory, type VdmLogSettings } from "./logs.js";
 import { reconcileStorageMounts } from "./storageReconcile.js";
+import { registerVdmDesktopApi } from "./desktop.js";
 
 declare module "@fastify/session" {
   interface FastifySessionObject {
@@ -834,7 +835,7 @@ if (CLUSTER_ID !== "standalone" && INSTANCE_ROLE === "active") {
 const updateInstanceHeartbeat = () => {
   db.prepare(`INSERT INTO vdm_instances (instance_id, cluster_id, role, leader_epoch, last_heartbeat, metadata)
     VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET role = excluded.role, last_heartbeat = excluded.last_heartbeat, metadata = excluded.metadata`)
-    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.8.1", pid: process.pid }));
+    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.8.2", pid: process.pid }));
 };
 updateInstanceHeartbeat();
 setInterval(updateInstanceHeartbeat, 10_000).unref();
@@ -864,11 +865,21 @@ app.addHook("preHandler", async (req, reply) => {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return;
   const pathname = req.url.split("?")[0];
   if (pathname === "/api/vdm/join") return;
+  // The Desktop Client authenticates with a bearer token instead of the
+  // browser's session cookie, so CSRF does not apply to it — and a native app
+  // has no cookie jar to carry a CSRF secret in, which is why every desktop
+  // login failed with "Missing csrf secret".
+  // The pairing-code and device routes are the exception: they ride the panel
+  // session, so they keep the CSRF check like any other session route.
+  const isDesktopBearerRoute = pathname.startsWith("/api/desktop/")
+    && pathname !== "/api/desktop/pairing-codes"
+    && !pathname.startsWith("/api/desktop/my-devices");
   if (pathname === "/api/vdm/auth/login" || pathname === "/api/vdm/auth/logout") {
     await app.csrfProtection(req, reply, () => {});
     return;
   }
   if (INSTANCE_ROLE !== "active") return reply.status(503).send({ error: "VDM standby instance is read-only", role: INSTANCE_ROLE });
+  if (isDesktopBearerRoute) return;
   if (req.session.mustChangePassword && !pathname.startsWith("/api/vdm/auth/")) return reply.status(403).send({ error: "Password change required" });
   const resourceMatch = pathname.match(/^\/api\/vdm\/(vms|lxc|docker)\/([^/]+)\/([^/]+)(?:\/(.*))?$/);
   if (resourceMatch && !["console-ticket", "vnc-ticket"].includes(resourceMatch[4] ?? "")) {
@@ -892,7 +903,7 @@ app.get("/api/vdm/health", async (_req, reply) => {
   const unhealthy = nodes.some((row) => row.status === "offline") || recoveryRequired > 0;
   return reply.status(unhealthy ? 503 : 200).send({
     ok: !unhealthy,
-    version: "0.8.1",
+    version: "0.8.2",
     role: INSTANCE_ROLE,
     clusterId: CLUSTER_ID,
     database: "sqlite",
@@ -3262,6 +3273,30 @@ app.delete("/api/vdm/users/:id", async (req, reply) => {
   }
   db.prepare("DELETE FROM vdm_users WHERE id = ?").run(id);
   return { ok: true };
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VIRTUA DESKTOP CLIENT (/api/desktop/*)
+// ═══════════════════════════════════════════════════════════════════════════
+registerVdmDesktopApi({
+  app,
+  db,
+  getClientIp: (req) => req.ip,
+  enabledNodes: () => db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name ASC").all() as VdmNodeRow[],
+  getEnabledNode,
+  fetchNode,
+  tryFetchNode,
+  relayConsoleTicket,
+  getWebSessionUser: (req) => req.session?.userId
+    ? {
+      userId: req.session.userId,
+      role: req.session.role === "admin" ? "ADMIN" : "USER",
+      username: req.session.username ?? "",
+    }
+    : null,
+  getSetting: (key) => getSetting(db, key),
+  setSetting: (key, value) => setSetting(db, key, value),
+  log: (level, message) => recordVdmLog(db, level, "vdm", "system", message),
 });
 
 // ── SPA Fallback ──────────────────────────────────────────────────────────

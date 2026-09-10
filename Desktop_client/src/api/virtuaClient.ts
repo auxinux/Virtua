@@ -436,6 +436,10 @@ export const virtuaClient = {
       status: "connected",
       username: me.user.username,
       lastSync: new Date().toISOString(),
+      // A VDM answers for a whole datacenter; a node answers for itself.
+      manager: me.capabilities?.manager === "vdm" ? "vdm" : "virtua",
+      role: me.user.role,
+      deviceName: me.device.name,
     };
   },
 

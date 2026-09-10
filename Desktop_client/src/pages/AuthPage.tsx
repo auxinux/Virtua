@@ -22,6 +22,7 @@ export function AuthPage({
   const [pairingCode, setPairingCode] = useState("");
   const [showOptions, setShowOptions] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dismissedInitialError, setDismissedInitialError] = useState(false);
   const [isSubmitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -32,6 +33,7 @@ export function AuthPage({
     event.preventDefault();
     setSubmitting(true);
     setError(null);
+    setDismissedInitialError(true);
     try {
       if (mode === "password") {
         await virtuaClient.login(endpoint, username.trim(), password, deviceName.trim());
@@ -131,6 +133,10 @@ export function AuthPage({
                 <label className="grid gap-1.5">
                   <span className="text-xs font-medium text-virtua-muted">Serveur</span>
                   <input className="virtua-input" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://virtua.example.com" />
+                  <span className="text-[11px] leading-4 text-virtua-muted">
+                    Noeud Virtua : <code>https://hote:8441</code>. Datacenter Manager (VDM) :{" "}
+                    <code>http://hote:8440</code> — indiquez le schema, sinon https est suppose.
+                  </span>
                 </label>
                 <label className="grid gap-1.5">
                   <span className="text-xs font-medium text-virtua-muted">Nom de cet appareil</span>
@@ -141,7 +147,7 @@ export function AuthPage({
           </div>
         </div>
 
-        {(error || initialError) && (
+        {(error || (initialError && !dismissedInitialError)) && (
           <div className="mt-4 rounded border border-virtua-red/30 bg-virtua-red/10 px-3 py-2 text-sm text-virtua-red">
             {error ?? initialError}
           </div>

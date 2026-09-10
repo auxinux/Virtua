@@ -27,6 +27,10 @@ export interface VirtuaConnection {
   status: "connected" | "connecting" | "offline";
   username: string;
   lastSync: string;
+  /** "vdm" when the endpoint is a Datacenter Manager rather than a single node. */
+  manager?: "virtua" | "vdm";
+  role?: VirtuaRole;
+  deviceName?: string;
 }
 
 export interface VirtuaNode {
@@ -124,6 +128,8 @@ export interface DesktopMeResponse {
   device: DesktopDeviceInfo;
   capabilities: {
     isAdmin: boolean;
+    /** Absent on a Virtua node; "vdm" when talking to a Datacenter Manager. */
+    manager?: "virtua" | "vdm";
     canCreate?: Partial<Record<ResourceKind, boolean>>;
   };
 }

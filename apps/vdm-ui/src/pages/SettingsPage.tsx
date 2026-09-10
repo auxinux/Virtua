@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
 import { useConfirm } from "@/hooks/useDialog";
+import { DesktopClientsCard } from "@/components/DesktopClientsCard";
 import type { VdmUser as AuthUser } from "@/types/vdm";
 
 interface VdmSettings { vdmName?: string; allowSelfSigned?: boolean; }
@@ -123,6 +124,11 @@ export default function SettingsPage() {
           {pwMsg && <p className={`text-sm ${pwMsg.ok ? "text-vdm-success" : "text-vdm-danger"}`}>{pwMsg.text}</p>}
           <button className="vdm-btn-primary" onClick={changePassword}>Update Password</button>
         </div>
+      </SectionCard>
+
+      {/* Every account pairs its own Desktop clients, admin or not. */}
+      <SectionCard title="Virtua Desktop Client">
+        <DesktopClientsCard />
       </SectionCard>
 
       {/* Admin-only sections */}
