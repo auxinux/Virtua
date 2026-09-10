@@ -12,6 +12,16 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.1",
+      items: fr
+        ? [
+            "Notes de version : les versions 0.7.44 à 0.7.82 étaient sorties sans entrée ici — cette page s'arrêtait à 0.7.43. L'historique est complété et de nouveau continu.",
+          ]
+        : [
+            "Patch notes: versions 0.7.44 through 0.7.82 shipped without an entry here — this page stopped at 0.7.43. The history is backfilled and continuous again.",
+          ],
+    },
+    {
       v: "0.8.0",
       items: fr
         ? [
@@ -21,6 +31,7 @@ export default function AboutPage() {
             "Console : correction de l'affichage entremêlé. Le terminal transmet maintenant sa taille réelle au PTY dès la connexion (il restait bloqué à 80x24) et ne force plus un retour chariot sur chaque saut de ligne.",
             "Barre latérale : les groupes VM, LXC et Docker sont repliables comme les sections Hôte, Ressources et Stockage, et leur état est mémorisé.",
             "VDM : notes, nom d'affichage et renommage disponibles depuis la vue datacenter, plus les mêmes correctifs de console et groupes repliables par nœud.",
+            "Client Desktop 0.2.1 : compatibilité rétablie avec le serveur actuel, ajout de SPICE, du GPU et de l'audio, et stabilisation sur Windows, Linux et macOS. Il se construit par système d'exploitation et ne transite pas par apt.",
           ]
         : [
             "Notes: the Notes section now lives in the Summary tab for VMs, LXC and Docker (it was under Stats on the Docker side).",
@@ -29,6 +40,421 @@ export default function AboutPage() {
             "Console: fixed the garbled, interleaved output. The terminal now sends its real size to the PTY on connect (it stayed stuck at 80x24) and no longer forces a carriage return on every line feed.",
             "Sidebar: the VM, LXC and Docker groups are collapsible like the Host, Resources and Storage sections, and their state is remembered.",
             "VDM: notes, display name and rename available from the datacenter view, plus the same console fixes and collapsible per-node groups.",
+            "Desktop Client 0.2.1: compatibility restored with the current server, SPICE, GPU and audio added, and stabilised on Windows, Linux and macOS. It is built per operating system and does not ship through apt.",
+          ],
+    },
+    {
+      v: "0.7.82",
+      items: fr
+        ? [
+            "Détection des pannes VM/LXC : redémarrage automatique optionnel et journal des causes d'arrêt.",
+            "Un onglet Crashes par machine récapitule les événements et permet d'activer la reprise sur incident.",
+          ]
+        : [
+            "VM/LXC crash detection: optional automatic restart plus a log of shutdown causes.",
+            "A per-machine Crashes tab lists the events and lets you enable restart-on-crash.",
+          ],
+    },
+    {
+      v: "0.7.81",
+      items: fr
+        ? [
+            "Stockage : partitionnement des disques depuis l'interface.",
+            "Durcissement de sécurité sur les opérations disque destructives.",
+          ]
+        : [
+            "Storage: disk partitioning from the interface.",
+            "Security hardening on destructive disk operations.",
+          ],
+    },
+    {
+      v: "0.7.80",
+      items: fr
+        ? [
+            "Stockage : formatage et effacement d'un disque depuis l'interface.",
+          ]
+        : [
+            "Storage: format and wipe a disk from the interface.",
+          ],
+    },
+    {
+      v: "0.7.79",
+      items: fr
+        ? [
+            "Stockage : création d'un pool directement sur un disque.",
+            "Un nœud de périphérique est désormais refusé là où un chemin de pool est attendu.",
+          ]
+        : [
+            "Storage: create a pool directly on a disk.",
+            "A device node is now rejected where a pool path is expected.",
+          ],
+    },
+    {
+      v: "0.7.78",
+      items: fr
+        ? [
+            "LXC : correction des snapshots, rollbacks et sauvegardes qui repartaient vides quand le rootfs vivait sur un pool.",
+          ]
+        : [
+            "LXC: fixed snapshots, rollbacks and backups coming out empty when the rootfs lived on a pool.",
+          ],
+    },
+    {
+      v: "0.7.77",
+      items: fr
+        ? [
+            "Stockage : le listing d'un pool ne montre plus que les fichiers appartenant réellement à Virtua.",
+          ]
+        : [
+            "Storage: a pool listing now only shows files that actually belong to Virtua.",
+          ],
+    },
+    {
+      v: "0.7.76",
+      items: fr
+        ? [
+            "VDM : les listes se rafraîchissent après une création, et l'édition matérielle est de nouveau accessible.",
+            "Tests : `npx vitest run` est utilisable depuis la racine du dépôt.",
+          ]
+        : [
+            "VDM: lists refresh after a creation, and hardware editing is reachable again.",
+            "Tests: `npx vitest run` is usable from the repository root.",
+          ],
+    },
+    {
+      v: "0.7.75",
+      items: fr
+        ? [
+            "VDM : correction des menus contextuels, modales repassées au premier plan et durcissement associé.",
+          ]
+        : [
+            "VDM: fixed the context menus, brought modals back to the foreground, and hardened the surrounding code.",
+          ],
+    },
+    {
+      v: "0.7.74",
+      items: fr
+        ? [
+            "Stockage : seuls les éléments gérés par Virtua sont listés dans un pool.",
+            "VDM : correction du menu contextuel, du détail des tâches et de la migration par pool local.",
+          ]
+        : [
+            "Storage: only Virtua-managed items are listed in a pool.",
+            "VDM: fixed the context menu, task details and per-local-pool migration.",
+          ],
+    },
+    {
+      v: "0.7.73",
+      items: fr
+        ? [
+            "Stockage : types et icônes distincts pour Docker, LXC et VM dans le listing des pools.",
+            "LXC : déplacement du rootfs rendu robuste, avec rétrocompatibilité.",
+          ]
+        : [
+            "Storage: distinct types and icons for Docker, LXC and VM in pool listings.",
+            "LXC: made the rootfs move robust, with backward compatibility.",
+          ],
+    },
+    {
+      v: "0.7.72",
+      items: fr
+        ? [
+            "LXC : le pool de stockage choisi est désormais respecté à la création des conteneurs.",
+            "Correction du listing des conteneurs et volumes Docker, et de la taille LXC calculée sans parcours récursif.",
+          ]
+        : [
+            "LXC: the chosen storage pool is now honored when creating containers.",
+            "Fixed Docker container and volume listings, and LXC size computed without a recursive walk.",
+          ],
+    },
+    {
+      v: "0.7.71",
+      items: fr
+        ? [
+            "VDM : les stockages ne sont plus mélangés, et les onglets ISO / Templates sont séparés.",
+          ]
+        : [
+            "VDM: storages are no longer mixed together, and the ISO / Templates tabs are separated.",
+          ],
+    },
+    {
+      v: "0.7.70",
+      items: fr
+        ? [
+            "VDM : visualisation de tout le contenu d'un stockage — LXC, VM, Docker, snapshots et sauvegardes.",
+          ]
+        : [
+            "VDM: view a storage's full contents — LXC, VM, Docker, snapshots and backups.",
+          ],
+    },
+    {
+      v: "0.7.69",
+      items: fr
+        ? [
+            "VDM : gestion complète des ISO, templates et images.",
+            "Le menu Docker de la barre latérale devient repliable.",
+          ]
+        : [
+            "VDM: full management of ISOs, templates and images.",
+            "The sidebar's Docker menu is now collapsible.",
+          ],
+    },
+    {
+      v: "0.7.68",
+      items: fr
+        ? [
+            "CLI : sous-commande `admin` pour réinitialiser, lister ou créer un compte administrateur.",
+          ]
+        : [
+            "CLI: an `admin` subcommand to reset, list or create an administrator account.",
+          ],
+    },
+    {
+      v: "0.7.67",
+      items: fr
+        ? [
+            "VDM : le pool local apparaît de nouveau dans le choix de stockage.",
+          ]
+        : [
+            "VDM: the local pool shows up again in the storage picker.",
+          ],
+    },
+    {
+      v: "0.7.66",
+      items: fr
+        ? [
+            "VDM : gestion des stockages ISO et templates, avec choix du stockage à la création.",
+          ]
+        : [
+            "VDM: ISO and template storage management, with a storage choice at creation time.",
+          ],
+    },
+    {
+      v: "0.7.65",
+      items: fr
+        ? [
+            "VDM : correction d'un dialogue qui restait ouvert, d'un menu contextuel vide et du bouton Add.",
+          ]
+        : [
+            "VDM: fixed a dialog that stayed open, an empty context menu, and the Add button.",
+          ],
+    },
+    {
+      v: "0.7.64",
+      items: fr
+        ? [
+            "VDM : refonte de l'interface sur cinq points et gestion des ISO entre nœuds.",
+          ]
+        : [
+            "VDM: a five-point interface overhaul plus cross-node ISO management.",
+          ],
+    },
+    {
+      v: "0.7.63",
+      items: fr
+        ? [
+            "VDM : le montage rclone est lancé détaché et le point de montage est sondé, ce qui supprime une course de 45 s.",
+          ]
+        : [
+            "VDM: the rclone mount is launched detached and the mountpoint is polled, removing a 45s race.",
+          ],
+    },
+    {
+      v: "0.7.62",
+      items: fr
+        ? [
+            "VDM : montage rclone borné dans le temps, contrôle préalable du S3 et ajout des dépendances rclone/fuse3.",
+          ]
+        : [
+            "VDM: time-bounded rclone mount, an S3 pre-flight check, and the rclone/fuse3 dependencies added.",
+          ],
+    },
+    {
+      v: "0.7.61",
+      items: fr
+        ? [
+            "VDM : remontage S3 fiabilisé, migration Docker avec caractères génériques et erreurs enfin visibles.",
+          ]
+        : [
+            "VDM: reliable S3 remount, Docker migration with wildcards, and errors finally surfaced.",
+          ],
+    },
+    {
+      v: "0.7.60",
+      items: fr
+        ? [
+            "VDM : la migration Docker restaure fidèlement un conteneur arrêté.",
+          ]
+        : [
+            "VDM: Docker migration faithfully restores a stopped container.",
+          ],
+    },
+    {
+      v: "0.7.59",
+      items: fr
+        ? [
+            "VDM : audit du montage S3, des logs, de la vue All Resources et de la migration/duplication Docker.",
+          ]
+        : [
+            "VDM: audited the S3 mount, the logs, the All Resources view, and Docker migration/duplication.",
+          ],
+    },
+    {
+      v: "0.7.58",
+      items: fr
+        ? [
+            "VDM : migration et duplication vers le stockage local du nœud cible.",
+            "Navigation par stockage, avec affichage du contenu de chaque stockage.",
+          ]
+        : [
+            "VDM: migrate and duplicate onto the target node's local storage.",
+            "Storage-first navigation, showing each storage's contents.",
+          ],
+    },
+    {
+      v: "0.7.57",
+      items: fr
+        ? [
+            "Correction de la création de VM sur un nœud distant : l'action runner `network_bridges` n'existait pas.",
+          ]
+        : [
+            "Fixed VM creation on a remote node: the `network_bridges` runner action did not exist.",
+          ],
+    },
+    {
+      v: "0.7.56",
+      items: fr
+        ? [
+            "VDM : correction d'une page blanche sur un Docker distant dont les ports arrivaient sous forme de tableau d'objets.",
+          ]
+        : [
+            "VDM: fixed a blank page on a remote Docker container whose ports came back as an array of objects.",
+          ],
+    },
+    {
+      v: "0.7.55",
+      items: fr
+        ? [
+            "VDM : la sonde de vivacité combine `findmnt` et un `readdir`, car `stat` voyait un dossier vide comme valide.",
+          ]
+        : [
+            "VDM: the liveness probe now combines `findmnt` and a `readdir`, since `stat` saw an empty directory as valid.",
+          ],
+    },
+    {
+      v: "0.7.54",
+      items: fr
+        ? [
+            "VDM : détection d'un montage mort par `stat`, `findmnt` listant encore le FUSE zombie.",
+          ]
+        : [
+            "VDM: dead-mount detection via `stat`, since `findmnt` still listed the zombie FUSE mount.",
+          ],
+    },
+    {
+      v: "0.7.53",
+      items: fr
+        ? [
+            "VDM : moins de bruit dans les LOGS — l'escalade VFS est persistée et les 4xx ne sont plus journalisés.",
+          ]
+        : [
+            "VDM: less noise in LOGS — the VFS escalation is persisted and 4xx responses are no longer logged.",
+          ],
+    },
+    {
+      v: "0.7.52",
+      items: fr
+        ? [
+            "VDM : correction d'un montage S3 mort (FUSE), d'une fuite d'identifiants et de la clé de chiffrement.",
+            "Le statut de montage reflète le montage réel, avec remontage automatique ; un S3 en VFS off passe en écriture pour les sauvegardes.",
+          ]
+        : [
+            "VDM: fixed a dead S3 mount (FUSE), a credentials leak, and the encryption key.",
+            "Mount status reflects the real mount, with automatic remount; an S3 with VFS off escalates to writes for backups.",
+          ],
+    },
+    {
+      v: "0.7.51",
+      items: fr
+        ? [
+            "VDM : système LOGS — journal opérationnel centralisé.",
+          ]
+        : [
+            "VDM: LOGS system — a centralized operational journal.",
+          ],
+    },
+    {
+      v: "0.7.50",
+      items: fr
+        ? [
+            "VDM : correction d'un montage S3 rejeté par le nœud et des erreurs Zod illisibles.",
+          ]
+        : [
+            "VDM: fixed an S3 mount rejected by the node, and unreadable Zod errors.",
+          ],
+    },
+    {
+      v: "0.7.49",
+      items: fr
+        ? [
+            "VDM : le bouton Add Storage n'est plus grisé pour un stockage S3.",
+          ]
+        : [
+            "VDM: the Add Storage button is no longer greyed out for S3 storage.",
+          ],
+    },
+    {
+      v: "0.7.48",
+      items: fr
+        ? [
+            "VDM : les métriques OS, disque, architecture et mémoire des LXC et VM ne s'affichent plus comme « - ».",
+            "Correction de l'échappement du texte d'exemple dans la page Docker Compose.",
+          ]
+        : [
+            "VDM: LXC and VM OS, disk, architecture and memory metrics no longer display as \"-\".",
+            "Fixed placeholder escaping on the Docker Compose page.",
+          ],
+    },
+    {
+      v: "0.7.47",
+      items: fr
+        ? [
+            "VDM : la modale New schedule s'affichait en permanence.",
+          ]
+        : [
+            "VDM: the New schedule modal was permanently displayed.",
+          ],
+    },
+    {
+      v: "0.7.46",
+      items: fr
+        ? [
+            "VDM : support du stockage objet S3 et refonte de la vue Backups.",
+            "Documentation : nettoyage des README pour le projet public.",
+          ]
+        : [
+            "VDM: S3 object storage support and a reworked Backups view.",
+            "Docs: cleaned up the READMEs for the public project.",
+          ],
+    },
+    {
+      v: "0.7.45",
+      items: fr
+        ? [
+            "Interface : upload d'un fichier docker-compose.yml, à la création comme à l'édition.",
+          ]
+        : [
+            "Interface: upload a docker-compose.yml file, on both creation and editing.",
+          ],
+    },
+    {
+      v: "0.7.44",
+      items: fr
+        ? [
+            "VDM : Docker avancé multi-nœuds — Compose, volumes, édition/recréation, exec et prune.",
+          ]
+        : [
+            "VDM: advanced multi-node Docker — Compose, volumes, edit/recreate, exec and prune.",
           ],
     },
     {
