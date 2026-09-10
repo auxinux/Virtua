@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { VdmVm, VdmNode } from "@/types/vdm";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
 import { useConfirm } from "@/hooks/useDialog";
+import { resourceLabel } from "@/lib/resourceLabel";
 
 function StateChip({ state }: { state: string }) {
   const map: Record<string, string> = { running: "pill-green", stopped: "pill-gray", paused: "pill-yellow", crashed: "pill-red" };
@@ -38,7 +39,8 @@ export default function VmsPage() {
 
   const vms = (vmsQuery.data ?? []).filter((vm) => {
     if (filterNode !== "all" && vm.nodeName !== filterNode) return false;
-    if (search && !vm.name.toLowerCase().includes(search.toLowerCase())) return false;
+    const haystack = `${vm.name} ${vm.displayName ?? ""}`.toLowerCase();
+    if (search && !haystack.includes(search.toLowerCase())) return false;
     return true;
   });
 
@@ -81,7 +83,7 @@ export default function VmsPage() {
                 <tr key={`${vm.nodeName}:${vm.name}`} className="hover:bg-vdm-bg/40 transition-colors">
                   <td>
                     <Link to={`/inventory/vm/${encodeURIComponent(vm.nodeName)}/${encodeURIComponent(vm.name)}`} className="text-vdm-accent hover:underline font-medium">
-                      {vm.name}
+                      {resourceLabel(vm)}
                     </Link>
                   </td>
                   <td className="text-vdm-textMuted text-sm">{vm.nodeName}</td>

@@ -12,6 +12,26 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.0",
+      items: fr
+        ? [
+            "Notes : la section Notes est maintenant dans l'onglet Résumé des VM, LXC et Docker (elle était dans Stats côté Docker).",
+            "Nom d'affichage : un libellé optionnel peut être donné à une VM, un LXC ou un conteneur Docker sans toucher au nom réel — utile quand le nom ne peut pas changer.",
+            "Docker : ajout du bouton Renommer, qui effectue un vrai `docker rename`. L'identifiant du conteneur ne change pas, donc notes, permissions et règles de pare-feu sont conservées.",
+            "Console : correction de l'affichage entremêlé. Le terminal transmet maintenant sa taille réelle au PTY dès la connexion (il restait bloqué à 80x24) et ne force plus un retour chariot sur chaque saut de ligne.",
+            "Barre latérale : les groupes VM, LXC et Docker sont repliables comme les sections Hôte, Ressources et Stockage, et leur état est mémorisé.",
+            "VDM : notes, nom d'affichage et renommage disponibles depuis la vue datacenter, plus les mêmes correctifs de console et groupes repliables par nœud.",
+          ]
+        : [
+            "Notes: the Notes section now lives in the Summary tab for VMs, LXC and Docker (it was under Stats on the Docker side).",
+            "Display name: an optional label can be given to a VM, LXC or Docker container without touching the real name — useful when the name can't change.",
+            "Docker: added a Rename button performing a real `docker rename`. The container id is unchanged, so notes, permissions and firewall rules are preserved.",
+            "Console: fixed the garbled, interleaved output. The terminal now sends its real size to the PTY on connect (it stayed stuck at 80x24) and no longer forces a carriage return on every line feed.",
+            "Sidebar: the VM, LXC and Docker groups are collapsible like the Host, Resources and Storage sections, and their state is remembered.",
+            "VDM: notes, display name and rename available from the datacenter view, plus the same console fixes and collapsible per-node groups.",
+          ],
+    },
+    {
       v: "0.7.43",
       items: fr
         ? [

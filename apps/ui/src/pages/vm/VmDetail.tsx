@@ -11,12 +11,14 @@ import { NoVncConsole } from "../../components/NoVncConsole";
 import { SpiceConsole } from "../../components/SpiceConsole";
 import { MiniGauge } from "../../components/ui/Gauge";
 import { NotesCard } from "../../components/NotesCard";
+import { DisplayNameCard } from "../../components/DisplayNameCard";
 import { LockBadge, LockButton, useResourceLock } from "../../components/LockControl";
 import { FirewallRulesPanel } from "../../components/firewall/FirewallRulesPanel";
 import { ResourceAclPanel } from "../../components/acl/ResourceAclPanel";
 import { HostUsbDevicesPanel } from "../../components/HostUsbDevicesPanel";
 import { CrashLog, CrashRestartToggle } from "../../components/CrashLog";
 import { formatBytes, formatDate } from "../../utils/formatBytes";
+import { resourceLabel } from "../../utils/resourceLabel";
 import { useAuth } from "../../utils/useAuth";
 import { useSimpleMode } from "../../utils/useSimpleMode";
 import { motion, AnimatePresence } from "framer-motion";
@@ -194,7 +196,7 @@ export default function VmDetail() {
           </button>
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-text-100">{vm.name}</h1>
+              <h1 className="text-2xl font-bold text-text-100">{resourceLabel(vm)}</h1>
               <StatusBadge state={vm.state} />
               {locked && <LockBadge reason={lockEntry?.reason} />}
             </div>
@@ -652,7 +654,10 @@ function VmSummaryTab({ vm, stats, isSimple }: { vm: VmInfo; stats?: VmStats; is
            )}
         </div>
 
-        <NotesCard type="vm" id={vm.name} />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <DisplayNameCard type="vm" id={vm.name} realName={vm.name} />
+          <NotesCard type="vm" id={vm.name} />
+        </div>
       </div>
 
       <div className="space-y-6">

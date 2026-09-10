@@ -7,6 +7,8 @@ import type { VdmVm, VdmVmInfo, VdmVmStats, VdmLxc, VdmDocker, VdmNode, VdmShare
 import { LogsModal } from "@/components/LogsModal";
 import { ConsoleModal } from "@/components/ConsoleModal";
 import { VmConfigForm, VmHardwarePanel, LxcConfigForm, DockerConfigForm, DockerExec, LxcNetworks, DockerNetworks, LxcSnapshots } from "@/components/ResourcePanels";
+import { ResourceMetaPanel } from "@/components/ResourceMetaPanel";
+import { resourceLabel } from "@/lib/resourceLabel";
 import { MigrateModal, CloneModal, BackupModal, DockerTransferModal } from "@/components/TransferModals";
 import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/ResourceContextMenu";
 import { ContextMenuState } from "@/components/ui/ContextMenu";
@@ -149,7 +151,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
       <div className="flex items-start gap-3">
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-vdm-text">{vm.name}</h2>
+            <h2 className="text-lg font-semibold text-vdm-text">{resourceLabel(vm)}</h2>
             <StateChip state={vm.state} />
           </div>
           <p className="text-sm text-vdm-textMuted mt-0.5">{nodeName} · {vm.vcpus} vCPU · {vm.memoryMb} MB RAM</p>
@@ -224,6 +226,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
             </div>
             {stats.ipAddresses && stats.ipAddresses.length > 0 && <div className="flex justify-between rounded border border-vdm-border px-3 py-2 text-xs"><span className="text-vdm-textMuted">Guest IP</span><span className="font-mono text-vdm-text">{stats.ipAddresses.join(", ")}</span></div>}
           </div>}
+          <ResourceMetaPanel type="vms" node={nodeName} resourceKey={vm.name} realName={vm.name} className="col-span-2" />
           {vm.disks && vm.disks.length > 0 && (
             <div className="vdm-card p-4 space-y-2 col-span-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Disks</h3>
@@ -324,7 +327,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <h2 className="text-lg font-semibold text-vdm-text">{ct.name}</h2>
+        <h2 className="text-lg font-semibold text-vdm-text">{resourceLabel(ct)}</h2>
         <StateChip state={ct.state} />
         <span className="text-sm text-vdm-textMuted">{nodeName}</span>
       </div>
@@ -353,6 +356,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
               <span className="text-vdm-textMuted">{k}</span><span className="text-vdm-text font-mono">{v as string}</span>
             </div>
           ))}
+          <ResourceMetaPanel type="lxc" node={nodeName} resourceKey={ct.name} realName={ct.name} className="col-span-2" />
         </div>
       )}
       {tab === "config" && <LxcConfigForm node={nodeName} name={ct.name} ct={ct as unknown as Record<string, unknown>} />}
@@ -408,7 +412,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <h2 className="text-lg font-semibold text-vdm-text">{ct.name as string}</h2>
+        <h2 className="text-lg font-semibold text-vdm-text">{resourceLabel({ name: ct.name as string, displayName: ct.displayName as string | undefined })}</h2>
         <StateChip state={ct.state as string ?? "unknown"} />
         <span className="text-sm text-vdm-textMuted">{nodeName}</span>
       </div>
@@ -436,6 +440,7 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
       </div>
 
       {tab === "summary" && (
+        <div className="space-y-4">
         <div className="vdm-card p-4 space-y-2">
           <h3 className="text-xs font-semibold uppercase text-vdm-textMuted">Container Info</h3>
           {([
@@ -449,6 +454,8 @@ function DockerDetail({ nodeName, containerId }: { nodeName: string; containerId
               <span className="text-vdm-text font-mono truncate max-w-48">{v}</span>
             </div>
           ))}
+        </div>
+        <ResourceMetaPanel type="docker" node={nodeName} resourceKey={containerId} realName={String(ct.name ?? containerId)} />
         </div>
       )}
       {tab === "config" && <DockerConfigForm node={nodeName} id={containerId} ct={ct} />}
@@ -469,7 +476,7 @@ function AllResourcesView() {
   const rows = buildAllResourceRows(vmQuery.data ?? [], lxcQuery.data ?? [], dockerQuery.data ?? []);
   const needle = search.trim().toLowerCase();
   const filtered = needle
-    ? rows.filter((row) => `${row.type} ${row.name} ${row.nodeName} ${row.nodeDisplayName} ${row.detail}`.toLowerCase().includes(needle))
+    ? rows.filter((row) => `${row.type} ${row.name} ${row.label} ${row.nodeName} ${row.nodeDisplayName} ${row.detail}`.toLowerCase().includes(needle))
     : rows;
 
   const onContextMenu = (e: React.MouseEvent, row: AllResourceRow) => {
@@ -479,7 +486,7 @@ function AllResourcesView() {
       x: e.clientX, y: e.clientY, entries: [],
       resource: {
         kind: row.type === "VM" ? "vm" : row.type === "LXC" ? "lxc" : "docker",
-        node: row.nodeName, name: row.id, displayName: row.name, state: row.state,
+        node: row.nodeName, name: row.id, displayName: row.label, state: row.state,
       },
     });
   };
@@ -511,7 +518,7 @@ function AllResourcesView() {
             <thead><tr><th>Name</th><th>Type</th><th>Node</th><th>State</th><th>Details</th></tr></thead>
             <tbody>{filtered.map((row) => (
               <tr key={row.key} className="hover:bg-vdm-bg/40 cursor-context-menu" onContextMenu={(e) => onContextMenu(e, row)}>
-                <td><Link className="font-medium text-vdm-accent hover:underline" to={row.href}>{row.name}</Link></td>
+                <td><Link className="font-medium text-vdm-accent hover:underline" to={row.href}>{row.label}</Link></td>
                 <td><span className="pill-gray">{row.type}</span></td>
                 <td className="text-sm text-vdm-textMuted">{row.nodeDisplayName}</td>
                 <td><StateChip state={row.state} /></td>

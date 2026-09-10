@@ -71,6 +71,8 @@ export interface VdmNodeSummary {
 export interface VdmVm {
   name: string;
   state: ResourceState;
+  /** Operator-chosen label overriding `name`; does not rename the resource. */
+  displayName?: string;
   vcpus?: number;
   memoryMb?: number;
   autostart?: boolean;
@@ -126,6 +128,8 @@ export interface VdmSnapshot {
 export interface VdmLxc {
   name: string;
   state: ResourceState;
+  /** Operator-chosen label overriding `name`; does not rename the resource. */
+  displayName?: string;
   os?: string;
   arch?: string;
   cpus?: number;
@@ -147,6 +151,8 @@ export interface VdmDockerPort {
 export interface VdmDocker {
   id: string;
   name: string;
+  /** Operator-chosen label overriding `name`; does not rename the resource. */
+  displayName?: string;
   image: string;
   state: ResourceState;
   status: string;

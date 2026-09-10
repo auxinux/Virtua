@@ -2,6 +2,8 @@ export type VmState = "running" | "stopped" | "paused" | "suspended" | "unknown"
 
 export interface QemuVm {
   name: string;
+  /** Optional UI label overriding `name`; does not rename the domain. */
+  displayName?: string;
   id: string;
   state: VmState;
   vcpus: number;
@@ -46,6 +48,8 @@ export interface VmUsbDevice {
 
 export interface VmInfo {
   name: string;
+  /** Optional UI label overriding `name`; does not rename the domain. */
+  displayName?: string;
   nodeName?: string;
   state: VmState;
   vcpus: number;

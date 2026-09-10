@@ -277,34 +277,38 @@ export default function VmCreate() {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-5">
-        {/* Template source — always shown; creation via /api/resources is always local */}
-        <div className="card p-5 space-y-4">
-          <h2 className="text-sm font-semibold text-text-300 border-b border-surface-500 pb-2">{t("templates.source", "Source")}</h2>
-          <div>
-            <label className="label">{t("templates.vmTab", "Template VM")}</label>
-            <select className="input" value={templateId} onChange={(e) => applyTemplate(e.target.value)} disabled={templates.length === 0}>
-              <option value="">{t("templates.fromScratch", "Disque vierge / installation par ISO")}</option>
-              {templates.map((tpl) => (
-                <option key={tpl.id} value={tpl.id}>
-                  {tpl.name} · {tpl.architecture}{tpl.cpu ? ` · ${tpl.cpu} vCPU` : ""}{tpl.memory ? ` · ${tpl.memory} MB` : ""}
-                </option>
-              ))}
-            </select>
-            {templates.length === 0 ? (
-              <p className="text-xs text-text-500 mt-1">
-                {t("templates.empty", "Aucun template VM disponible.")}
-                {" "}<a href="/templates" className="text-accent-blue hover:underline">{t("templates.importHint", "Importez-en un depuis Templates → Catalogue dépôt")}</a>
-                {", "}{t("templates.orIso", "ou installez via une ISO ci-dessous.")}
-              </p>
-            ) : selectedTemplate ? (
-              <p className="text-xs text-text-500 mt-1">
-                {selectedTemplate.description || t("templates.willImport", "Le disque du template sera importé. CPU/RAM/réseau ci-dessous restent modifiables.")}
-              </p>
-            ) : (
-              <p className="text-xs text-text-500 mt-1">{t("templates.pickHint", "Choisissez un template pour déployer une VM prête à l'emploi, ou laissez vide pour installer depuis une ISO.")}</p>
-            )}
+        {/* Templates live on the local node's filesystem only (/api/templates has no
+            ?node= targeting) — offering them for a remote node would silently create
+            the VM on the wrong machine with the local node's architecture pre-filled. */}
+        {!targetNode && (
+          <div className="card p-5 space-y-4">
+            <h2 className="text-sm font-semibold text-text-300 border-b border-surface-500 pb-2">{t("templates.source", "Source")}</h2>
+            <div>
+              <label className="label">{t("templates.vmTab", "Template VM")}</label>
+              <select className="input" value={templateId} onChange={(e) => applyTemplate(e.target.value)} disabled={templates.length === 0}>
+                <option value="">{t("templates.fromScratch", "Disque vierge / installation par ISO")}</option>
+                {templates.map((tpl) => (
+                  <option key={tpl.id} value={tpl.id}>
+                    {tpl.name} · {tpl.architecture}{tpl.cpu ? ` · ${tpl.cpu} vCPU` : ""}{tpl.memory ? ` · ${tpl.memory} MB` : ""}
+                  </option>
+                ))}
+              </select>
+              {templates.length === 0 ? (
+                <p className="text-xs text-text-500 mt-1">
+                  {t("templates.empty", "Aucun template VM disponible.")}
+                  {" "}<a href="/templates" className="text-accent-blue hover:underline">{t("templates.importHint", "Importez-en un depuis Templates → Catalogue dépôt")}</a>
+                  {", "}{t("templates.orIso", "ou installez via une ISO ci-dessous.")}
+                </p>
+              ) : selectedTemplate ? (
+                <p className="text-xs text-text-500 mt-1">
+                  {selectedTemplate.description || t("templates.willImport", "Le disque du template sera importé. CPU/RAM/réseau ci-dessous restent modifiables.")}
+                </p>
+              ) : (
+                <p className="text-xs text-text-500 mt-1">{t("templates.pickHint", "Choisissez un template pour déployer une VM prête à l'emploi, ou laissez vide pour installer depuis une ISO.")}</p>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="card p-5 space-y-4">
           <h2 className="text-sm font-semibold text-text-300 border-b border-surface-500 pb-2">{t("common.details")}</h2>

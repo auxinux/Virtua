@@ -7,15 +7,16 @@ import type { DatacenterResourceEntry, DatacenterSummary } from "@auxinux/shared
 import { useAuth } from "../../utils/useAuth";
 import { SidebarConsoleList } from "./SidebarConsoleList";
 import { useSimpleMode } from "../../utils/useSimpleMode";
+import { resourceLabel } from "../../utils/resourceLabel";
 import {
   LayoutDashboard, Server, Database, Network, Shield,
   Monitor, Box, Package, Users, Activity, Settings,
   Info, User, Terminal, ChevronRight, Plus, AlertTriangle
 } from "lucide-react";
 
-interface SidebarVm { name: string; state: string }
-interface SidebarLxc { name: string; state: string }
-interface SidebarDocker { id: string; name: string; state: string }
+interface SidebarVm { name: string; state: string; displayName?: string }
+interface SidebarLxc { name: string; state: string; displayName?: string }
+interface SidebarDocker { id: string; name: string; state: string; displayName?: string }
 interface SidebarPool { name: string; usedBytes: number; totalBytes: number }
 type SidebarViewMode = "sections" | "storage" | "console";
 type ContextMenuItem = {
@@ -33,24 +34,46 @@ type ContextMenuState = {
 } | null;
 
 const SIDEBAR_VIEW_KEY = "auxinux-sidebar-view";
+const SIDEBAR_COLLAPSE_PREFIX = "auxinux-sidebar-open:";
+
+/**
+ * Open/closed state for one collapsible group, remembered across reloads so a
+ * long machine list stays folded away once the user folds it.
+ */
+function usePersistedOpen(storageKey: string | undefined, defaultOpen: boolean) {
+  const [open, setOpen] = useState(() => {
+    if (!storageKey) return defaultOpen;
+    const stored = localStorage.getItem(SIDEBAR_COLLAPSE_PREFIX + storageKey);
+    return stored === null ? defaultOpen : stored === "1";
+  });
+  const toggle = () => {
+    setOpen((previous) => {
+      const next = !previous;
+      if (storageKey) localStorage.setItem(SIDEBAR_COLLAPSE_PREFIX + storageKey, next ? "1" : "0");
+      return next;
+    });
+  };
+  return [open, toggle] as const;
+}
 
 function SidebarSection({
   title, icon, children, defaultOpen = true,
-  action,
+  action, storageKey,
 }: {
   title: string;
   icon: React.ReactNode;
   children: React.ReactNode;
   defaultOpen?: boolean;
   action?: { label: string; to: string };
+  storageKey?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, toggle] = usePersistedOpen(storageKey, defaultOpen);
   const navigate = useNavigate();
 
   return (
     <div className="mb-1">
       <button
-        onClick={() => setOpen(!open)}
+        onClick={toggle}
         className="w-full flex items-center gap-2 px-3 py-1.5 text-text-400 hover:text-text-200 hover:bg-surface-700/50 rounded transition-colors text-xs font-semibold uppercase tracking-wider group"
       >
         <span className="w-3.5 h-3.5 text-text-500">{icon}</span>
@@ -67,6 +90,37 @@ function SidebarSection({
         <ChevronRight className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`} />
       </button>
       {open && <div className="ml-2 border-l border-surface-600 pl-2">{children}</div>}
+    </div>
+  );
+}
+
+/**
+ * A collapsible group *inside* a section (VMs, LXC, Docker...). These used to be
+ * plain static labels, so a node with dozens of machines pushed Storage and
+ * Network off the bottom of the sidebar with no way to fold them away.
+ */
+function SidebarSubGroup({
+  title, storageKey, count, children, defaultOpen = true,
+}: {
+  title: string;
+  storageKey: string;
+  count?: number;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, toggle] = usePersistedOpen(storageKey, defaultOpen);
+
+  return (
+    <div className="mb-2">
+      <button
+        onClick={toggle}
+        className="w-full flex items-center gap-1.5 px-2 py-1 rounded text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70 hover:opacity-100 hover:text-text-300 hover:bg-surface-700/50 transition-colors"
+      >
+        <ChevronRight className={`w-3 h-3 transition-transform ${open ? "rotate-90" : ""}`} />
+        <span className="flex-1 text-left truncate">{title}</span>
+        {count !== undefined && count > 0 && <span className="tabular-nums opacity-80">{count}</span>}
+      </button>
+      {open && <div>{children}</div>}
     </div>
   );
 }
@@ -167,7 +221,7 @@ export function Sidebar() {
       <SidebarItem to="/dashboard" icon={<LayoutDashboard className="w-3.5 h-3.5" />} label={t("nav.dashboard")} />
 
       {!isSimpleMode && sections?.host && (
-        <SidebarSection title={t("nav.host")} icon={<Server className="w-3.5 h-3.5" />} defaultOpen>
+        <SidebarSection title={t("nav.host")} icon={<Server className="w-3.5 h-3.5" />} storageKey="host" defaultOpen>
           {sections.health && <SidebarItem to="/health" icon={<Activity className="w-3.5 h-3.5" />} label="Health" />}
           {sections.hostShell && <SidebarItem to="/host/shell" icon={<Terminal className="w-3.5 h-3.5" />} label={t("nav.hostShell")} />}
         </SidebarSection>
@@ -177,53 +231,65 @@ export function Sidebar() {
         <SidebarSection
           title={isSimpleMode ? "Mes Machines" : "Ressources"}
           icon={<Monitor className="w-3.5 h-3.5" />}
+          storageKey="resources"
           defaultOpen
         >
-          {sections?.vms && (
-            <div className="mb-2">
-              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70">
-                {isSimpleMode ? "Ordinateurs Virtuels" : t("nav.vms")}
-              </div>
-              {(isAdmin ? vms : vms.filter((vm) => capabilities?.resources.vms.some((r) => r.name === vm.name))).map((vm) => (
-                <SidebarItem key={vm.name} to={`/vms/${vm.name}`} state={vm.state} label={vm.name} />
-              ))}
-              {vms.length === 0 && <p className="text-[10px] text-text-500 px-2 py-1 italic">{t("nav.noVms")}</p>}
-            </div>
-          )}
+          {sections?.vms && (() => {
+            const visible = isAdmin ? vms : vms.filter((vm) => capabilities?.resources.vms.some((r) => r.name === vm.name));
+            return (
+              <SidebarSubGroup
+                title={isSimpleMode ? "Ordinateurs Virtuels" : t("nav.vms")}
+                storageKey="vms"
+                count={visible.length}
+              >
+                {visible.map((vm) => (
+                  <SidebarItem key={vm.name} to={`/vms/${vm.name}`} state={vm.state} label={resourceLabel(vm)} />
+                ))}
+                {visible.length === 0 && <p className="text-[10px] text-text-500 px-2 py-1 italic">{t("nav.noVms")}</p>}
+              </SidebarSubGroup>
+            );
+          })()}
 
-          {sections?.lxc && (
-            <div className="mb-2">
-              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70">
-                {isSimpleMode ? "Conteneurs Légers" : t("nav.lxc")}
-              </div>
-              {(isAdmin ? lxcList : lxcList.filter((ct) => capabilities?.resources.lxc.some((r) => r.name === ct.name))).map((ct) => (
-                <SidebarItem key={ct.name} to={`/lxc/${ct.name}`} state={ct.state} label={ct.name} />
-              ))}
-              {lxcList.length === 0 && <p className="text-[10px] text-text-500 px-2 py-1 italic">{t("nav.noContainers")}</p>}
-            </div>
-          )}
+          {sections?.lxc && (() => {
+            const visible = isAdmin ? lxcList : lxcList.filter((ct) => capabilities?.resources.lxc.some((r) => r.name === ct.name));
+            return (
+              <SidebarSubGroup
+                title={isSimpleMode ? "Conteneurs Légers" : t("nav.lxc")}
+                storageKey="lxc"
+                count={visible.length}
+              >
+                {visible.map((ct) => (
+                  <SidebarItem key={ct.name} to={`/lxc/${ct.name}`} state={ct.state} label={resourceLabel(ct)} />
+                ))}
+                {visible.length === 0 && <p className="text-[10px] text-text-500 px-2 py-1 italic">{t("nav.noContainers")}</p>}
+              </SidebarSubGroup>
+            );
+          })()}
 
-          {sections?.docker && (
-            <div className="mb-1">
-              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70">
-                {isSimpleMode ? "Applications" : t("nav.docker")}
-              </div>
-              <SidebarItem to="/docker" icon={<Box className="w-3.5 h-3.5" />} label={t("nav.dockerOverview")} />
-              <SidebarItem to="/docker/compose" icon={<Package className="w-3.5 h-3.5" />} label={t("nav.dockerCompose", "Docker Compose")} />
-              <SidebarItem to="/docker/volumes" icon={<Database className="w-3.5 h-3.5" />} label={t("nav.dockerVolumes", "Docker Volumes")} />
-              {(isAdmin
-                ? dockerList
-                : dockerList.filter((ct) =>
-                    capabilities?.resources.docker.some((r) =>
-                      r.id === ct.id || r.id.startsWith(ct.id.substring(0, 12)) || ct.id.startsWith(r.id.substring(0, 12))
-                    )
+          {sections?.docker && (() => {
+            const visible = isAdmin
+              ? dockerList
+              : dockerList.filter((ct) =>
+                  capabilities?.resources.docker.some((r) =>
+                    r.id === ct.id || r.id.startsWith(ct.id.substring(0, 12)) || ct.id.startsWith(r.id.substring(0, 12))
                   )
-              ).map((ct) => (
-                <SidebarItem key={ct.id} to={`/docker/${ct.id}`} state={ct.state} label={ct.name} />
-              ))}
-              {dockerList.length === 0 && <p className="text-[10px] text-text-500 px-2 py-1 italic">{t("nav.noContainers")}</p>}
-            </div>
-          )}
+                );
+            return (
+              <SidebarSubGroup
+                title={isSimpleMode ? "Applications" : t("nav.docker")}
+                storageKey="docker"
+                count={visible.length}
+              >
+                <SidebarItem to="/docker" icon={<Box className="w-3.5 h-3.5" />} label={t("nav.dockerOverview")} />
+                <SidebarItem to="/docker/compose" icon={<Package className="w-3.5 h-3.5" />} label={t("nav.dockerCompose", "Docker Compose")} />
+                <SidebarItem to="/docker/volumes" icon={<Database className="w-3.5 h-3.5" />} label={t("nav.dockerVolumes", "Docker Volumes")} />
+                {visible.map((ct) => (
+                  <SidebarItem key={ct.id} to={`/docker/${ct.id}`} state={ct.state} label={resourceLabel(ct)} />
+                ))}
+                {visible.length === 0 && <p className="text-[10px] text-text-500 px-2 py-1 italic">{t("nav.noContainers")}</p>}
+              </SidebarSubGroup>
+            );
+          })()}
         </SidebarSection>
       )}
 
@@ -231,6 +297,7 @@ export function Sidebar() {
         <SidebarSection
           title={t("nav.storage")}
           icon={<Database className="w-3.5 h-3.5" />}
+          storageKey="storage"
           action={sections.storageOverview ? { label: t("nav.manage"), to: "/storage" } : undefined}
         >
           {sections.storageOverview && <SidebarItem to="/storage" icon={<LayoutDashboard className="w-3.5 h-3.5" />} label={t("nav.storageOverview")} />}
@@ -244,7 +311,7 @@ export function Sidebar() {
       )}
 
       {!isSimpleMode && (sections?.network || sections?.firewall) && (
-        <SidebarSection title={t("nav.network")} icon={<Network className="w-3.5 h-3.5" />} action={sections.network ? { label: t("nav.manage"), to: "/network" } : undefined}>
+        <SidebarSection title={t("nav.network")} icon={<Network className="w-3.5 h-3.5" />} storageKey="network" action={sections.network ? { label: t("nav.manage"), to: "/network" } : undefined}>
           {sections.network && <SidebarItem to="/network" icon={<Network className="w-3.5 h-3.5" />} label={t("nav.networkOverview")} />}
           {sections.firewall && <SidebarItem to="/network/firewall" icon={<Shield className="w-3.5 h-3.5" />} label="Firewall" />}
         </SidebarSection>
@@ -253,36 +320,27 @@ export function Sidebar() {
   );
 
   const renderStorageView = () => (
-    <SidebarSection title={t("sidebar.storageView")} icon={<Database className="w-3.5 h-3.5" />} defaultOpen>
+    <SidebarSection title={t("sidebar.storageView")} icon={<Database className="w-3.5 h-3.5" />} storageKey="storageView" defaultOpen>
       {sections?.storageOverview && <SidebarItem to="/storage" icon={<LayoutDashboard className="w-3.5 h-3.5" />} label={t("nav.storageOverview")} />}
 
       {sections?.storageOverview && (
-        <div className="ml-1">
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70 pt-2">
-            {t("storage.pools")}
-          </div>
+        <SidebarSubGroup title={t("storage.pools")} storageKey="storageView.pools" count={pools.length}>
           {pools.map((pool) => (
             <SidebarItem key={pool.name} to={`/storage/pools/${pool.name}`} icon={<Box className="w-3.5 h-3.5" />} label={pool.name} />
           ))}
-        </div>
+        </SidebarSubGroup>
       )}
 
       {sections?.isoLibrary && (
-        <div className="ml-1">
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70 pt-2">
-            {t("nav.isos", "ISO / Templates")}
-          </div>
+        <SidebarSubGroup title={t("nav.isos", "ISO / Templates")} storageKey="storageView.isos">
           <SidebarItem to="/storage/isos" icon={<Package className="w-3.5 h-3.5" />} label={t("nav.isos", "ISO / Templates")} />
-        </div>
+        </SidebarSubGroup>
       )}
 
       {isAdmin && (
-        <div className="ml-1">
-          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-text-500 font-bold opacity-70 pt-2">
-            {t("nav.templates", "Templates")}
-          </div>
+        <SidebarSubGroup title={t("nav.templates", "Templates")} storageKey="storageView.templates">
           <SidebarItem to="/templates" icon={<Monitor className="w-3.5 h-3.5" />} label={t("nav.templates", "Templates")} />
-        </div>
+        </SidebarSubGroup>
       )}
     </SidebarSection>
   );

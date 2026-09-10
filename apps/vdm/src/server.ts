@@ -834,7 +834,7 @@ if (CLUSTER_ID !== "standalone" && INSTANCE_ROLE === "active") {
 const updateInstanceHeartbeat = () => {
   db.prepare(`INSERT INTO vdm_instances (instance_id, cluster_id, role, leader_epoch, last_heartbeat, metadata)
     VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(instance_id) DO UPDATE SET role = excluded.role, last_heartbeat = excluded.last_heartbeat, metadata = excluded.metadata`)
-    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.7.82", pid: process.pid }));
+    .run(INSTANCE_ID, CLUSTER_ID, INSTANCE_ROLE, new Date().toISOString(), JSON.stringify({ version: "0.8.0", pid: process.pid }));
 };
 updateInstanceHeartbeat();
 setInterval(updateInstanceHeartbeat, 10_000).unref();
@@ -892,7 +892,7 @@ app.get("/api/vdm/health", async (_req, reply) => {
   const unhealthy = nodes.some((row) => row.status === "offline") || recoveryRequired > 0;
   return reply.status(unhealthy ? 503 : 200).send({
     ok: !unhealthy,
-    version: "0.7.82",
+    version: "0.8.0",
     role: INSTANCE_ROLE,
     clusterId: CLUSTER_ID,
     database: "sqlite",
@@ -2554,6 +2554,51 @@ app.post("/api/vdm/docker/:node/:id/exec", async (req, reply) => {
   const node = getEnabledNode(nodeName);
   return fetchNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}/exec`, { method: "POST", body: JSON.stringify(req.body) });
 });
+
+// ── VDM: notes, display name and rename, relayed to the owning node ──────────
+// Same three capabilities the per-node web UI exposes, so a datacenter operator
+// isn't forced to open each node's own interface to annotate or relabel a
+// machine. Reads stay open to any authenticated user; writes are admin-only.
+function registerRelayedResourceMeta(
+  vdmBase: string,
+  paramName: "name" | "id",
+  internalBase: (key: string) => string,
+) {
+  const target = (req: { params: unknown }) => {
+    const params = req.params as Record<string, string>;
+    return { node: getEnabledNode(params.node), key: params[paramName] };
+  };
+
+  app.get(`${vdmBase}/notes`, async (req, reply) => {
+    requireAuth(req, reply);
+    const { node, key } = target(req);
+    return fetchNode(node, `${internalBase(key)}/notes`);
+  });
+  app.put(`${vdmBase}/notes`, async (req, reply) => {
+    requireAdmin(req, reply);
+    const { node, key } = target(req);
+    return fetchNode(node, `${internalBase(key)}/notes`, { method: "PUT", body: JSON.stringify(req.body) });
+  });
+  app.get(`${vdmBase}/display-name`, async (req, reply) => {
+    requireAuth(req, reply);
+    const { node, key } = target(req);
+    return fetchNode(node, `${internalBase(key)}/display-name`);
+  });
+  app.put(`${vdmBase}/display-name`, async (req, reply) => {
+    requireAdmin(req, reply);
+    const { node, key } = target(req);
+    return fetchNode(node, `${internalBase(key)}/display-name`, { method: "PUT", body: JSON.stringify(req.body) });
+  });
+  app.post(`${vdmBase}/rename`, async (req, reply) => {
+    requireAdmin(req, reply);
+    const { node, key } = target(req);
+    return fetchNode(node, `${internalBase(key)}/rename`, { method: "POST", body: JSON.stringify(req.body) });
+  });
+}
+
+registerRelayedResourceMeta("/api/vdm/vms/:node/:name", "name", (key) => `/api/internal/vms/${encodeURIComponent(key)}`);
+registerRelayedResourceMeta("/api/vdm/lxc/:node/:name", "name", (key) => `/api/internal/lxc/${encodeURIComponent(key)}`);
+registerRelayedResourceMeta("/api/vdm/docker/:node/:id", "id", (key) => `/api/internal/docker/containers/${encodeURIComponent(key)}`);
 
 // ── VDM Docker Compose (relayed to each node's persistent .yml store) ──
 app.get("/api/vdm/docker/compose", async (req, reply) => {

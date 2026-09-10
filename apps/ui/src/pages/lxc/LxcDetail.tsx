@@ -6,6 +6,7 @@ import { apiGet, apiPost, apiPut, apiDelete } from "../../api/client";
 import { StatusBadge } from "../../components/ui/Badge";
 import { MetricBar } from "../../components/ui/MetricBar";
 import { NotesCard } from "../../components/NotesCard";
+import { DisplayNameCard } from "../../components/DisplayNameCard";
 import { LockBadge, LockButton, useResourceLock } from "../../components/LockControl";
 import { Tabs } from "../../components/ui/Tabs";
 import { Modal, ConfirmModal } from "../../components/ui/Modal";
@@ -16,6 +17,7 @@ import { HostGpuDevicesPanel } from "../../components/HostGpuDevicesPanel";
 import { CrashLog, CrashRestartToggle } from "../../components/CrashLog";
 import { useAuth } from "../../utils/useAuth";
 import { formatBytes } from "../../utils/formatBytes";
+import { resourceLabel } from "../../utils/resourceLabel";
 import type { LxcContainer, LxcStats, LxcSnapshot, TaskProgress } from "@auxinux/shared";
 
 type Backup = { id: string; filename: string; sizeBytes: number; createdAt: string; storagePool?: string; nodeName?: string };
@@ -80,7 +82,8 @@ function LxcSummaryTab({ ct, stats }: { ct: LxcContainer; stats?: LxcStats }) {
         </div>
       )}
 
-      <NotesCard type="lxc" id={ct.name} className="md:col-span-2" />
+      <DisplayNameCard type="lxc" id={ct.name} realName={ct.name} />
+      <NotesCard type="lxc" id={ct.name} />
     </div>
   );
 }
@@ -813,7 +816,7 @@ export default function LxcDetail() {
             </svg>
           </button>
           <div>
-            <h1 className="text-xl font-bold text-text-100">{ct.name}</h1>
+            <h1 className="text-xl font-bold text-text-100">{resourceLabel(ct)}</h1>
             <div className="flex items-center gap-2 mt-0.5">
               <StatusBadge state={ct.state} />
               {locked && <LockBadge reason={lockEntry?.reason} />}

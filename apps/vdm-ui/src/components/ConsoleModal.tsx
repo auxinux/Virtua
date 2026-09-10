@@ -38,6 +38,7 @@ export function ConsoleModal({ open, onClose, type, node, name, title, mode, sta
     let term: XTerm | null = null;
     let rfb: RFB | null = null;
     let ro: ResizeObserver | null = null;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const ticketPath = mode === "vnc"
       ? `/api/vdm/vms/${encodeURIComponent(node)}/${encodeURIComponent(name)}/vnc-ticket`
       : `/api/vdm/${type}/${encodeURIComponent(node)}/${encodeURIComponent(name)}/console-ticket`;
@@ -55,19 +56,50 @@ export function ConsoleModal({ open, onClose, type, node, name, title, mode, sta
           return;
         }
         if (!termHostRef.current) return;
-        term = new XTerm({ theme: { background: "#0b0e14", foreground: "#c1c2c5", cursor: "#228be6" }, fontFamily: "JetBrains Mono, Fira Code, monospace", fontSize: 14, cursorBlink: true, convertEol: true });
-        const fit = new FitAddon(); term.loadAddon(fit); term.open(termHostRef.current); fit.fit();
+        const termHost = termHostRef.current;
+        // NOT convertEol: the far end is a real PTY that already emits CRLF, and
+        // forcing a carriage return on every LF garbles anything that moves the
+        // cursor down without resetting the column (prompts, progress bars).
+        term = new XTerm({ theme: { background: "#0b0e14", foreground: "#c1c2c5", cursor: "#228be6" }, fontFamily: "JetBrains Mono, Fira Code, monospace", fontSize: 14, cursorBlink: true, scrollback: 5000, convertEol: false });
+        const fit = new FitAddon(); term.loadAddon(fit); term.open(termHost);
+        /** Fit only once the host has a box, else xterm computes 0 cols. */
+        const safeFit = () => {
+          if (disposed || termHost.clientWidth === 0 || termHost.clientHeight === 0) return;
+          try { fit.fit(); } catch { /* detached mid-measure */ }
+        };
+        const sendResize = () => {
+          if (ws?.readyState === WebSocket.OPEN && term && term.cols > 0 && term.rows > 0) {
+            ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+          }
+        };
+        safeFit();
         ws = new WebSocket(url); ws.binaryType = "arraybuffer";
-        ws.onopen = () => term?.write("\x1b[32mConnected\x1b[0m\r\n");
-        ws.onmessage = (ev) => { try { const msg = JSON.parse(ev.data as string) as { type: string; data: string }; if (msg.type === "output") term?.write(msg.data); } catch { term?.write(typeof ev.data === "string" ? ev.data : ""); } };
+        ws.onopen = () => {
+          // The node spawns the PTY at a fixed 80x24. Without this first resize
+          // the shell wraps at the wrong column for the whole session, which is
+          // what makes the output look interleaved and unreadable.
+          safeFit();
+          sendResize();
+          term?.write("\x1b[32mConnected\x1b[0m\r\n");
+        };
+        ws.onmessage = (ev) => {
+          const raw = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer);
+          try { const msg = JSON.parse(raw) as { type: string; data: string }; if (msg.type === "output") term?.write(msg.data); } catch { term?.write(raw); }
+        };
         ws.onclose = (ev) => term?.write(`\r\n\x1b[31mDisconnected${ev.reason ? ": " + ev.reason : ""}\x1b[0m\r\n`);
         ws.onerror = () => term?.write("\r\n\x1b[31mConnection error\x1b[0m\r\n");
         term.onData((data) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data })); });
-        term.onResize(({ cols, rows }) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols, rows })); });
-        ro = new ResizeObserver(() => fit.fit()); ro.observe(termHostRef.current);
+        term.onResize(() => sendResize());
+        // Debounced: fullscreen toggles and window drags fire this in bursts and
+        // every fit() reflows the whole buffer.
+        ro = new ResizeObserver(() => {
+          if (resizeTimer) clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(safeFit, 80);
+        });
+        ro.observe(termHost);
       } catch (e) { setError(e instanceof Error ? e.message : "Failed to open console"); }
     })();
-    return () => { disposed = true; ro?.disconnect(); try { ws?.close(); } catch { /* noop */ } try { rfb?.disconnect(); } catch { /* noop */ } try { term?.dispose(); } catch { /* noop */ } };
+    return () => { disposed = true; if (resizeTimer) clearTimeout(resizeTimer); ro?.disconnect(); try { ws?.close(); } catch { /* noop */ } try { rfb?.disconnect(); } catch { /* noop */ } try { term?.dispose(); } catch { /* noop */ } };
   }, [open, mode, type, node, name]);
 
   if (!open) return null;

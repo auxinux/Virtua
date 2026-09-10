@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { VdmLxc, VdmNode } from "@/types/vdm";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
 import { useConfirm } from "@/hooks/useDialog";
+import { resourceLabel } from "@/lib/resourceLabel";
 
 function StateChip({ state }: { state: string }) {
   const map: Record<string, string> = { running: "pill-green", stopped: "pill-gray", paused: "pill-yellow" };
@@ -38,7 +39,8 @@ export default function LxcPage() {
 
   const containers = (lxcQuery.data ?? []).filter((ct) => {
     if (filterNode !== "all" && ct.nodeName !== filterNode) return false;
-    if (search && !ct.name.toLowerCase().includes(search.toLowerCase())) return false;
+    const haystack = `${ct.name} ${ct.displayName ?? ""}`.toLowerCase();
+    if (search && !haystack.includes(search.toLowerCase())) return false;
     return true;
   });
 
@@ -74,7 +76,7 @@ export default function LxcPage() {
             ) : containers.map((ct) => (
               <tr key={`${ct.nodeName}:${ct.name}`} className="hover:bg-vdm-bg/40 transition-colors">
                 <td>
-                  <Link to={`/inventory/lxc/${encodeURIComponent(ct.nodeName)}/${encodeURIComponent(ct.name)}`} className="text-vdm-accent hover:underline font-medium">{ct.name}</Link>
+                  <Link to={`/inventory/lxc/${encodeURIComponent(ct.nodeName)}/${encodeURIComponent(ct.name)}`} className="text-vdm-accent hover:underline font-medium">{resourceLabel(ct)}</Link>
                 </td>
                   <td className="text-vdm-textMuted text-sm">{ct.nodeName}</td>
                 <td><StateChip state={ct.state} /></td>

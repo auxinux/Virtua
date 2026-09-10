@@ -5489,12 +5489,12 @@ app.post("/api/internal/docker/containers", async (req, reply) => {
 app.get("/api/internal/vms", async (req, reply) => {
   requireInternalNodeToken(req);
   const systemVms = await callRunner<unknown[]>("qemu_vms");
-  const dbVms = db.prepare("SELECT * FROM qemu_vms").all() as Array<{ vm_name: string; user_id: number | null; description: string | null; tags: string }>;
+  const dbVms = db.prepare("SELECT * FROM qemu_vms").all() as Array<{ vm_name: string; user_id: number | null; description: string | null; display_name: string | null; tags: string }>;
   const vmMeta = new Map(dbVms.map((v) => [v.vm_name, v]));
   return systemVms.map((vm: unknown) => {
     const v = vm as Record<string, unknown>;
     const meta = vmMeta.get(v.name as string);
-    return { ...v, userId: meta?.user_id ?? undefined, description: meta?.description, tags: meta ? JSON.parse(meta.tags) : [] };
+    return { ...v, userId: meta?.user_id ?? undefined, description: meta?.description, displayName: meta?.display_name ?? undefined, tags: meta ? JSON.parse(meta.tags) : [] };
   });
 });
 
@@ -5502,8 +5502,8 @@ app.get("/api/internal/vms/:name", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const info = await callRunner("qemu_info", { name });
-  const meta = db.prepare("SELECT * FROM qemu_vms WHERE vm_name = ?").get(name) as { user_id: number | null; description: string | null; tags: string } | undefined;
-  return { ...info as object, userId: meta?.user_id ?? undefined, description: meta?.description, tags: meta ? JSON.parse(meta.tags) : [], restartOnCrash: getGuestCrashPolicy(db, "vm", name) };
+  const meta = db.prepare("SELECT * FROM qemu_vms WHERE vm_name = ?").get(name) as { user_id: number | null; description: string | null; display_name: string | null; tags: string } | undefined;
+  return { ...info as object, userId: meta?.user_id ?? undefined, description: meta?.description, displayName: meta?.display_name ?? undefined, tags: meta ? JSON.parse(meta.tags) : [], restartOnCrash: getGuestCrashPolicy(db, "vm", name) };
 });
 
 app.get("/api/internal/vms/:name/stats", async (req, reply) => {
@@ -5792,12 +5792,12 @@ app.delete("/api/internal/vms/:name", async (req, reply) => {
 app.get("/api/internal/lxc", async (req, reply) => {
   requireInternalNodeToken(req);
   const containers = await callRunner<unknown[]>("lxc_containers");
-  const dbRows = db.prepare("SELECT * FROM lxc_containers").all() as Array<{ container_name: string; user_id: number | null; description: string | null }>;
+  const dbRows = db.prepare("SELECT * FROM lxc_containers").all() as Array<{ container_name: string; user_id: number | null; description: string | null; display_name: string | null }>;
   const meta = new Map(dbRows.map((r) => [r.container_name, r]));
   return containers.map((c: unknown) => {
     const ct = c as Record<string, unknown>;
     const m = meta.get(ct.name as string);
-    return { ...ct, userId: m?.user_id ?? undefined, description: m?.description };
+    return { ...ct, userId: m?.user_id ?? undefined, description: m?.description, displayName: m?.display_name ?? undefined };
   });
 });
 
@@ -5805,7 +5805,7 @@ app.get("/api/internal/lxc/:name", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   const info = await callRunner("lxc_info", { name });
-  return { ...(info as object), restartOnCrash: getGuestCrashPolicy(db, "lxc", name) };
+  return { ...(info as object), restartOnCrash: getGuestCrashPolicy(db, "lxc", name), displayName: readDisplayName("lxc", name) || undefined };
 });
 
 app.get("/api/internal/lxc/:name/stats", async (req, reply) => {
@@ -6014,19 +6014,65 @@ app.delete("/api/internal/lxc/:name", async (req, reply) => {
 app.get("/api/internal/docker/containers", async (req, reply) => {
   requireInternalNodeToken(req);
   const containers = await callRunner<unknown[]>("docker_containers");
-  const dbRows = db.prepare("SELECT * FROM docker_containers").all() as Array<{ container_id: string; user_id: number | null }>;
+  const dbRows = db.prepare("SELECT * FROM docker_containers").all() as Array<{ container_id: string; user_id: number | null; display_name: string | null }>;
   return containers.map((c: unknown) => {
     const ct = c as Record<string, unknown>;
     const dockerId = ct.id as string;
     const m = dbRows.find((row) => row.container_id === dockerId || row.container_id.startsWith(dockerId) || dockerId.startsWith(row.container_id));
-    return { ...ct, userId: m?.user_id ?? undefined };
+    return { ...ct, userId: m?.user_id ?? undefined, displayName: m?.display_name ?? undefined };
   });
 });
 
 app.get("/api/internal/docker/containers/:id", async (req, reply) => {
   requireInternalNodeToken(req);
-  return callRunner("docker_inspect", req.params);
+  const { id } = req.params as { id: string };
+  const info = await callRunner("docker_inspect", { id });
+  return { ...(info as object), displayName: readDisplayName("docker", id) || undefined };
 });
+
+// ── Internal: notes / display name / rename (used by the VDM datacenter UI) ──
+// VDM never holds a user session on the node, so these mirror the user-facing
+// routes minus the per-user ACL — the node token is the authorization.
+function registerInternalResourceMetaRoutes(type: ResourceMetaType, basePath: string, paramName: "name" | "id") {
+  app.get(`${basePath}/notes`, async (req, reply) => {
+    requireInternalNodeToken(req);
+    return { notes: readNotes(type, (req.params as Record<string, string>)[paramName]) };
+  });
+  app.put(`${basePath}/notes`, async (req, reply) => {
+    requireInternalNodeToken(req);
+    const key = (req.params as Record<string, string>)[paramName];
+    const notes = parseNotesBody(req.body);
+    writeNotes(type, key, notes);
+    return { ok: true, notes };
+  });
+  app.get(`${basePath}/display-name`, async (req, reply) => {
+    requireInternalNodeToken(req);
+    return { displayName: readDisplayName(type, (req.params as Record<string, string>)[paramName]) };
+  });
+  app.put(`${basePath}/display-name`, async (req, reply) => {
+    requireInternalNodeToken(req);
+    const key = (req.params as Record<string, string>)[paramName];
+    const displayName = parseDisplayNameBody(req.body);
+    writeDisplayName(type, key, displayName);
+    return { ok: true, displayName };
+  });
+  app.post(`${basePath}/rename`, async (req, reply) => {
+    requireInternalNodeToken(req);
+    const key = (req.params as Record<string, string>)[paramName];
+    const newName = String((req.body as { newName?: unknown })?.newName ?? "").trim();
+    if (!isValidResourceName(type, newName)) return reply.status(400).send({ error: `Invalid ${type} name` });
+    if (isResourceLocked(type, key)) return reply.status(423).send({ error: "Resource is locked" });
+    const renamed = await renameDesktopResource(type, getLocalNodeName(), key, newName);
+    await syncFirewallState();
+    // vm/lxc key on the name, docker keys on the id — return both so the caller
+    // knows which one to navigate to.
+    return { ok: true, key: renamed, name: type === "docker" ? newName : renamed };
+  });
+}
+
+registerInternalResourceMetaRoutes("vm", "/api/internal/vms/:name", "name");
+registerInternalResourceMetaRoutes("lxc", "/api/internal/lxc/:name", "name");
+registerInternalResourceMetaRoutes("docker", "/api/internal/docker/containers/:id", "id");
 
 app.get("/api/internal/docker/containers/:id/stats", async (req, reply) => {
   requireInternalNodeToken(req);
@@ -6890,7 +6936,7 @@ app.get("/api/vms", async (req, reply) => {
   await reconcileResourceMetadata();
   const userId = req.session.userId!;
   const role = req.session.role!;
-  const dbVms = db.prepare("SELECT * FROM qemu_vms").all() as Array<{ vm_name: string; user_id: number; description: string | null; tags: string }>;
+  const dbVms = db.prepare("SELECT * FROM qemu_vms").all() as Array<{ vm_name: string; user_id: number; description: string | null; display_name: string | null; tags: string }>;
   const vmMeta = new Map(dbVms.map((v) => [v.vm_name, v]));
   const nodes = enabledResourceNodes();
   const vmLists = await Promise.all(nodes.map(async (node) => {
@@ -6905,7 +6951,7 @@ app.get("/api/vms", async (req, reply) => {
     const meta = vmMeta.get(v.name as string);
     if (!hasResourcePermission(userId, role, "vm", v.name as string, "view")) return null;
     if (scope === "mine" && role !== "ADMIN" && meta?.user_id !== userId) return null;
-    return { ...v, userId: meta?.user_id, description: meta?.description, tags: meta ? JSON.parse(meta.tags) : [] };
+    return { ...v, userId: meta?.user_id, description: meta?.description, displayName: meta?.display_name ?? undefined, tags: meta ? JSON.parse(meta.tags) : [] };
   }).filter(Boolean);
 });
 
@@ -6950,12 +6996,13 @@ app.get("/api/vms/:name", async (req, reply) => {
     // La politique de reprise vit sur le nœud qui héberge la VM : pour une VM
     // distante, elle arrive déjà dans la réponse du nœud interrogé.
     : { ...(await callRunner("qemu_info", { name })) as object, restartOnCrash: getGuestCrashPolicy(db, "vm", name) };
-  const meta = db.prepare("SELECT * FROM qemu_vms WHERE vm_name = ?").get(name) as { user_id: number; description: string | null; tags: string } | undefined;
+  const meta = db.prepare("SELECT * FROM qemu_vms WHERE vm_name = ?").get(name) as { user_id: number; description: string | null; display_name: string | null; tags: string } | undefined;
   return {
     ...info as object,
     nodeName: node?.name ?? getLocalNodeName(),
     userId: meta?.user_id,
     description: meta?.description,
+    displayName: meta?.display_name ?? undefined,
     tags: meta ? JSON.parse(meta.tags) : [],
   };
 });
@@ -7729,59 +7776,114 @@ function parseNotesBody(body: unknown): string {
   return notes;
 }
 
-app.get("/api/vms/:name/notes", async (req, reply) => {
-  requireAuth(req, reply);
-  const { name } = req.params as { name: string };
-  requireResourcePermission(req, "vm", name, "view");
-  const row = db.prepare("SELECT description FROM qemu_vms WHERE vm_name = ?").get(name) as { description: string | null } | undefined;
-  return { notes: row?.description ?? "" };
-});
-app.put("/api/vms/:name/notes", async (req, reply) => {
-  requireAuth(req, reply);
-  const { name } = req.params as { name: string };
-  requireResourcePermission(req, "vm", name, "modify");
-  const notes = parseNotesBody(req.body);
-  db.prepare("INSERT INTO qemu_vms (vm_name, description, node_name) VALUES (?, ?, ?) ON CONFLICT(vm_name) DO UPDATE SET description = excluded.description")
-    .run(name, notes, getLocalNodeName());
-  auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "vm.notes.update", resourceType: "vm", resourceName: name });
-  return { ok: true, notes };
-});
+function readNotes(type: ResourceMetaType, key: string): string {
+  const t = RESOURCE_META_TARGETS[type];
+  const row = db.prepare(`SELECT description FROM ${t.table} WHERE ${t.keyColumn} = ?`).get(key) as { description: string | null } | undefined;
+  return row?.description ?? "";
+}
 
-app.get("/api/lxc/:name/notes", async (req, reply) => {
-  requireAuth(req, reply);
-  const { name } = req.params as { name: string };
-  requireResourcePermission(req, "lxc", name, "view");
-  const row = db.prepare("SELECT description FROM lxc_containers WHERE container_name = ?").get(name) as { description: string | null } | undefined;
-  return { notes: row?.description ?? "" };
-});
-app.put("/api/lxc/:name/notes", async (req, reply) => {
-  requireAuth(req, reply);
-  const { name } = req.params as { name: string };
-  requireResourcePermission(req, "lxc", name, "modify");
-  const notes = parseNotesBody(req.body);
-  db.prepare("INSERT INTO lxc_containers (container_name, description, node_name) VALUES (?, ?, ?) ON CONFLICT(container_name) DO UPDATE SET description = excluded.description")
-    .run(name, notes, getLocalNodeName());
-  auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "lxc.notes.update", resourceType: "lxc", resourceName: name });
-  return { ok: true, notes };
-});
+function writeNotes(type: ResourceMetaType, key: string, notes: string): void {
+  const t = RESOURCE_META_TARGETS[type];
+  if (type === "docker") {
+    db.prepare("INSERT INTO docker_containers (container_id, container_name, image, description, node_name) VALUES (?, '', '', ?, ?) ON CONFLICT(container_id) DO UPDATE SET description = excluded.description")
+      .run(key, notes, getLocalNodeName());
+    return;
+  }
+  db.prepare(`INSERT INTO ${t.table} (${t.keyColumn}, description, node_name) VALUES (?, ?, ?) ON CONFLICT(${t.keyColumn}) DO UPDATE SET description = excluded.description`)
+    .run(key, notes, getLocalNodeName());
+}
 
-app.get("/api/docker/containers/:id/notes", async (req, reply) => {
-  requireAuth(req, reply);
-  const { id } = req.params as { id: string };
-  requireResourcePermission(req, "docker", id, "view");
-  const row = db.prepare("SELECT description FROM docker_containers WHERE container_id = ?").get(id) as { description: string | null } | undefined;
-  return { notes: row?.description ?? "" };
-});
-app.put("/api/docker/containers/:id/notes", async (req, reply) => {
-  requireAuth(req, reply);
-  const { id } = req.params as { id: string };
-  requireResourcePermission(req, "docker", id, "modify");
-  const notes = parseNotesBody(req.body);
-  db.prepare("INSERT INTO docker_containers (container_id, container_name, image, description, node_name) VALUES (?, '', '', ?, ?) ON CONFLICT(container_id) DO UPDATE SET description = excluded.description")
-    .run(id, notes, getLocalNodeName());
-  auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "docker.notes.update", resourceType: "docker", resourceName: id });
-  return { ok: true, notes };
-});
+function registerNotesRoutes(type: ResourceMetaType, basePath: string, paramName: "name" | "id") {
+  app.get(`${basePath}/notes`, async (req, reply) => {
+    requireAuth(req, reply);
+    const key = (req.params as Record<string, string>)[paramName];
+    requireResourcePermission(req, type, key, "view");
+    return { notes: readNotes(type, key) };
+  });
+  app.put(`${basePath}/notes`, async (req, reply) => {
+    requireAuth(req, reply);
+    const key = (req.params as Record<string, string>)[paramName];
+    requireResourcePermission(req, type, key, "modify");
+    const notes = parseNotesBody(req.body);
+    writeNotes(type, key, notes);
+    auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: `${type}.notes.update`, resourceType: type, resourceName: key });
+    return { ok: true, notes };
+  });
+}
+
+registerNotesRoutes("vm", "/api/vms/:name", "name");
+registerNotesRoutes("lxc", "/api/lxc/:name", "name");
+registerNotesRoutes("docker", "/api/docker/containers/:id", "id");
+
+// ── Per-resource metadata Virtua owns (notes + display name) ─────────────────
+// The display name lets a user relabel a machine whose real name can't change
+// (a running Docker container, a VM other tooling keys by name) without
+// touching the identifier Virtua, libvirt and the ACLs are built on.
+const RESOURCE_META_TARGETS = {
+  vm: { table: "qemu_vms", keyColumn: "vm_name" },
+  lxc: { table: "lxc_containers", keyColumn: "container_name" },
+  docker: { table: "docker_containers", keyColumn: "container_id" },
+} as const;
+type ResourceMetaType = keyof typeof RESOURCE_META_TARGETS;
+
+/** Empty string clears the override and falls back to the real name. */
+function parseDisplayNameBody(body: unknown): string {
+  const raw = (body as { displayName?: unknown })?.displayName;
+  const displayName = (typeof raw === "string" ? raw : "").trim();
+  if (displayName.length > 120) throw Object.assign(new Error("Display name too long (max 120 chars)"), { statusCode: 400 });
+  // Control characters would corrupt the sidebar and every log line it lands in.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(displayName)) throw Object.assign(new Error("Display name contains invalid characters"), { statusCode: 400 });
+  return displayName;
+}
+
+function readDisplayName(type: ResourceMetaType, key: string): string {
+  const t = RESOURCE_META_TARGETS[type];
+  const row = db.prepare(`SELECT display_name FROM ${t.table} WHERE ${t.keyColumn} = ?`).get(key) as { display_name: string | null } | undefined;
+  return row?.display_name ?? "";
+}
+
+function writeDisplayName(type: ResourceMetaType, key: string, displayName: string): void {
+  const t = RESOURCE_META_TARGETS[type];
+  const value = displayName === "" ? null : displayName;
+  if (type === "docker") {
+    db.prepare("INSERT INTO docker_containers (container_id, container_name, image, display_name, node_name) VALUES (?, '', '', ?, ?) ON CONFLICT(container_id) DO UPDATE SET display_name = excluded.display_name")
+      .run(key, value, getLocalNodeName());
+    return;
+  }
+  db.prepare(`INSERT INTO ${t.table} (${t.keyColumn}, display_name, node_name) VALUES (?, ?, ?) ON CONFLICT(${t.keyColumn}) DO UPDATE SET display_name = excluded.display_name`)
+    .run(key, value, getLocalNodeName());
+}
+
+function registerDisplayNameRoutes(type: ResourceMetaType, basePath: string, paramName: "name" | "id") {
+  app.get(`${basePath}/display-name`, async (req, reply) => {
+    requireAuth(req, reply);
+    const key = (req.params as Record<string, string>)[paramName];
+    requireResourcePermission(req, type, key, "view");
+    return { displayName: readDisplayName(type, key) };
+  });
+  app.put(`${basePath}/display-name`, async (req, reply) => {
+    requireAuth(req, reply);
+    const key = (req.params as Record<string, string>)[paramName];
+    requireResourcePermission(req, type, key, "modify");
+    const displayName = parseDisplayNameBody(req.body);
+    writeDisplayName(type, key, displayName);
+    auditLog(db, {
+      userId: req.session.userId!,
+      username: req.session.username,
+      ip: getClientIp(req),
+      action: `${type}.displayName.update`,
+      resourceType: type,
+      resourceName: key,
+      details: displayName === "" ? "cleared" : displayName,
+    });
+    return { ok: true, displayName };
+  });
+}
+
+registerDisplayNameRoutes("vm", "/api/vms/:name", "name");
+registerDisplayNameRoutes("lxc", "/api/lxc/:name", "name");
+registerDisplayNameRoutes("docker", "/api/docker/containers/:id", "id");
 
 // ── LXC Routes ─────────────────────────────────────────────────────────────
 app.get("/api/lxc", async (req, reply) => {
@@ -7789,7 +7891,7 @@ app.get("/api/lxc", async (req, reply) => {
   await reconcileResourceMetadata();
   const userId = req.session.userId!;
   const role = req.session.role!;
-  const dbRows = db.prepare("SELECT * FROM lxc_containers").all() as Array<{ container_name: string; user_id: number; description: string | null }>;
+  const dbRows = db.prepare("SELECT * FROM lxc_containers").all() as Array<{ container_name: string; user_id: number; description: string | null; display_name: string | null }>;
   const meta = new Map(dbRows.map((r) => [r.container_name, r]));
   const nodes = enabledResourceNodes();
   const containerLists = await Promise.all(nodes.map(async (node) => {
@@ -7803,7 +7905,7 @@ app.get("/api/lxc", async (req, reply) => {
     const ct = c as Record<string, unknown>;
     const m = meta.get(ct.name as string);
     if (!hasResourcePermission(userId, role, "lxc", ct.name as string, "view")) return null;
-    return { ...ct, userId: m?.user_id, description: m?.description };
+    return { ...ct, userId: m?.user_id, description: m?.description, displayName: m?.display_name ?? undefined };
   }).filter(Boolean);
 });
 
@@ -7840,7 +7942,7 @@ app.get("/api/lxc/:name", async (req, reply) => {
   const info = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}`)
     : { ...(await callRunner("lxc_info", { name })) as object, restartOnCrash: getGuestCrashPolicy(db, "lxc", name) };
-  return { ...(info as object), nodeName: node?.name ?? getLocalNodeName() };
+  return { ...(info as object), nodeName: node?.name ?? getLocalNodeName(), displayName: readDisplayName("lxc", name) || undefined };
 });
 
 app.post("/api/lxc/:name/console-ticket", async (req, reply) => {
@@ -8324,7 +8426,7 @@ app.get("/api/docker/containers", async (req, reply) => {
   await reconcileResourceMetadata();
   const userId = req.session.userId!;
   const role = req.session.role!;
-  const dbRows = db.prepare("SELECT * FROM docker_containers").all() as Array<{ container_id: string; user_id: number }>;
+  const dbRows = db.prepare("SELECT * FROM docker_containers").all() as Array<{ container_id: string; user_id: number; display_name: string | null }>;
   const nodes = enabledResourceNodes();
   const containerLists = await Promise.all(nodes.map(async (node) => {
     try {
@@ -8338,7 +8440,7 @@ app.get("/api/docker/containers", async (req, reply) => {
     const dockerId = ct.id as string;
     const m = dbRows.find((row) => row.container_id === dockerId || row.container_id.startsWith(dockerId) || dockerId.startsWith(row.container_id));
     if (!hasResourcePermission(userId, role, "docker", ct.id as string, "view")) return null;
-    return { ...ct, userId: m?.user_id };
+    return { ...ct, userId: m?.user_id, displayName: m?.display_name ?? undefined };
   }).filter(Boolean);
 });
 
@@ -8366,6 +8468,31 @@ app.post("/api/docker/containers", async (req, reply) => {
     if (targetNode.isLocal) await syncFirewallState();
     return result;
   });
+});
+
+app.post("/api/docker/containers/:id/rename", async (req, reply) => {
+  requireAuth(req, reply);
+  const { id } = req.params as { id: string };
+  const newName = String((req.body as { newName?: unknown })?.newName ?? "").trim();
+  requireResourcePermission(req, "docker", id, "modify");
+  if (!isValidResourceName("docker", newName)) return reply.status(400).send({ error: "Invalid container name" });
+  if (isResourceLocked("docker", id)) return reply.status(423).send({ error: "Ressource verrouillée : déverrouillez-la avant de la renommer." });
+
+  const node = await getResourceNodeAsync("docker", id);
+  // The container id is the stable key, so unlike vm/lxc this returns the id,
+  // not the new name — the caller's URLs and ACL rows stay valid.
+  await renameDesktopResource("docker", node?.name ?? getLocalNodeName(), id, newName);
+  await syncFirewallState();
+  auditLog(db, {
+    userId: req.session.userId,
+    username: req.session.username,
+    ip: getClientIp(req),
+    action: "docker.rename",
+    resourceType: "docker",
+    resourceName: id,
+    details: `${id.slice(0, 12)} -> ${newName}`,
+  });
+  return { ok: true, id, name: newName };
 });
 
 app.post("/api/docker/containers/:id/:action", async (req, reply) => {
@@ -8533,7 +8660,7 @@ app.get("/api/docker/containers/:id", async (req, reply) => {
   const info = node && !node.isLocal
     ? await fetchRemoteNode(node, `/api/internal/docker/containers/${encodeURIComponent(id)}`)
     : await callRunner("docker_inspect", { id });
-  return { ...(info as object), nodeName: node?.name ?? getLocalNodeName() };
+  return { ...(info as object), nodeName: node?.name ?? getLocalNodeName(), displayName: readDisplayName("docker", id) || undefined };
 });
 
 app.post("/api/docker/containers/:id/console-ticket", async (req, reply) => {
@@ -11089,9 +11216,12 @@ async function applyDesktopVmNetworkModel(
 
 /** Build the create-options catalog (nodes/images/networks/defaults) for a type. */
 async function buildDesktopCreateOptions(type: "vm" | "lxc" | "docker"): Promise<import("@auxinux/shared").DesktopCreateOptions> {
+  // n.isLocal only means "the datacenter node this API process happens to run
+  // on" — meaningless to a Desktop Client user, whose own machine is never a
+  // node in the cluster. Don't leak that internal distinction into the label.
   const nodes = listDatacenterNodes()
     .filter((n) => n.enabled)
-    .map((n) => ({ id: n.name, name: n.name, label: n.isLocal ? `${n.name} (local)` : n.name }));
+    .map((n) => ({ id: n.name, name: n.name, label: n.name }));
   const localNode = getLocalNodeName();
 
   type Item = { id: string; name: string; label?: string; type?: string; node?: string };
@@ -11327,6 +11457,8 @@ registerDesktopApi({
 
     if (input.type === "vm") {
       // secureBoot requires UEFI firmware — enabling it implies uefi=true.
+      // arm64 always boots UEFI (mirrors the web wizard's setArch()).
+      const arch = input.architecture ? archToQemu(input.architecture) : undefined;
       const payload = CreateVmSchema.parse({
         name: input.name,
         vcpus: input.cpu ?? 2,
@@ -11336,8 +11468,9 @@ registerDesktopApi({
         os: "linux",
         isoFile: input.image,
         ...(input.network ? { bridge: input.network } : {}),
+        ...(arch ? { arch, machine: arch === "aarch64" ? "virt" : "q35" } : {}),
         ...(input.secureBoot !== undefined ? { secureBoot: input.secureBoot } : {}),
-        ...(input.secureBoot ? { uefi: true } : {}),
+        ...(input.secureBoot || arch === "aarch64" ? { uefi: true } : {}),
         ...(input.tpm2 !== undefined ? { tpmEnabled: input.tpm2 } : {}),
         ...(input.qemuGuestAgent !== undefined ? { qemuAgentEnabled: input.qemuGuestAgent } : {}),
         ...(input.autostart !== undefined ? { autostart: input.autostart } : {}),

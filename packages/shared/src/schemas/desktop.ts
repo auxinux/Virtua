@@ -92,6 +92,7 @@ export const DesktopCreateResourceSchema = z.object({
   disk: z.number().int().min(1).max(65536).optional(),
 
   // VM-specific
+  architecture: z.enum(["arm64", "amd64"]).optional(),
   tpm2: z.boolean().optional(),
   secureBoot: z.boolean().optional(),
   qemuGuestAgent: z.boolean().optional(),

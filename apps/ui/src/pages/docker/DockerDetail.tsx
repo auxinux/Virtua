@@ -6,12 +6,14 @@ import { apiGet, apiPost, apiPut, apiDelete } from "../../api/client";
 import { StatusBadge } from "../../components/ui/Badge";
 import { MetricBar } from "../../components/ui/MetricBar";
 import { NotesCard } from "../../components/NotesCard";
+import { DisplayNameCard } from "../../components/DisplayNameCard";
 import { LockBadge, LockButton, useResourceLock } from "../../components/LockControl";
 import { Tabs } from "../../components/ui/Tabs";
-import { ConfirmModal } from "../../components/ui/Modal";
+import { ConfirmModal, Modal } from "../../components/ui/Modal";
 import { Terminal } from "../../components/Terminal";
 import { ResourceAclPanel } from "../../components/acl/ResourceAclPanel";
 import { formatBytes } from "../../utils/formatBytes";
+import { resourceLabel } from "../../utils/resourceLabel";
 import { useAuth } from "../../utils/useAuth";
 import type { DockerContainerDetail, DockerStats } from "@auxinux/shared";
 
@@ -67,6 +69,9 @@ function DockerSummaryTab({ ct }: { ct: DockerContainerDetail }) {
           <p className="text-sm text-text-500">No volumes</p>
         )}
       </div>
+
+      <DisplayNameCard type="docker" id={ct.id} realName={ct.name} />
+      <NotesCard type="docker" id={ct.id} />
     </div>
   );
 }
@@ -85,7 +90,6 @@ function DockerStatsTab({ id, running }: { id: string; running: boolean }) {
     return (
       <div className="space-y-4">
         <div className="card p-8 text-center text-text-400">{t("console.notRunning")}</div>
-        <NotesCard type="docker" id={id} />
       </div>
     );
   }
@@ -113,7 +117,6 @@ function DockerStatsTab({ id, running }: { id: string; running: boolean }) {
           </div>
         ))}
       </div>
-      <NotesCard type="docker" id={id} />
     </div>
   );
 }
@@ -589,6 +592,8 @@ export default function DockerDetail() {
   const { getResourcePermissions } = useAuth();
   const [tab, setTab] = useState("summary");
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameName, setRenameName] = useState("");
   const perms = useMemo(() => (id ? getResourcePermissions("docker", id) : null), [getResourcePermissions, id]);
   const { locked, lockEntry } = useResourceLock("docker", id);
   const tabs = useMemo(() => [
@@ -619,6 +624,16 @@ export default function DockerDetail() {
   const remove = useMutation({
     mutationFn: () => apiDelete(`/api/docker/containers/${id}`),
     onSuccess: () => navigate("/docker"),
+  });
+
+  const renameDocker = useMutation({
+    mutationFn: (newName: string) => apiPost<{ ok: boolean; id: string; name: string }>(`/api/docker/containers/${id}/rename`, { newName }),
+    onSuccess: () => {
+      setRenameOpen(false);
+      // The container id is unchanged by a rename, so we stay on this route.
+      qc.invalidateQueries({ queryKey: ["docker"] });
+      qc.invalidateQueries({ queryKey: ["sidebar", "docker"] });
+    },
   });
 
   useEffect(() => {
@@ -657,7 +672,7 @@ export default function DockerDetail() {
             </svg>
           </button>
           <div>
-            <h1 className="text-xl font-bold text-text-100">{ct.name}</h1>
+            <h1 className="text-xl font-bold text-text-100">{resourceLabel(ct)}</h1>
             <div className="flex items-center gap-2 mt-0.5">
               <StatusBadge state={ct.state} />
               {locked && <LockBadge reason={lockEntry?.reason} />}
@@ -681,6 +696,16 @@ export default function DockerDetail() {
                 Stop
               </button>
             </>
+          )}
+          {perms?.canModify && (
+            <button
+              onClick={() => { setRenameName(ct.name); setRenameOpen(true); }}
+              disabled={renameDocker.isPending || locked}
+              title={locked ? "Ressource verrouillée" : t("action.rename", "Renommer")}
+              className="btn-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {t("action.rename", "Renommer")}
+            </button>
           )}
           {perms?.canAdmin && <LockButton type="docker" name={id} />}
           {perms?.canDelete && <button onClick={() => setDeleteOpen(true)} disabled={locked} title={locked ? "Ressource verrouillée" : undefined}
@@ -725,6 +750,36 @@ export default function DockerDetail() {
         onCancel={() => setDeleteOpen(false)}
         loading={remove.isPending}
       />
+
+      <Modal open={renameOpen} onClose={() => setRenameOpen(false)} title={t("action.rename", "Renommer")}>
+        <div className="space-y-4">
+          <p className="text-sm text-text-400">
+            {t("modal.renameDockerDesc", "Renomme réellement le conteneur Docker. L'identifiant reste le même, donc les permissions, notes et règles de pare-feu sont conservées. Fonctionne même si le conteneur tourne.")}
+          </p>
+          <div>
+            <label className="block text-xs font-medium text-text-300 mb-1">{t("form.newName", "Nouveau nom")}</label>
+            <input
+              className="input w-full"
+              value={renameName}
+              onChange={(e) => setRenameName(e.target.value)}
+              placeholder={ct.name}
+              autoFocus
+            />
+            <p className="text-xs text-text-500 mt-1">Lettres ou chiffres au début, puis lettres, chiffres, points, tirets ou underscores.</p>
+          </div>
+          {renameDocker.isError && <p className="text-xs text-red-400">{String((renameDocker.error as Error)?.message ?? "Erreur")}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <button className="btn-secondary" onClick={() => setRenameOpen(false)}>{t("action.cancel", "Annuler")}</button>
+            <button
+              className="btn-primary"
+              disabled={!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(renameName.trim()) || renameName.trim() === ct.name || renameDocker.isPending}
+              onClick={() => renameDocker.mutate(renameName.trim())}
+            >
+              {renameDocker.isPending ? t("action.renaming", "Renommage…") : t("action.rename", "Renommer")}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

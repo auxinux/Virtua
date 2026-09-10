@@ -18,6 +18,8 @@ export interface DockerContainer {
   id: string;
   nodeName?: string;
   name: string;
+  /** Optional UI label overriding `name`; does not rename the container. */
+  displayName?: string;
   image: string;
   state: DockerState;
   status?: string;

@@ -6,6 +6,7 @@ import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/Resou
 import { type ContextMenuState } from "@/components/ui/ContextMenu";
 import { useTaskActivity } from "@/hooks/useTaskActivity";
 import type { VdmNode, VdmVm, VdmLxc, VdmDocker, VdmSharedStorage } from "@/types/vdm";
+import { resourceLabel } from "@/lib/resourceLabel";
 
 // Icons as SVG strings
 function Icon({ path, className = "w-4 h-4" }: { path: string; className?: string }) {
@@ -60,8 +61,48 @@ function NavItem({ to, icon, label, count }: { to: string; icon: string; label: 
   );
 }
 
+const TREE_OPEN_PREFIX = "vdm-tree-open:";
+
+/** Remembered across reloads so a folded group stays folded. */
+function usePersistedOpen(storageKey: string, defaultOpen = true) {
+  const [open, setOpen] = useState(() => {
+    const stored = localStorage.getItem(TREE_OPEN_PREFIX + storageKey);
+    return stored === null ? defaultOpen : stored === "1";
+  });
+  const toggle = () => setOpen((previous) => {
+    const next = !previous;
+    localStorage.setItem(TREE_OPEN_PREFIX + storageKey, next ? "1" : "0");
+    return next;
+  });
+  return [open, toggle] as const;
+}
+
+/**
+ * One resource type under a node. These used to be a single flat list, so a
+ * node with many machines buried every node below it with no way to fold it.
+ */
+function TreeGroup({ label, storageKey, count, children }: {
+  label: string; storageKey: string; count: number; children: React.ReactNode;
+}) {
+  const [open, toggle] = usePersistedOpen(storageKey);
+  if (count === 0) return null;
+  return (
+    <div>
+      <button
+        onClick={toggle}
+        className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-[10px] uppercase tracking-wider font-bold text-vdm-textMuted/70 hover:text-vdm-text hover:bg-vdm-surfaceHover transition-colors"
+      >
+        <Icon path={open ? ICONS.chevronDown : ICONS.chevronRight} className="w-3 h-3 flex-shrink-0" />
+        <span className="flex-1 text-left truncate">{label}</span>
+        <span className="tabular-nums">{count}</span>
+      </button>
+      {open && <div className="space-y-0.5">{children}</div>}
+    </div>
+  );
+}
+
 function NodeTreeItem({ node }: { node: VdmNode }) {
-  const [open, setOpen] = useState(true);
+  const [open, toggle] = usePersistedOpen(`node:${node.name}`);
   const [ctxMenu, setCtxMenu] = useState<(ContextMenuState & { resource: ResourceMenuTarget }) | null>(null);
   const navigate = useNavigate();
 
@@ -97,7 +138,7 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
   return (
     <div className="select-none">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         className="flex items-center gap-1.5 w-full px-2 py-1.5 rounded text-sm hover:bg-vdm-surfaceHover text-vdm-text transition-colors"
       >
         <Icon path={open ? ICONS.chevronDown : ICONS.chevronRight} className="w-3 h-3 text-vdm-textMuted flex-shrink-0" />
@@ -108,42 +149,48 @@ function NodeTreeItem({ node }: { node: VdmNode }) {
 
       {open && (
         <div className="ml-4 border-l border-vdm-border/40 pl-2 mt-0.5 space-y-0.5">
-          {vms.map((vm) => (
-            <button
-              key={vm.name}
-              onClick={() => navigate(`/inventory/vm/${node.name}/${encodeURIComponent(vm.name)}`)}
-              onContextMenu={(e) => openCtx(e, { kind: "vm", node: node.name, name: vm.name, displayName: vm.name, state: vm.state })}
-              className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
-            >
-              <Icon path={ICONS.vm} className="w-3 h-3 flex-shrink-0 text-blue-400" />
-              <span className="flex-1 text-left truncate">{vm.name}</span>
-              <StatusDot status={vm.state === "running" ? "running" : "stopped"} />
-            </button>
-          ))}
-          {lxc.map((ct) => (
-            <button
-              key={ct.name}
-              onClick={() => navigate(`/inventory/lxc/${node.name}/${encodeURIComponent(ct.name)}`)}
-              onContextMenu={(e) => openCtx(e, { kind: "lxc", node: node.name, name: ct.name, displayName: ct.name, state: ct.state })}
-              className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
-            >
-              <Icon path={ICONS.container} className="w-3 h-3 flex-shrink-0 text-green-400" />
-              <span className="flex-1 text-left truncate">{ct.name}</span>
-              <StatusDot status={ct.state === "running" ? "running" : "stopped"} />
-            </button>
-          ))}
-          {docker.map((ct) => (
-            <button
-              key={ct.id}
-              onClick={() => navigate(`/inventory/docker/${node.name}/${encodeURIComponent(ct.id)}`)}
-              onContextMenu={(e) => openCtx(e, { kind: "docker", node: node.name, name: ct.id, displayName: ct.name, state: ct.state })}
-              className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
-            >
-              <Icon path={ICONS.docker} className="w-3 h-3 flex-shrink-0 text-cyan-400" />
-              <span className="flex-1 text-left truncate">{ct.name}</span>
-              <StatusDot status={ct.state === "running" ? "running" : "stopped"} />
-            </button>
-          ))}
+          <TreeGroup label="VMs" storageKey={`${node.name}:vms`} count={vms.length}>
+            {vms.map((vm) => (
+              <button
+                key={vm.name}
+                onClick={() => navigate(`/inventory/vm/${node.name}/${encodeURIComponent(vm.name)}`)}
+                onContextMenu={(e) => openCtx(e, { kind: "vm", node: node.name, name: vm.name, displayName: resourceLabel(vm), state: vm.state })}
+                className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
+              >
+                <Icon path={ICONS.vm} className="w-3 h-3 flex-shrink-0 text-blue-400" />
+                <span className="flex-1 text-left truncate">{resourceLabel(vm)}</span>
+                <StatusDot status={vm.state === "running" ? "running" : "stopped"} />
+              </button>
+            ))}
+          </TreeGroup>
+          <TreeGroup label="LXC" storageKey={`${node.name}:lxc`} count={lxc.length}>
+            {lxc.map((ct) => (
+              <button
+                key={ct.name}
+                onClick={() => navigate(`/inventory/lxc/${node.name}/${encodeURIComponent(ct.name)}`)}
+                onContextMenu={(e) => openCtx(e, { kind: "lxc", node: node.name, name: ct.name, displayName: resourceLabel(ct), state: ct.state })}
+                className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
+              >
+                <Icon path={ICONS.container} className="w-3 h-3 flex-shrink-0 text-green-400" />
+                <span className="flex-1 text-left truncate">{resourceLabel(ct)}</span>
+                <StatusDot status={ct.state === "running" ? "running" : "stopped"} />
+              </button>
+            ))}
+          </TreeGroup>
+          <TreeGroup label="Docker" storageKey={`${node.name}:docker`} count={docker.length}>
+            {docker.map((ct) => (
+              <button
+                key={ct.id}
+                onClick={() => navigate(`/inventory/docker/${node.name}/${encodeURIComponent(ct.id)}`)}
+                onContextMenu={(e) => openCtx(e, { kind: "docker", node: node.name, name: ct.id, displayName: resourceLabel(ct), state: ct.state })}
+                className="flex items-center gap-1.5 w-full px-2 py-1 rounded text-xs hover:bg-vdm-surfaceHover text-vdm-textMuted hover:text-vdm-text transition-colors"
+              >
+                <Icon path={ICONS.docker} className="w-3 h-3 flex-shrink-0 text-cyan-400" />
+                <span className="flex-1 text-left truncate">{resourceLabel(ct)}</span>
+                <StatusDot status={ct.state === "running" ? "running" : "stopped"} />
+              </button>
+            ))}
+          </TreeGroup>
           {node.status === "online" && vms.length === 0 && lxc.length === 0 && docker.length === 0 && (
             <p className="px-2 py-1 text-xs text-vdm-textMuted/60 italic">No resources</p>
           )}

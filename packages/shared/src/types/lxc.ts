@@ -2,6 +2,8 @@ export type LxcState = "running" | "stopped" | "frozen" | "unknown";
 
 export interface LxcContainer {
   name: string;
+  /** Optional UI label overriding `name`; does not rename the container. */
+  displayName?: string;
   nodeName?: string;
   state: LxcState;
   cpus: number;
