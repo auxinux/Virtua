@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/runner.ts",
-    "start": "node dist/runner.js"
+    "start": "node dist/runner.js",
+    "test": "vitest run src"
   },
   "dependencies": {
     "@auxinux/shared": "*"

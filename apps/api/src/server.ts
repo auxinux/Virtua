@@ -2328,6 +2328,11 @@ async function getApiLibvirtQemuIdentity(): Promise<{ uid: number; gid: number }
 
 async function ensureLibvirtManagedFileAccess(filePath: string, type: ManagedFileType): Promise<void> {
   if (type !== "iso" && type !== "vm_disk") return;
+  // Never change owners or modes inside a container filesystem. The runner's
+  // lxcRootfsGuard.ts does the full check; uploads only need the naming rule.
+  if (path.resolve(filePath).split(path.sep).some((part) => part === "rootfs" || part.startsWith("rootfs."))) {
+    throw new Error(`Refusing to change permissions on ${filePath}: inside an LXC rootfs`);
+  }
 
   const dirPath = path.dirname(filePath);
   await fs.promises.mkdir(dirPath, { recursive: true });
@@ -5049,6 +5054,11 @@ app.get("/api/internal/system/updates", async (req, reply) => {
   return callRunner("system_updates");
 });
 
+app.get("/api/internal/system/lxc-rootfs-audit", async (req, reply) => {
+  requireInternalNodeToken(req);
+  return callRunner("lxc_rootfs_permission_audit", lxcRootfsAuditParams());
+});
+
 app.get("/api/internal/settings", async (req, reply) => {
   requireInternalNodeToken(req);
   const rows = db.prepare("SELECT key, value FROM settings").all() as Array<{ key: string; value: string }>;
@@ -6438,6 +6448,16 @@ app.get("/api/nodes/:name/system/services", async (req, reply) => {
   return node.isLocal ? callRunner("system_services") : fetchRemoteNode(node, "/api/internal/system/services");
 });
 
+app.get("/api/nodes/:name/system/lxc-rootfs-audit", async (req, reply) => {
+  requireUiSection(req, "datacenter");
+  const { name } = req.params as { name: string };
+  const node = listDatacenterNodes().find((entry) => entry.name === name);
+  if (!node) return reply.status(404).send({ error: "Node not found" });
+  return node.isLocal
+    ? callRunner("lxc_rootfs_permission_audit", lxcRootfsAuditParams())
+    : fetchRemoteNode(node, "/api/internal/system/lxc-rootfs-audit");
+});
+
 app.get("/api/nodes/:name/system/updates", async (req, reply) => {
   requireUiSection(req, "datacenter");
   const { name } = req.params as { name: string };
@@ -6767,6 +6787,19 @@ app.get("/api/system/services", async (req, reply) => {
 app.get("/api/system/updates", async (req, reply) => {
   requireUiSection(req, "health");
   return callRunner("system_updates");
+});
+
+// Containers whose rootfs carries the recursive permission damage of the
+// Virtua <= 0.8.2 installer. Detection only (runner lxcRootfsGuard.ts). Only
+// local directory pools are scanned: listing a dead network mount can hang.
+function lxcRootfsAuditParams() {
+  const pools = db.prepare("SELECT path FROM storage_pools WHERE type = 'directory'").all() as Array<{ path: string }>;
+  return { poolPaths: pools.map((pool) => pool.path) };
+}
+
+app.get("/api/system/lxc-rootfs-audit", async (req, reply) => {
+  requireUiSection(req, "health");
+  return callRunner("lxc_rootfs_permission_audit", lxcRootfsAuditParams());
 });
 
 app.get("/api/system/reboot-safety", async (req, reply) => {

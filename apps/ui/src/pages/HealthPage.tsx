@@ -4,12 +4,13 @@ import { useTranslation } from "react-i18next";
 import { apiGet } from "../api/client";
 import { Modal } from "../components/ui/Modal";
 import { Terminal } from "../components/Terminal";
-import type { AptUpdateStatus, HostServiceStatus } from "@auxinux/shared";
+import type { AptUpdateStatus, HostServiceStatus, LxcRootfsAuditReport } from "@auxinux/shared";
 
 interface HealthPageProps {
   servicesPath?: string;
   updatesPath?: string;
   ticketPath?: string;
+  lxcAuditPath?: string;
   title?: string;
   subtitle?: string;
 }
@@ -18,6 +19,7 @@ export default function HealthPage({
   servicesPath = "/api/system/services",
   updatesPath = "/api/system/updates",
   ticketPath = "/api/system/host/console-ticket",
+  lxcAuditPath = "/api/system/lxc-rootfs-audit",
   title,
   subtitle,
 }: HealthPageProps) {
@@ -37,6 +39,14 @@ export default function HealthPage({
     refetchInterval: 60_000,
   });
 
+  // Older remote nodes lack the endpoint: the query just fails and nothing shows.
+  const { data: lxcAudit } = useQuery<LxcRootfsAuditReport>({
+    queryKey: ["health", "lxc-rootfs-audit", lxcAuditPath],
+    queryFn: () => apiGet<LxcRootfsAuditReport>(lxcAuditPath),
+    refetchInterval: 10 * 60_000,
+    retry: false,
+  });
+
   const counts = useMemo(() => ({
     failed: services.filter((service) => service.status === "failed").length,
     running: services.filter((service) => service.status === "running").length,
@@ -50,6 +60,8 @@ export default function HealthPage({
           <p className="text-sm text-text-500">{subtitle ?? t("health.subtitle")}</p>
         </div>
       </div>
+
+      {lxcAudit && lxcAudit.affected.length > 0 && <LxcRootfsAuditCard report={lxcAudit} />}
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="card p-4">
@@ -169,6 +181,42 @@ export default function HealthPage({
           </div>
         )}
       </Modal>
+    </div>
+  );
+}
+
+/**
+ * Containers damaged by the pre-0.8.3 installer. Detection only, on purpose:
+ * the original owners and modes are gone, so there is no safe repair button.
+ */
+function LxcRootfsAuditCard({ report }: { report: LxcRootfsAuditReport }) {
+  const { t } = useTranslation();
+  return (
+    <div className="card p-4 border-l-4 border-l-red-500 space-y-3">
+      <h2 className="text-sm font-semibold text-red-400">{t("health.lxcAuditTitle")} ({report.affected.length})</h2>
+      <p className="text-sm text-text-300">{t("health.lxcAuditIntro")}</p>
+      <p className="text-sm text-text-300">{t("health.lxcAuditAdvice")}</p>
+      <div className="space-y-2">
+        {report.affected.map((entry) => (
+          <div key={entry.rootfsPath} className="rounded bg-surface-700 px-3 py-2">
+            <div className="text-sm font-medium text-text-200">
+              {entry.container}
+              {entry.snapshot && <span className="text-text-400"> · {t("health.lxcAuditSnapshot", { name: entry.snapshot })}</span>}
+              {entry.unregistered && <span className="text-text-400"> · {t("health.lxcAuditUnregistered")}</span>}
+            </div>
+            <div className="text-xs font-mono text-text-500">{entry.rootfsPath}</div>
+            <ul className="mt-1 space-y-0.5 text-xs text-text-300">
+              {entry.issues.map((issue) => (
+                <li key={`${issue.code}:${issue.path}`}>
+                  <span className="font-mono text-text-200">{issue.path}</span>
+                  {" — "}
+                  {t(`health.lxcIssue.${issue.code}`, { mode: issue.mode, gid: issue.gid, group: report.qemuGroup ?? "libvirt-qemu" })}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

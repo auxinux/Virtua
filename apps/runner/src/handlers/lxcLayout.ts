@@ -22,6 +22,9 @@ export function buildBackupTarArgs(containerDir: string, externalRootfs?: string
   return [
     "--warning=no-file-changed",
     "--warning=no-file-removed",
+    // Container uids/gids only mean something as numbers: stored as names they
+    // would be remapped through the host's /etc/passwd on restore.
+    "--numeric-owner",
     "-cf",
     "-",
     "-C", path.dirname(containerDir), path.basename(containerDir),

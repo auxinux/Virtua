@@ -6,6 +6,7 @@ import * as path from "path";
 import { parseVirtuaConfig, isUnsafeArchivePath } from "@auxinux/shared";
 import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, decompressorFor, runTarPipeline } from "./compression.js";
 import type { ProgressEmitter } from "../runner.js";
+import { assertOutsideLxcRootfs, isProtectedHostDir } from "./lxcRootfsGuard.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -170,6 +171,7 @@ async function getLibvirtQemuIdentity(): Promise<{ uid: number; gid: number } | 
 }
 
 async function ensureLibvirtStorageDir(dirPath: string): Promise<void> {
+  await assertOutsideLxcRootfs(dirPath, "VM storage permissions");
   await fs.mkdir(dirPath, { recursive: true });
   const dataDir = process.env.AUXINUX_DATA_DIR ?? "/var/lib/auxinuxvirtual";
   if (dirPath === dataDir || dirPath.startsWith(`${dataDir}${path.sep}`)) {
@@ -179,6 +181,9 @@ async function ensureLibvirtStorageDir(dirPath: string): Promise<void> {
     await fs.chmod(dataDir, 0o711).catch(() => {});
     await fs.chmod(path.join(dataDir, "pools"), 0o755).catch(() => {});
   }
+  // A disk attached from /dev (or any system directory) must not turn that
+  // directory into root:libvirt-qemu 2775.
+  if (isProtectedHostDir(dirPath)) return;
   const identity = await getLibvirtQemuIdentity();
   if (identity) {
     await fs.chown(dirPath, 0, identity.gid).catch(() => {});
@@ -190,6 +195,7 @@ async function ensureLibvirtStorageDir(dirPath: string): Promise<void> {
 }
 
 async function ensureLibvirtDiskAccess(filePath: string): Promise<void> {
+  await assertOutsideLxcRootfs(filePath, "VM disk permissions");
   await ensureLibvirtStorageDir(path.dirname(filePath));
   const identity = await getLibvirtQemuIdentity();
   if (identity) {

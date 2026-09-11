@@ -137,6 +137,7 @@ export default function NodeOverviewPage() {
         <HealthPage
           servicesPath={data.node.isLocal ? "/api/system/services" : `/api/nodes/${encodeURIComponent(name)}/system/services`}
           updatesPath={data.node.isLocal ? "/api/system/updates" : `/api/nodes/${encodeURIComponent(name)}/system/updates`}
+          lxcAuditPath={data.node.isLocal ? "/api/system/lxc-rootfs-audit" : `/api/nodes/${encodeURIComponent(name)}/system/lxc-rootfs-audit`}
           ticketPath={data.node.isLocal ? "/api/system/host/console-ticket" : `/api/nodes/${encodeURIComponent(name)}/host/console-ticket`}
           title={data.node.isLocal ? t("node.health") : `${t("node.health")} · ${nodeLabel}`}
           subtitle={data.node.isLocal ? t("health.subtitle") : `${t("node.remoteNodeHint")} · ${nodeLabel}`}

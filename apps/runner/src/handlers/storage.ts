@@ -3,6 +3,7 @@ import { promisify } from "util";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { probePoolAlive } from "./storageLiveness";
+import { assertOutsideLxcRootfs, isProtectedHostDir } from "./lxcRootfsGuard";
 
 const execFileAsync = promisify(execFile);
 
@@ -140,6 +141,10 @@ async function withPoolOpLock<T>(poolPath: string, fn: () => Promise<T>): Promis
 }
 
 async function ensureLibvirtPoolAccess(poolPath: string): Promise<void> {
+  // A pool never sits inside a container filesystem: its directory is about to
+  // become root:libvirt-qemu 2775. Bounded like the mkdir below, since the
+  // check stats the path.
+  await withTimeout(assertOutsideLxcRootfs(poolPath, "storage pool permissions"), 15_000, `LXC rootfs check ${poolPath}`);
   // Bound the mkdir: on a wedged FUSE connection the syscall can block in
   // uninterruptible sleep and pin the runner for the full 120s API timeout.
   await withTimeout(fs.mkdir(poolPath, { recursive: true }), 15_000, `mkdir ${poolPath}`);
@@ -148,6 +153,7 @@ async function ensureLibvirtPoolAccess(poolPath: string): Promise<void> {
     await fs.chmod(dataDir, 0o711).catch(() => {});
     await fs.chmod(path.join(dataDir, "pools"), 0o755).catch(() => {});
   }
+  if (isProtectedHostDir(poolPath)) return;
   const gid = await getLibvirtQemuGroup();
   if (gid !== null) {
     await fs.chown(poolPath, 0, gid).catch(() => {});

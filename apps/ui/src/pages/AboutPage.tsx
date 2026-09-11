@@ -12,6 +12,30 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.3",
+      items: fr
+        ? [
+            "Correctif critique LXC : Virtua ne modifie plus récursivement les permissions des systèmes de fichiers internes des conteneurs lorsqu'il normalise les permissions des pools de stockage.",
+            "Cause : à chaque installation, mise à jour (apt upgrade) ou réparation, l'installateur appliquait `chown -R root:root` et `chmod -R 0755` à tout /var/lib/auxinuxvirtual, puis `root:libvirt-qemu` en mode 2775 à chaque répertoire des pools — y compris dans le rootfs des conteneurs créés sur un pool (d'où `sudo: /etc/sudoers.d is owned by gid 64055`).",
+            "Protection : seuls la racine des pools, les pools et les répertoires menant à un disque de VM reçoivent désormais `root:libvirt-qemu` 2775. Tout rootfs LXC (nommé `rootfs`, déclaré dans une configuration LXC, ou ayant la forme d'une racine Linux) est exclu, et le runner refuse toute modification de permissions à l'intérieur d'un rootfs.",
+            "Détection : les conteneurs et snapshots Virtua qui portent ces traces sont signalés dans le journal d'installation, le journal du runner et la page Santé. Rien n'est réparé automatiquement, car les propriétaires et modes d'origine ne sont plus connus : restaurez depuis une sauvegarde antérieure aux dégâts.",
+            "Correctif critique : `install.sh -reset`, `-clean` et la reprise automatique après une installation interrompue supprimaient tout /var/lib/auxinuxvirtual, pools compris (disques de VM, rootfs LXC, sauvegardes, snapshots). Ils conservent maintenant pools/, snapshots/, images/, templates/ et compose/, comme l'annonçait l'aide.",
+            "VM : attacher un disque existant ne transforme plus son répertoire (par exemple /dev) en `root:libvirt-qemu` 2775, et un chemin situé dans un rootfs LXC est refusé.",
+            "Sauvegardes LXC : l'archive enregistre les propriétaires sous forme numérique et la restauration les applique tels quels, au lieu de les faire passer par les noms d'utilisateurs de l'hôte.",
+            "Les clés privées SSL laissées lisibles (0755) par l'ancien chmod récursif retrouvent le mode 0600.",
+          ]
+        : [
+            "Critical LXC fix: Virtua no longer recursively modifies container filesystem permissions while normalizing storage pool permissions.",
+            "Cause: on every install, update (apt upgrade) or repair, the installer ran `chown -R root:root` and `chmod -R 0755` over all of /var/lib/auxinuxvirtual, then gave `root:libvirt-qemu` mode 2775 to every directory in the pools — including inside the rootfs of containers created on a pool (hence `sudo: /etc/sudoers.d is owned by gid 64055`).",
+            "Protection: only the pools root, the pools and the directories leading to a VM disk now get `root:libvirt-qemu` 2775. Every LXC rootfs (named `rootfs`, declared in an LXC config, or shaped like a Linux root) is excluded, and the runner refuses any permission change inside a rootfs.",
+            "Detection: containers and Virtua snapshots carrying those traces are reported in the install log, the runner journal and the Health page. Nothing is repaired automatically, since the original owners and modes are no longer known: restore from a backup taken before the damage.",
+            "Critical fix: `install.sh -reset`, `-clean` and the automatic recovery after an interrupted install deleted all of /var/lib/auxinuxvirtual, pools included (VM disks, LXC root filesystems, backups, snapshots). They now keep pools/, snapshots/, images/, templates/ and compose/, as the help always said.",
+            "VMs: attaching an existing disk no longer turns its directory (for example /dev) into `root:libvirt-qemu` 2775, and a path inside an LXC rootfs is refused.",
+            "LXC backups: the archive stores owners numerically and restore applies them as-is, instead of mapping them through the host's user names.",
+            "SSL private keys left readable (0755) by the old recursive chmod are back to 0600.",
+          ],
+    },
+    {
       v: "0.8.2",
       items: fr
         ? [

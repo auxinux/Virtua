@@ -9,6 +9,7 @@ import * as path from "path";
 import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, decompressorFor, runTarPipeline } from "./compression.js";
 import type { ProgressEmitter } from "../runner.js";
 import { isExternalRootfs, buildBackupTarArgs, checkSnapshotRestorable } from "./lxcLayout.js";
+import { auditLxcRootfsPermissions } from "./lxcRootfsGuard.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +24,39 @@ const LXC_SNAPSHOT_DIR = process.env.LXC_SNAPSHOT_DIR ?? path.join(path.dirname(
 const LXC_MANUAL_SNAPSHOT_DIR = process.env.LXC_MANUAL_SNAPSHOT_DIR ?? path.join(AUXINUX_DATA_DIR, "snapshots", "lxc");
 const LXC_SNAPSHOT_MODE = (process.env.LXC_SNAPSHOT_MODE ?? "manual").toLowerCase();
 const STABLE_USB_DIR = path.join(AUXINUX_DATA_DIR, "usb");
+
+/**
+ * Containers whose rootfs carries the recursive permission damage of the
+ * Virtua <= 0.8.2 installer. Detection only (see lxcRootfsGuard.ts). Always
+ * covers the default pools; the API adds the local pools it knows about.
+ */
+async function runLxcRootfsAudit(poolPaths?: unknown) {
+  const requested = Array.isArray(poolPaths)
+    ? poolPaths.filter((entry): entry is string => typeof entry === "string" && path.isAbsolute(entry))
+    : [];
+  const poolsRoot = path.join(AUXINUX_DATA_DIR, "pools");
+  const defaultPools = await fs.readdir(poolsRoot, { withFileTypes: true })
+    .then((entries) => entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(poolsRoot, entry.name)))
+    .catch(() => [] as string[]);
+  return auditLxcRootfsPermissions({
+    lxcDir: LXC_DIR,
+    snapshotDir: LXC_MANUAL_SNAPSHOT_DIR,
+    poolPaths: [...new Set([...defaultPools, ...requested])],
+  });
+}
+
+/** Journal warning at runner start for every container the audit flags. */
+export async function logLxcRootfsAudit(): Promise<void> {
+  const report = await runLxcRootfsAudit();
+  for (const entry of report.affected) {
+    const subject = entry.snapshot ? `snapshot ${entry.snapshot} of ${entry.container}` : entry.container;
+    const traces = entry.issues.map((issue) => `${issue.path} ${issue.code}`).join(", ");
+    console.warn(
+      `[runner] LXC ${subject}: ${entry.rootfsPath} shows permission damage from Virtua 0.8.2 or earlier (${traces}). ` +
+      "Not repaired automatically: restore it from a backup taken before the damage. See Health in the Virtua UI.",
+    );
+  }
+}
 
 interface LxcTemplateSpec {
   dist: string;
@@ -65,6 +99,7 @@ export async function handleLxc(action: string, params: unknown, emit?: Progress
   const p = params as Record<string, unknown>;
   switch (action) {
     case "lxc_containers": return listContainers();
+    case "lxc_rootfs_permission_audit": return runLxcRootfsAudit(p?.poolPaths);
     case "lxc_create": return createContainer(p);
     case "lxc_delete": return deleteContainer(p.name as string);
     case "lxc_action": return containerAction(p.name as string, p.action as string);
@@ -2774,7 +2809,9 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
 
   try {
     // Decompress by extension so both legacy .tar.gz and new .tar.zst restore.
-    await execFileAsync("tar", ["--use-compress-program", decompressorFor(sourcePath), "-xf", sourcePath, "-C", tempDir]);
+    // --numeric-owner: container uids/gids come from the archive as-is, never
+    // through the host's user names (older archives store names).
+    await execFileAsync("tar", ["--use-compress-program", decompressorFor(sourcePath), "--numeric-owner", "-xf", sourcePath, "-C", tempDir]);
     // Prefer a top-level "<container>/config": the recursive search below would
     // otherwise happily match something like rootfs/etc/config and treat a
     // guest directory as the container definition.

@@ -1,7 +1,7 @@
 import * as net from "net";
 import * as fs from "fs";
 import { handleDocker } from "./handlers/docker";
-import { handleLxc } from "./handlers/lxc";
+import { handleLxc, logLxcRootfsAudit } from "./handlers/lxc";
 import { handleQemu } from "./handlers/qemu";
 import { handleStorage } from "./handlers/storage";
 import { handleNetwork } from "./handlers/network";
@@ -101,3 +101,8 @@ function startServer() {
 }
 
 startServer();
+
+// Surface, in the journal, containers damaged by the pre-0.8.3 installer.
+logLxcRootfsAudit().catch((err) => {
+  console.error("[runner] LXC rootfs audit failed:", err instanceof Error ? err.message : err);
+});

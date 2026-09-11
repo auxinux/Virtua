@@ -19,7 +19,7 @@ describe("buildBackupTarArgs", () => {
   it("archives only the container directory in the classic layout", () => {
     const args = buildBackupTarArgs("/var/lib/lxc/web");
     expect(args).toEqual([
-      "--warning=no-file-changed", "--warning=no-file-removed", "-cf", "-",
+      "--warning=no-file-changed", "--warning=no-file-removed", "--numeric-owner", "-cf", "-",
       "-C", "/var/lib/lxc", "web",
     ]);
   });
@@ -29,10 +29,16 @@ describe("buildBackupTarArgs", () => {
   it("also archives a relocated rootfs as a sibling member", () => {
     const args = buildBackupTarArgs("/var/lib/lxc/web", "/srv/pool/web/rootfs");
     expect(args).toEqual([
-      "--warning=no-file-changed", "--warning=no-file-removed", "-cf", "-",
+      "--warning=no-file-changed", "--warning=no-file-removed", "--numeric-owner", "-cf", "-",
       "-C", "/var/lib/lxc", "web",
       "-C", "/srv/pool/web", "rootfs",
     ]);
+  });
+
+  // Stored as host user names, container uids would be remapped on restore
+  // (container uid 105 archived as the host's "systemd-timesync", say).
+  it("stores numeric owners so a restore never remaps container uids", () => {
+    expect(buildBackupTarArgs("/var/lib/lxc/web")).toContain("--numeric-owner");
   });
 
   it("never emits absolute members, so the archive stays self-describing", () => {

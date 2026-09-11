@@ -71,9 +71,17 @@ REQUIRED_RELEASE_FILES=(
     "apps/vdm-ui/src/App.tsx"
     "INSTALL/vdm-install.sh"
     "INSTALL/vdm-ha-agent"
+    "INSTALL/storage-permissions.sh"
     "lang/FR.json"
     "lang/EN.json"
 )
+
+# LXC-safe storage permission helpers. Without them the installer must not
+# touch pool permissions at all, so a missing file stops here.
+[[ -f "$INSTALL_DIR/INSTALL/storage-permissions.sh" ]] \
+    || error "Missing $INSTALL_DIR/INSTALL/storage-permissions.sh. Recreate the archive with INSTALL/release.sh and rerun install.sh."
+# shellcheck source=storage-permissions.sh
+source "$INSTALL_DIR/INSTALL/storage-permissions.sh"
 
 export DEBIAN_FRONTEND=noninteractive
 # DPkg::Lock::Timeout lets apt WAIT for the dpkg lock instead of failing — this
@@ -111,8 +119,10 @@ Automatic recovery:
 
 Notes:
   - reset/clean do NOT remove the Debian OS itself.
-  - reset/clean do NOT delete existing QEMU VM disks, LXC containers, or Docker containers.
-  - reset/clean DO remove AuxiNux portal data under /var/lib/auxinuxvirtual and panel runtime files.
+  - reset/clean do NOT delete existing QEMU VM disks, LXC containers, or Docker containers:
+    pools/, snapshots/, images/, templates/ and compose/ under /var/lib/auxinuxvirtual are kept.
+  - reset/clean DO remove AuxiNux portal data (database, SSL, settings) under
+    /var/lib/auxinuxvirtual and panel runtime files.
 EOF
 }
 
@@ -992,7 +1002,7 @@ reset_portal_state() {
     backup_file_if_exists /etc/systemd/system/auxinuxvirtual-runner.service
     backup_file_if_exists /etc/systemd/system/auxinuxvirtual-api.service
 
-    remove_path_if_exists "$AUXINUX_DATA_DIR"
+    virtua_remove_portal_data "$AUXINUX_DATA_DIR"
     remove_path_if_exists "$INSTALL_DIR/apps/api/.env"
     remove_path_if_exists /etc/systemd/system/auxinuxvirtual-runner.service
     remove_path_if_exists /etc/systemd/system/auxinuxvirtual-api.service
@@ -1014,7 +1024,7 @@ clean_full_wipe() {
     systemctl reset-failed auxinuxvirtual-runner 2>/dev/null || true
 
     # Portal data, env, systemd units.
-    remove_path_if_exists "$AUXINUX_DATA_DIR"
+    virtua_remove_portal_data "$AUXINUX_DATA_DIR"
     remove_path_if_exists "$INSTALL_DIR/apps/api/.env"
     remove_path_if_exists /etc/systemd/system/auxinuxvirtual-runner.service
     remove_path_if_exists /etc/systemd/system/auxinuxvirtual-api.service
@@ -1069,7 +1079,7 @@ auto_recover_from_failed_install() {
     step "Detected incomplete previous install — auto-recovery"
     warn "Found AuxiNux systemd units but no completion marker at ${INSTALL_COMPLETION_MARKER}."
     warn "Running a full wipe to remove stale binaries / .env / units before reinstalling."
-    warn "Existing /var/lib/auxinuxvirtual data will be erased (VMs/containers themselves are untouched)."
+    warn "Portal data under ${AUXINUX_DATA_DIR} will be erased; pools, snapshots, images, templates and compose projects are kept."
     clean_full_wipe
 }
 
@@ -1525,67 +1535,43 @@ configure_service_user() {
 create_data_dirs() {
     step "Create data directories"
 
-    local dirs=(
-        "$AUXINUX_DATA_DIR"
-        "$AUXINUX_DATA_DIR/pools/local"
-        "$AUXINUX_DATA_DIR/pools/isos"
-        "$AUXINUX_DATA_DIR/pools/backups"
-        "$AUXINUX_DATA_DIR/templates/lxc"
-        "$AUXINUX_DATA_DIR/templates/docker"
-        "$AUXINUX_DATA_DIR/images/vm-disks"
-        "$AUXINUX_DATA_DIR/db"
+    # Owner and mode are set on each Virtua directory, never recursively: pools
+    # and snapshots hold LXC root filesystems (INSTALL/storage-permissions.sh).
+    virtua_prepare_data_dirs "$AUXINUX_DATA_DIR" \
+        "$AUXINUX_DATA_DIR/templates" \
+        "$AUXINUX_DATA_DIR/templates/lxc" \
+        "$AUXINUX_DATA_DIR/templates/docker" \
+        "$AUXINUX_DATA_DIR/images" \
+        "$AUXINUX_DATA_DIR/images/vm-disks" \
+        "$AUXINUX_DATA_DIR/db" \
         "$AUXINUX_DATA_DIR/ssl"
-        "/var/lib/libvirt/images"
-        "/var/lib/libvirt/images/isos"
-        "/var/lib/lxc"
-    )
-
-    install -d -m 0755 "${dirs[@]}"
-    chown -R root:root "$AUXINUX_DATA_DIR"
-    chmod -R 0755 "$AUXINUX_DATA_DIR"
-    chmod 0711 "$AUXINUX_DATA_DIR"
+    # Pool directories get their QEMU-facing modes from fix_libvirt_storage_permissions.
+    mkdir -p "$AUXINUX_DATA_DIR/pools/local" "$AUXINUX_DATA_DIR/pools/isos" "$AUXINUX_DATA_DIR/pools/backups"
+    install -d -m 0755 /var/lib/libvirt/images /var/lib/libvirt/images/isos /var/lib/lxc
     fix_libvirt_storage_permissions
+    virtua_report_damaged_lxc_rootfs "$AUXINUX_DATA_DIR/pools" "$AUXINUX_DATA_DIR/snapshots/lxc"
     success "Data directories are ready"
 }
 
 fix_libvirt_storage_permissions() {
-    local qemu_user="" qemu_group=""
     local qemu_isos_dir="${QEMU_ISOS_DIR:-/var/lib/libvirt/images/isos}"
     local qemu_images_dir
     qemu_images_dir="$(dirname "$qemu_isos_dir")"
 
-    if id libvirt-qemu >/dev/null 2>&1; then
-        qemu_user="libvirt-qemu"
-        qemu_group="libvirt-qemu"
-    elif id qemu >/dev/null 2>&1; then
-        qemu_user="qemu"
-        qemu_group="qemu"
-    fi
-
-    if [[ -n "$qemu_group" ]]; then
-        chown root:root "$AUXINUX_DATA_DIR" 2>/dev/null || true
-        chmod 0711 "$AUXINUX_DATA_DIR" 2>/dev/null || true
-        find "$AUXINUX_DATA_DIR/pools" -type d -exec chown root:"$qemu_group" {} \; -exec chmod 2775 {} \; 2>/dev/null || true
-    else
-        chmod 0711 "$AUXINUX_DATA_DIR" 2>/dev/null || true
-        find "$AUXINUX_DATA_DIR/pools" -type d -exec chmod 0755 {} \; 2>/dev/null || true
-    fi
-
-    if [[ -n "$qemu_user" ]]; then
-        find "$AUXINUX_DATA_DIR/pools" -type f \( -iname '*.qcow2' -o -iname '*.img' -o -iname '*.raw' -o -iname '*.vmdk' \) \
-            -exec chown "$qemu_user:$qemu_group" {} \; -exec chmod 0660 {} \; 2>/dev/null || true
-    else
-        find "$AUXINUX_DATA_DIR/pools" -type f \( -iname '*.qcow2' -o -iname '*.img' -o -iname '*.raw' -o -iname '*.vmdk' \) \
-            -exec chmod 0666 {} \; 2>/dev/null || true
-    fi
+    virtua_detect_qemu_identity
+    chown root:root "$AUXINUX_DATA_DIR" 2>/dev/null || true
+    chmod 0711 "$AUXINUX_DATA_DIR" 2>/dev/null || true
+    # Pools root, pool directories, disk images and the directories holding
+    # them — pruning every LXC rootfs. Never a recursive find/chown here.
+    virtua_fix_pool_permissions "$AUXINUX_DATA_DIR/pools"
 
     install -d -m 0755 "$qemu_images_dir" "$qemu_isos_dir" 2>/dev/null || true
     chown root:root "$qemu_images_dir" "$qemu_isos_dir" 2>/dev/null || true
     chmod 0755 "$qemu_images_dir" "$qemu_isos_dir" 2>/dev/null || true
 
-    if [[ -n "$qemu_user" ]]; then
+    if [[ -n "$VIRTUA_QEMU_USER" ]]; then
         find "$qemu_isos_dir" -type f \( -iname '*.iso' -o -iname '*.img' \) \
-            -exec chown "$qemu_user:$qemu_group" {} \; -exec chmod 0640 {} \; 2>/dev/null || true
+            -exec chown "$VIRTUA_QEMU_USER:$VIRTUA_QEMU_GROUP" {} \; -exec chmod 0640 {} \; 2>/dev/null || true
     else
         find "$qemu_isos_dir" -type f \( -iname '*.iso' -o -iname '*.img' \) \
             -exec chmod 0644 {} \; 2>/dev/null || true
