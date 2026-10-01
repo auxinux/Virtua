@@ -231,6 +231,27 @@ fn detect_accelerator(guest: &str) -> String {
     }
 }
 
+/// `-device help` of the QEMU for `arch`, probed once: a device model's
+/// availability depends on the QEMU build (upstream vs UTM's fork).
+static DEVICES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+pub fn qemu_has_device(arch: &str, device: &str) -> bool {
+    let cached = DEVICES
+        .lock()
+        .ok()
+        .and_then(|cache| cache.as_ref().and_then(|map| map.get(arch)).cloned());
+    let list = cached.unwrap_or_else(|| {
+        let list = probe(qemu_system_binary(arch), &["-device", "help"]).unwrap_or_default();
+        if let Ok(mut cache) = DEVICES.lock() {
+            cache
+                .get_or_insert_with(HashMap::new)
+                .insert(arch.to_string(), list.clone());
+        }
+        list
+    });
+    list.contains(&format!("\"{}\"", device))
+}
+
 /// Resolving a binary walks ~30 directories; on Windows, with Defender in the
 /// path, doing that several times per UI refresh was measurable. Cache it, and
 /// forget everything after an engine installation changed the machine.
@@ -257,6 +278,9 @@ pub fn resolve(binary: &str) -> Option<String> {
 /// Forget the cached probes after an engine installation changed the machine.
 pub fn forget_caches() {
     if let Ok(mut cache) = ACCELERATORS.lock() {
+        *cache = None;
+    }
+    if let Ok(mut cache) = DEVICES.lock() {
         *cache = None;
     }
     if let Ok(mut cache) = BINARIES.lock() {

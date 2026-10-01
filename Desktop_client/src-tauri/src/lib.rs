@@ -1402,7 +1402,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.7")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.8")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -3231,6 +3231,8 @@ struct LaunchPorts {
     uefi: Option<UefiFirmware>,
     /// swtpm control socket when the VM has TPM 2.0 and swtpm is installed.
     tpm_socket: Option<String>,
+    /// QEMU device model for the TPM (`tpm_device_model`).
+    tpm_device: String,
     /// Directory holding autounattend.xml, served to the guest as a FAT disk.
     unattend_dir: Option<String>,
 }
@@ -3342,11 +3344,7 @@ fn build_qemu_command(
             .arg("-tpmdev")
             .arg("emulator,id=virtua-tpm,chardev=virtua-tpm-chr")
             .arg("-device")
-            .arg(if vm.architecture == "arm64" {
-                "tpm-tis-device,tpmdev=virtua-tpm"
-            } else {
-                "tpm-tis,tpmdev=virtua-tpm"
-            });
+            .arg(format!("{},tpmdev=virtua-tpm", ports.tpm_device));
     }
 
     // Guest agent over loopback TCP: identical on macOS, Linux and Windows.
@@ -3573,6 +3571,23 @@ fn prepare_uefi_vars(vm: &LocalVm) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
+/// The TPM device a guest gets. ARM64 `virt` only takes a sysbus TPM:
+/// - `tpm-crb-device` when the QEMU build has it (UTM's fork): the CRB
+///   interface is the one Windows on ARM drives;
+/// - else upstream's `tpm-tis-device` with `ppi=off`. Its Physical Presence
+///   page is a 1 KiB RAM region, and HVF only maps 16 KiB-aligned memory:
+///   QEMU aborted with HV_BAD_ARGUMENT, every accelerated start failed and
+///   the VM fell back to TCG. PPI only lets the OS ask the firmware to clear
+///   the TPM; the TPM itself is unaffected.
+fn tpm_device_model(architecture: &str, has_crb_device: bool, ppi_option: bool) -> String {
+    match (architecture, has_crb_device, ppi_option) {
+        ("arm64", true, _) => "tpm-crb-device".to_string(),
+        ("arm64", false, true) => "tpm-tis-device,ppi=off".to_string(),
+        ("arm64", false, false) => "tpm-tis-device".to_string(),
+        _ => "tpm-tis".to_string(),
+    }
+}
+
 fn tpm_state_dir(vm_id: &str) -> Result<PathBuf, String> {
     Ok(local_state_dir()?.join("TPM").join(safe_file_name(vm_id)?))
 }
@@ -3665,6 +3680,11 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         qga_port,
         uefi: prepare_uefi(vm)?,
         tpm_socket: None,
+        tpm_device: tpm_device_model(
+            &vm.architecture,
+            vm.architecture == "arm64" && platform::qemu_has_device("arm64", "tpm-crb-device"),
+            true,
+        ),
         unattend_dir: None,
     };
 
@@ -3832,6 +3852,10 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(status);
                 let summary = qemu_error_summary(&details);
+                if summary.contains("ppi") && ports.tpm_device.contains("ppi=off") {
+                    // A QEMU too old for the `ppi` property: keep the TPM, drop the option.
+                    ports.tpm_device = tpm_device_model(&vm.architecture, false, false);
+                }
                 if summary.contains("-spice") {
                     spice_unavailable = true;
                 } else if plan.accelerator == preferred_accelerator {
@@ -4125,6 +4149,26 @@ mod local_mode_tests {
         assert_eq!(last.gpu_model, "std");
         // Only the first attempt is silent; every degradation is explained.
         assert!(plans.iter().skip(1).all(|plan| plan.note.is_some()));
+    }
+
+    #[test]
+    fn the_arm64_tpm_never_maps_memory_hvf_refuses() {
+        assert_eq!(tpm_device_model("arm64", false, true), "tpm-tis-device,ppi=off");
+        assert_eq!(tpm_device_model("arm64", true, true), "tpm-crb-device");
+        assert_eq!(tpm_device_model("arm64", false, false), "tpm-tis-device");
+        assert_eq!(tpm_device_model("amd64", true, true), "tpm-tis");
+
+        let vm = sample_vm("arm64", "std");
+        let mut ports = sample_ports();
+        ports.tpm_socket = Some("/tmp/virtua-tpm.sock".into());
+        ports.tpm_device = tpm_device_model("arm64", false, true);
+        let mut plan = launch_plans("arm64", "std").remove(0);
+        plan.uefi_vars = false;
+        if let Ok(command) = build_qemu_command("qemu", &vm, &ports, &plan) {
+            assert!(command_args(&command)
+                .iter()
+                .any(|a| a == "tpm-tis-device,ppi=off,tpmdev=virtua-tpm"));
+        }
     }
 
     #[test]
@@ -4521,6 +4565,7 @@ mod local_mode_tests {
             qga_port: 6201,
             uefi: None,
             tpm_socket: None,
+            tpm_device: tpm_device_model("amd64", false, true),
             unattend_dir: None,
         }
     }
