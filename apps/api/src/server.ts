@@ -42,6 +42,7 @@ import {
   KEY_PATH,
 } from "./ssl.js";
 import { walkFiles, isManagedStorageLocation } from "./storageScan.js";
+import { clientHost, isLoopbackHost, webOrigin } from "./wsHost.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
   CreateVmSchema, UpdateVmConfigSchema, AttachDiskSchema, AttachNetworkSchema, UpdateNetworkSchema, CreateSnapshotSchema, BackupVmSchema,
@@ -1775,11 +1776,9 @@ function consumeWsTicket(ticketId: string | null): ConsoleTicket | null {
 }
 
 function buildWsUrl(req: FastifyRequest, pathName: string, ticketId: string, options: { requireReachableHost?: boolean } = {}) {
-  const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;
-  const originUrl = origin ? new URL(origin) : null;
+  const originUrl = webOrigin(req.headers);
   const forwardedProto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0]?.trim().toLowerCase();
   const forwardedSsl = (req.headers["x-forwarded-ssl"] as string | undefined)?.toLowerCase();
-  const forwardedHost = (req.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim();
   const requestProtocol = (req.protocol ?? "").toLowerCase();
   const usesHttps =
     originUrl?.protocol === "https:" ||
@@ -1788,13 +1787,12 @@ function buildWsUrl(req: FastifyRequest, pathName: string, ticketId: string, opt
     requestProtocol === "https" ||
     Boolean(tlsOptions);
   const proto = usesHttps ? "wss" : "ws";
-  let host = originUrl?.host ?? forwardedHost ?? req.headers.host ?? "";
+  let host = clientHost(req.headers);
   // Never hand a client (esp. the native desktop) a loopback URL it can't reach.
   // Prefer an explicitly-configured public host when the resolved host is empty
   // or points at localhost.
   const publicHost = (process.env.AUXINUX_PUBLIC_HOST ?? "").trim();
-  const isLoopbackHost = !host || /^(localhost|127\.0\.0\.1|\[?::1\]?)(:\d+)?$/i.test(host);
-  if (isLoopbackHost) {
+  if (isLoopbackHost(host)) {
     if (options.requireReachableHost && !publicHost) {
       throw new Error("AUXINUX_PUBLIC_HOST is required to build a reachable desktop WebSocket URL");
     }
@@ -1804,13 +1802,9 @@ function buildWsUrl(req: FastifyRequest, pathName: string, ticketId: string, opt
 }
 
 function buildPublicHost(req: FastifyRequest): string {
-  const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;
-  const originUrl = origin ? new URL(origin) : null;
-  const forwardedHost = (req.headers["x-forwarded-host"] as string | undefined)?.split(",")[0]?.trim();
-  let host = originUrl?.host ?? forwardedHost ?? req.headers.host ?? "";
+  let host = clientHost(req.headers);
   const publicHost = (process.env.AUXINUX_PUBLIC_HOST ?? "").trim();
-  const isLoopbackHost = !host || /^(localhost|127\.0\.0\.1|\[?::1\]?)(:\d+)?$/i.test(host);
-  if (isLoopbackHost) host = publicHost || host || "localhost";
+  if (isLoopbackHost(host)) host = publicHost || host || "localhost";
   return host;
 }
 
