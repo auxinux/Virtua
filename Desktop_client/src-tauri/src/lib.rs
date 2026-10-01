@@ -1402,7 +1402,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.9")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.10")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }

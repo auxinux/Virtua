@@ -210,7 +210,7 @@ function updateTask(taskId: string, patch: Partial<VirtuaTask>) {
 }
 
 function apiUnavailableMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : "Action impossible";
+  const message = error instanceof Error ? error.message : String(error || "Action impossible");
   if (message === "HTTP 404" || message === "HTTP 405" || message.toLowerCase().includes("not found")) {
     return "Action non disponible cote API Desktop";
   }
@@ -254,11 +254,19 @@ function mapResource(resource: DesktopResourceResponse): VirtuaResource {
 
 async function nativeFetch(url: string, init: RequestInit = {}) {
   if (isTauri()) {
-    return tauriFetch(url, {
-      ...init,
-      connectTimeout: 15_000,
-      maxRedirections: 5,
-    });
+    try {
+      return await tauriFetch(url, {
+        ...init,
+        connectTimeout: 15_000,
+        maxRedirections: 5,
+      });
+    } catch (error) {
+      // The Tauri HTTP plugin rejects with a bare string (connection refused,
+      // TLS, timeout). Callers only kept Error messages, so the UI showed a
+      // useless "Action impossible" exactly when the server was unreachable.
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Serveur Virtua injoignable (${new URL(url).host}) : ${detail}`);
+    }
   }
   const requestUrl = import.meta.env.DEV ? `/__virtua_proxy?url=${encodeURIComponent(url)}` : url;
   try {

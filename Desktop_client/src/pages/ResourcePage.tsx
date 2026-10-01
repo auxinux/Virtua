@@ -641,7 +641,7 @@ export function ResourcePage({
       await runResourceAction(selectedResource.id, action);
       await onChanged?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action impossible");
+      setError(err instanceof Error ? err.message : String(err || "Action impossible"));
     } finally {
       setPendingAction(null);
     }

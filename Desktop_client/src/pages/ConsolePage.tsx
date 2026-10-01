@@ -280,7 +280,7 @@ function ConsoleToolbar({
       await runResourceAction(resource.id, action);
       await onChanged?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action impossible");
+      setError(err instanceof Error ? err.message : String(err || "Action impossible"));
     } finally {
       setPendingAction(null);
     }
@@ -422,7 +422,7 @@ export function ConsolePage({
       await runResourceAction(resource.id, action);
       await onChanged?.();
     } catch (error) {
-      setContextError(error instanceof Error ? error.message : "Action impossible");
+      setContextError(error instanceof Error ? error.message : String(error || "Action impossible"));
     }
   };
 
