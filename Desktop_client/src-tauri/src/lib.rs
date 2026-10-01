@@ -1388,7 +1388,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.3")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.4")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -3349,6 +3349,37 @@ fn wait_for_qemu(child: &mut std::process::Child) -> Result<(), String> {
     Ok(())
 }
 
+/// The QEMU command line as written to the log, SPICE password masked.
+fn loggable_command(command: &Command, secret: &str) -> String {
+    std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|arg| arg.to_string_lossy().replace(secret, "***"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What one launch attempt printed, capped so a chatty failure stays readable.
+fn read_log_from(path: &Path, offset: u64) -> Option<String> {
+    let raw = fs::read(path).ok()?;
+    let start = (offset as usize).min(raw.len());
+    let tail = &raw[start..];
+    let tail = &tail[tail.len().saturating_sub(1200)..];
+    Some(String::from_utf8_lossy(tail).trim().to_string())
+}
+
+/// The line that explains a QEMU refusal: QEMU prefixes its errors with the
+/// binary name; anything else falls back to the last line printed.
+fn qemu_error_summary(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let line = lines
+        .iter()
+        .find(|l| l.starts_with("qemu-system") || l.to_ascii_lowercase().contains("error"))
+        .or(lines.last())
+        .copied()
+        .unwrap_or("raison inconnue");
+    line.chars().take(220).collect()
+}
+
 /// pflash banks on `virt` are exactly 64 MiB; a smaller firmware build
 /// (`QEMU_EFI.fd`) only loads through `-bios`.
 const PFLASH_BYTES: u64 = 64 * 1024 * 1024;
@@ -3484,7 +3515,8 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
     let log_dir = local_state_dir()?.join("Logs");
     fs::create_dir_all(&log_dir).map_err(|err| err.to_string())?;
     let log_path = log_dir.join(format!("{}-qemu.log", safe_file_name(&vm.name)?));
-    // Keep only the last run: the log is what the fallback ladder reports on.
+    // One file per start, every attempt of the fallback ladder kept in it:
+    // wiping it between attempts erased why the accelerated launch failed.
     let _ = fs::write(&log_path, b"");
 
     let mut notes: Vec<String> = vec![];
@@ -3499,9 +3531,12 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             });
         }
     }
+    if vm.secure_boot {
+        notes.push("Secure Boot n'est pas emule en mode local (option ignoree)".to_string());
+    }
     let mut failures: Vec<String> = vec![];
 
-    for plan in launch_plans(&vm.architecture, &vm.gpu_model) {
+    for (attempt, plan) in launch_plans(&vm.architecture, &vm.gpu_model).into_iter().enumerate() {
         let log_file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -3538,6 +3573,22 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 return Err(err);
             }
         };
+        let attempt_start = {
+            let mut header = &log_file;
+            let _ = writeln!(
+                header,
+                "=== Tentative {} : accel={} spice={:?} audio={} gpu={} uefi_vars={} tpm={} ===\n{}",
+                attempt + 1,
+                plan.accelerator,
+                plan.spice,
+                plan.audio,
+                plan.gpu_model,
+                plan.uefi_vars,
+                ports.tpm_socket.is_some(),
+                loggable_command(&command, &ports.spice_password),
+            );
+            fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0)
+        };
         command
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
@@ -3555,6 +3606,13 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             Ok(()) => {
                 if let Some(note) = plan.note {
                     notes.push(note.to_string());
+                }
+                if let Some(first) = failures.first() {
+                    notes.push(format!(
+                        "1re tentative refusee par QEMU: {} (journal: Logs/{}-qemu.log)",
+                        qemu_error_summary(first),
+                        safe_file_name(&vm.name).unwrap_or_default()
+                    ));
                 }
                 if let Some((mut swtpm_child, _)) = tpm {
                     // Reap swtpm once QEMU lets it go, instead of leaving a
@@ -3583,11 +3641,10 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             }
             Err(status) => {
                 stop_tpm(tpm);
-                let details = tail_file(&log_path, 1200)
-                    .filter(|value| !value.is_empty())
+                let details = read_log_from(&log_path, attempt_start)
+                    .filter(|value| !value.trim().is_empty())
                     .unwrap_or(status);
                 failures.push(details);
-                let _ = fs::write(&log_path, b"");
             }
         }
     }
@@ -4047,6 +4104,40 @@ mod local_mode_tests {
         let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
         assert!(args.iter().any(|a| a == "emulator,id=virtua-tpm,chardev=virtua-tpm-chr"));
         assert!(args.iter().any(|a| a == "tpm-tis,tpmdev=virtua-tpm"));
+    }
+
+    #[test]
+    fn a_qemu_refusal_is_summarised_by_its_error_line() {
+        let output = "warning: something minor\nqemu-system-aarch64: -accel hvf: Error: ret = HV_UNSUPPORTED\n";
+        assert_eq!(
+            qemu_error_summary(output),
+            "qemu-system-aarch64: -accel hvf: Error: ret = HV_UNSUPPORTED"
+        );
+        assert_eq!(qemu_error_summary("exit status: 1"), "exit status: 1");
+    }
+
+    #[test]
+    fn the_logged_command_line_masks_the_spice_password() {
+        let vm = sample_vm("amd64", "virtio");
+        let ports = sample_ports();
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        let command = build_qemu_command("qemu", &vm, &ports, &plan).unwrap();
+        let logged = loggable_command(&command, &ports.spice_password);
+        assert!(logged.contains("data=***"));
+        assert!(!logged.contains(&ports.spice_password));
+    }
+
+    #[test]
+    fn each_attempt_reads_only_its_own_output() {
+        let dir = env::temp_dir().join(format!("virtua-log-{}", random_token()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vm-qemu.log");
+        fs::write(&path, "first attempt failed\n").unwrap();
+        let offset = fs::metadata(&path).unwrap().len();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "second attempt failed").unwrap();
+        assert_eq!(read_log_from(&path, offset).unwrap(), "second attempt failed");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

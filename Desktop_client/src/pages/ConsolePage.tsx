@@ -1,4 +1,4 @@
-import { Boxes, ChevronsDown, ChevronsUp, Container, Expand, Minimize2, Monitor, PanelLeftClose, PanelLeftOpen, Play, RotateCcw, Search, Square, TerminalSquare } from "lucide-react";
+import { Boxes, ChevronsDown, ChevronsUp, Container, Expand, Minimize2, Monitor, PanelLeftClose, PanelLeftOpen, Play, RotateCcw, Search, Square } from "lucide-react";
 import type { MouseEvent, ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
@@ -192,21 +192,12 @@ function ResourceContextMenu({
   );
 }
 
-/** Fold the machine list, the info bars, or everything around the console. */
+/** Fold the info bars, or everything around the console. The machine list carries its own fold button. */
 function ConsoleViewControls({ t }: { t: (k: string) => string }) {
   const prefs = useConsolePrefs();
   const buttonClass = "virtua-icon-button !h-8 !w-8";
   return (
     <div className="flex gap-1">
-      {!prefs.focus ? (
-        <button
-          className={buttonClass}
-          title={prefs.listCollapsed ? t("console.show_list") : t("console.hide_list")}
-          onClick={() => setConsolePrefs({ listCollapsed: !prefs.listCollapsed })}
-        >
-          {prefs.listCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-        </button>
-      ) : null}
       {!prefs.focus ? (
         <button
           className={buttonClass}
@@ -443,12 +434,25 @@ export function ConsolePage({
     );
   }
 
+  // With the info bars folded, the console mode switch and the view controls
+  // ride in the console's own action bar (or a corner of the text console).
+  const foldedControls = (
+    <div className="flex items-center gap-1">
+      {selectedResource.consoleModes.length > 1 ? (
+        <div className="mr-1 flex items-center gap-1 rounded bg-black/40 p-0.5">
+          <ConsoleModeTabs resource={selectedResource} mode={mode} onMode={setMode} t={t} />
+        </div>
+      ) : null}
+      <ConsoleViewControls t={t} />
+    </div>
+  );
+
   return (
     <div
       className={
         prefs.focus
           ? "relative flex h-full min-h-0 flex-col"
-          : `grid h-full min-h-[42rem] gap-4 ${showList ? "lg:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr]" : ""}`
+          : `grid h-full min-h-[42rem] gap-4 ${showList ? "lg:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr]" : "grid-cols-[3rem_1fr]"}`
       }
     >
       {contextError ? (
@@ -466,7 +470,13 @@ export function ConsolePage({
                 {user?.role === "ADMIN" ? t("console.admin_access") : t("console.user_access")}
               </p>
             </div>
-            <TerminalSquare className="h-4 w-4 text-virtua-accent" />
+            <button
+              className="virtua-icon-button !h-8 !w-8"
+              title={t("console.hide_list")}
+              onClick={() => setConsolePrefs({ listCollapsed: true })}
+            >
+              <PanelLeftClose className="h-4 w-4" />
+            </button>
           </div>
 
           <label className="flex h-9 items-center gap-2 rounded border border-virtua-border bg-black/20 px-2.5">
@@ -500,6 +510,40 @@ export function ConsolePage({
           ))}
         </div>
       </aside>
+      ) : !prefs.focus ? (
+        // Folded list: a narrow rail keeps one-click access to each machine
+        // and the way back to the full list.
+        <aside className="flex min-h-0 flex-col items-center gap-1.5 rounded border border-virtua-border bg-virtua-panel py-2">
+          <button
+            className="virtua-icon-button !h-8 !w-8"
+            title={t("console.show_list")}
+            onClick={() => setConsolePrefs({ listCollapsed: false })}
+          >
+            <PanelLeftOpen className="h-4 w-4" />
+          </button>
+          <div className="my-1 h-px w-6 bg-virtua-border" />
+          <div className="flex min-h-0 flex-1 flex-col items-center gap-1.5 overflow-auto">
+            {resources.map((resource) => {
+              const Icon = kindIcons[resource.kind];
+              return (
+                <NavLink
+                  key={resource.id}
+                  to={`/console/${resource.id}`}
+                  title={`${resource.name} (${resource.state})`}
+                  onContextMenu={(event) => openContextMenu(event, resource)}
+                  className={({ isActive }) =>
+                    `relative flex h-8 w-8 items-center justify-center rounded transition-colors ${
+                      isActive ? "bg-virtua-accentSoft text-white" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
+                    }`
+                  }
+                >
+                  <Icon className="h-4 w-4" />
+                  <span className={`absolute bottom-0.5 right-0.5 h-1.5 w-1.5 rounded-full ${isRunningState(resource.state) ? "bg-virtua-green" : "bg-virtua-muted"}`} />
+                </NavLink>
+              );
+            })}
+          </div>
+        </aside>
       ) : null}
 
       <section
@@ -544,21 +588,6 @@ export function ConsolePage({
         </>
         ) : null}
 
-        {!prefs.focus && prefs.detailsCollapsed ? (
-          // Folded details: one slim line keeps the name, the state, the
-          // console mode and the way back.
-          <div className="flex items-center gap-2 border-b border-virtua-border bg-[#0b0f14] px-2 py-1">
-            <span className="truncate text-sm font-medium">{selectedResource.name}</span>
-            <StatusBadge status={selectedResource.state} />
-            <div className="ml-2 flex items-center gap-1">
-              <ConsoleModeTabs resource={selectedResource} mode={mode} onMode={setMode} t={t} />
-            </div>
-            <div className="ml-auto">
-              <ConsoleViewControls t={t} />
-            </div>
-          </div>
-        ) : null}
-
         <div className="min-h-0 flex-1 relative bg-[#05070a]">
           {!selectedResource.permissions.canConsole ? (
             <div className="absolute inset-0 grid place-items-center bg-[#05070a] text-sm text-virtua-muted">
@@ -569,14 +598,14 @@ export function ConsolePage({
               resource={selectedResource}
               runResourceAction={runResourceAction}
               onChanged={onChanged}
-              toolbarExtras={prefs.focus ? <ConsoleViewControls t={t} /> : undefined}
+              toolbarExtras={!showDetails ? foldedControls : undefined}
             />
           ) : <TextConsole resource={selectedResource} />}
-          {prefs.focus && (mode !== "graphical" || !selectedResource.permissions.canConsole) ? (
+          {!showDetails && (mode !== "graphical" || !selectedResource.permissions.canConsole) ? (
             // The text console has no action bar: a corner control, faint
-            // until hovered, leads out of focus mode.
+            // until hovered, brings the bars back.
             <div className="absolute right-2 top-2 z-30 opacity-30 transition-opacity hover:opacity-100">
-              <ConsoleViewControls t={t} />
+              {foldedControls}
             </div>
           ) : null}
         </div>

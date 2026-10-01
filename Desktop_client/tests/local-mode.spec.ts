@@ -146,6 +146,31 @@ test("console mode folds every bar and the action bar can hide itself", async ({
   await expect(logo).toBeVisible();
 });
 
+test("the machine list folds into a rail and the info bars fold away entirely", async ({ page }) => {
+  await localDesktop(page, { vms: [{ ...degradedVm, state: "stopped", pid: null }] });
+  await page.goto("/#/console/local-vm-1");
+
+  // The fold button sits on the list itself, where the eye looks for it.
+  await page.locator("aside").getByTitle("Replier la liste des machines").click();
+  await expect(page.getByPlaceholder("Rechercher...")).toBeHidden();
+  await expect(page.getByTitle("Debian-Test (stopped)")).toBeVisible();
+
+  await page.getByTitle("Replier les barres d'information").click();
+  await expect(page.getByText("Adresse", { exact: true })).toBeHidden();
+  // The way back now rides in the console action bar.
+  await page.getByTitle("Afficher les barres d'information").click();
+  await expect(page.getByText("Adresse", { exact: true })).toBeVisible();
+
+  await page.getByTitle("Afficher la liste des machines").click();
+  await expect(page.getByPlaceholder("Rechercher...")).toBeVisible();
+});
+
+test("a Windows ARM VM still on virtio is told what to change", async ({ page }) => {
+  await localDesktop(page, { vms: [{ ...degradedVm, guestOs: "windows", state: "stopped", pid: null, startupNotes: null }] });
+  await page.goto("/#/resources/local-vm-1");
+  await expect(page.getByText(/passer le bus disque en NVMe/)).toBeVisible();
+});
+
 test("creating a Docker container offers to install the missing engine", async ({ page }) => {
   await localDesktop(page);
   await page.goto("/#/docker");

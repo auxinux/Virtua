@@ -388,6 +388,11 @@ export function ResourceDetailPage({
           Demarrage adapte a cet ordinateur : {startupNotes}.
         </div>
       ) : null}
+      {isLocal && resource.guestOs === "windows" && resource.architecture === "arm64" && (resource.diskBus !== "nvme" || resource.gpuModel !== "std") ? (
+        <div className="rounded border border-virtua-yellow/50 bg-virtua-yellow/10 px-3 py-2 text-sm text-virtua-yellow">
+          Windows sur ARM : passer le bus disque en NVMe et la carte graphique en VGA standard (Modifier, VM arretee). Avec virtio, l'installeur ne voit aucun disque et l'ecran fige apres le demarrage.
+        </div>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[1fr_22rem]">
         {isEditing ? (
@@ -523,11 +528,27 @@ export function ResourceDetailPage({
                     </label>
                     <label className="space-y-1 text-xs text-virtua-muted">
                       Systeme invite
-                      <select className="virtua-input w-full" disabled={!canModify} value={form.guestOs} onChange={(event) => setForm((current) => ({ ...current, guestOs: event.target.value }))}>
+                      <select className="virtua-input w-full" disabled={!canModify} value={form.guestOs} onChange={(event) => {
+                        const guestOs = event.target.value;
+                        // Windows on ARM sees neither a virtio disk nor a
+                        // virtio-gpu screen: switch to what it can use. The
+                        // user can still change both before saving.
+                        const windowsOnArm = guestOs === "windows" && resource.architecture === "arm64";
+                        setForm((current) => ({
+                          ...current,
+                          guestOs,
+                          ...(windowsOnArm ? { diskBus: "nvme", gpuModel: "std" } : {}),
+                        }));
+                      }}>
                         <option value="other">Linux / autre</option>
                         <option value="windows">Windows</option>
                       </select>
                     </label>
+                    {form.guestOs === "windows" && resource.architecture === "arm64" && (form.diskBus !== "nvme" || form.gpuModel !== "std") ? (
+                      <p className="sm:col-span-2 rounded border border-virtua-yellow/50 bg-virtua-yellow/10 px-3 py-2 text-xs text-virtua-yellow">
+                        Windows sur ARM : choisir le bus disque NVMe (sinon l'installeur ne voit aucun disque) et la carte graphique VGA standard (sinon l'ecran fige apres le demarrage).
+                      </p>
+                    ) : null}
                   </>
                 ) : null}
               </>
