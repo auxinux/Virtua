@@ -12,6 +12,20 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.4",
+      items: fr
+        ? [
+            "Virtua Desktop (mode Cloud) : les consoles ouvertes depuis l'application sur Mac échouaient avec « AUXINUX_PUBLIC_HOST is required to build a reachable desktop WebSocket URL ».",
+            "Cause : le nœud construisait l'adresse WebSocket de la console à partir de l'en-tête Origin. L'application Desktop y envoie l'origine de sa propre fenêtre (`tauri://localhost` sur Mac, `http://tauri.localhost` sur Windows), et non celle du serveur.",
+            "Ces origines sont maintenant ignorées : l'adresse suit l'hôte réellement joint par le client (en-tête Host ou celui du proxy inverse). Le navigateur web n'est pas concerné.",
+          ]
+        : [
+            "Virtua Desktop (Cloud mode): consoles opened from the Mac app failed with \"AUXINUX_PUBLIC_HOST is required to build a reachable desktop WebSocket URL\".",
+            "Cause: the node built the console WebSocket address from the Origin header. The Desktop app sends its own window's origin there (`tauri://localhost` on Mac, `http://tauri.localhost` on Windows), not the server's.",
+            "Those origins are now ignored: the address follows the host the client actually reached (Host header, or the reverse proxy's). The web browser is unaffected.",
+          ],
+    },
+    {
       v: "0.8.3",
       items: fr
         ? [
