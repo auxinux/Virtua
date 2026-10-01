@@ -96,6 +96,7 @@ function mapLocalVm(vm: LocalVm): VirtuaResource {
     image: vm.isoPath || undefined,
     driverImage: vm.driverIsoPath || undefined,
     guestOs: vm.guestOs ?? "other",
+    windowsSetupBypass: vm.windowsSetupBypass ?? true,
     network: vm.network,
     networkModel: vm.networkModel ?? "virtio",
     gpuModel: vm.gpuModel ?? "virtio",
@@ -374,7 +375,7 @@ export const localVirtua = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; guestOs?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
     const taskId = pushTask({ label: "Modification VM locale", target: resourceId, status: "running", progress: 25 });
     try {
       const vm = await invoke<LocalVm>("local_update_vm", {
@@ -384,6 +385,7 @@ export const localVirtua = {
           image: payload.image,
           driverImage: payload.driverImage,
           guestOs: payload.guestOs,
+          windowsSetupBypass: payload.windowsSetupBypass,
           cpu: payload.cpu,
           memoryMib: payload.memory,
           network: payload.network,

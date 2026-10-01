@@ -74,6 +74,8 @@ export interface VirtuaResource {
   driverImage?: string;
   /** Local VMs: `windows` or `other`. */
   guestOs?: string;
+  /** Local Windows VMs: lift the TPM/Secure Boot/RAM checks of Windows setup. */
+  windowsSetupBypass?: boolean;
   network?: string;
   networkModel?: string;
   gpuModel?: string;
@@ -317,6 +319,7 @@ export interface LocalVm {
   isoPath?: string | null;
   driverIsoPath?: string | null;
   guestOs?: string | null;
+  windowsSetupBypass?: boolean | null;
   network: string;
   networkModel?: string | null;
   gpuModel?: string | null;

@@ -70,6 +70,7 @@ type UpdateResourcePayload = {
   image?: string;
   driverImage?: string;
   guestOs?: string;
+  windowsSetupBypass?: boolean;
   cpu?: number;
   memory?: number;
   disk?: number;
@@ -111,6 +112,7 @@ export function ResourceDetailPage({
     image: resource?.image ?? "",
     driverImage: resource?.driverImage ?? "",
     guestOs: resource?.guestOs ?? "other",
+    windowsSetupBypass: resource?.windowsSetupBypass ?? true,
     cpu: resource?.cpuCores ? String(resource.cpuCores) : "",
     memory: resource?.memoryMib ? String(resource.memoryMib) : "",
     disk: resource?.diskGib ? String(resource.diskGib) : "",
@@ -141,6 +143,7 @@ export function ResourceDetailPage({
       image: resource.image ?? "",
       driverImage: resource.driverImage ?? "",
       guestOs: resource.guestOs ?? "other",
+      windowsSetupBypass: resource.windowsSetupBypass ?? true,
       cpu: resource.cpuCores ? String(resource.cpuCores) : "",
       memory: resource.memoryMib ? String(resource.memoryMib) : "",
       disk: resource.diskGib ? String(resource.diskGib) : "",
@@ -220,6 +223,7 @@ export function ResourceDetailPage({
       if (nextImage !== (resource.image ?? "")) payload.image = nextImage;
       if (isLocal && form.driverImage.trim() !== (resource.driverImage ?? "")) payload.driverImage = form.driverImage.trim();
       if (isLocal && form.guestOs !== (resource.guestOs ?? "other")) payload.guestOs = form.guestOs;
+      if (isLocal && form.windowsSetupBypass !== (resource.windowsSetupBypass ?? true)) payload.windowsSetupBypass = form.windowsSetupBypass;
       if (form.cpu && Number(form.cpu) !== resource.cpuCores) payload.cpu = Number(form.cpu);
       if (form.memory && Number(form.memory) !== resource.memoryMib) payload.memory = Number(form.memory);
       if (form.network !== (resource.network ?? "user")) payload.network = form.network;
@@ -544,6 +548,15 @@ export function ResourceDetailPage({
                         <option value="windows">Windows</option>
                       </select>
                     </label>
+                    {form.guestOs === "windows" ? (
+                      <label className="sm:col-span-2 flex items-center justify-between gap-3 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm">
+                        <span>
+                          <span className="block">Contourner les exigences de Windows 11</span>
+                          <span className="text-xs text-virtua-muted">TPM, Secure Boot (non emule en local), RAM et installation hors ligne. Actif tant que l'ISO d'installation est montee.</span>
+                        </span>
+                        <input type="checkbox" disabled={!canModify} checked={form.windowsSetupBypass} onChange={(event) => setForm((current) => ({ ...current, windowsSetupBypass: event.target.checked }))} />
+                      </label>
+                    ) : null}
                     {form.guestOs === "windows" && resource.architecture === "arm64" && (form.diskBus !== "nvme" || form.gpuModel !== "std") ? (
                       <p className="sm:col-span-2 rounded border border-virtua-yellow/50 bg-virtua-yellow/10 px-3 py-2 text-xs text-virtua-yellow">
                         Windows sur ARM : choisir le bus disque NVMe (sinon l'installeur ne voit aucun disque) et la carte graphique VGA standard (sinon l'ecran fige apres le demarrage).

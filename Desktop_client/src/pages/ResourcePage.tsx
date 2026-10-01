@@ -488,7 +488,7 @@ function CreateResourceDialog({
 
         {usageMode === "local" && form.type === "vm" && form.guestOs === "windows" ? (
           <div className="mt-4 rounded border border-virtua-border bg-black/15 px-3 py-2 text-xs leading-5 text-virtua-muted">
-            Windows 11 exige TPM 2.0 (fourni par swtpm : <span className="font-mono">brew install swtpm</span>), 4 Gio de RAM et 64 Gio de disque.
+            Les controles TPM, Secure Boot et RAM de l'installeur Windows 11 sont contournes automatiquement (Secure Boot n'est pas emule en local).
             Le pilote reseau (NetKVM) et l'agent invite s'installent ensuite depuis le lecteur des pilotes VirtIO.
           </div>
         ) : null}

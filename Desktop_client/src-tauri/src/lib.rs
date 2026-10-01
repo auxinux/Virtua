@@ -282,6 +282,12 @@ struct LocalVm {
     /// drivers can use (USB CD-ROM, PCI network) on ARM64.
     #[serde(default = "default_guest_os")]
     guest_os: String,
+    /// Windows only, while an installer is mounted: hand setup an
+    /// autounattend.xml lifting the TPM / Secure Boot / RAM checks. QEMU's
+    /// ARM firmware has no Secure Boot, so Windows 11 refuses to install
+    /// without it.
+    #[serde(default = "default_true")]
+    windows_setup_bypass: bool,
     network: String,
     #[serde(default = "default_network_model")]
     network_model: String,
@@ -337,6 +343,7 @@ struct LocalCreateVmPayload {
     iso_path: Option<String>,
     driver_iso_path: Option<String>,
     guest_os: Option<String>,
+    windows_setup_bypass: Option<bool>,
     network: Option<String>,
     network_model: Option<String>,
     gpu_model: Option<String>,
@@ -352,6 +359,7 @@ struct LocalUpdateVmPayload {
     image: Option<String>,
     driver_image: Option<String>,
     guest_os: Option<String>,
+    windows_setup_bypass: Option<bool>,
     cpu: Option<u16>,
     memory_mib: Option<u32>,
     network: Option<String>,
@@ -447,6 +455,10 @@ fn default_gpu_model() -> String {
 
 fn default_disk_bus() -> String {
     "virtio".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_guest_os() -> String {
@@ -1388,7 +1400,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.4")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.5")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -2045,6 +2057,7 @@ fn import_template_archive(
         iso_path: None,
         driver_iso_path: None,
         guest_os: default_guest_os(),
+        windows_setup_bypass: true,
         network: "user".to_string(),
         network_model: default_network_model(),
         gpu_model: default_gpu_model(),
@@ -2536,6 +2549,7 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
             .driver_iso_path
             .filter(|value| !value.trim().is_empty()),
         guest_os: guest_os.clone(),
+        windows_setup_bypass: payload.windows_setup_bypass.unwrap_or(true),
         network: normalize_network_mode(payload.network),
         network_model: normalize_network_model(payload.network_model),
         gpu_model: normalize_gpu_model(payload.gpu_model),
@@ -2617,6 +2631,10 @@ fn local_update_vm_blocking(id: String, payload: LocalUpdateVmPayload) -> Result
 
     if let Some(guest_os) = payload.guest_os {
         vm.guest_os = normalize_guest_os(Some(guest_os));
+    }
+
+    if let Some(bypass) = payload.windows_setup_bypass {
+        vm.windows_setup_bypass = bypass;
     }
 
     if let Some(cpu) = payload.cpu {
@@ -3193,6 +3211,8 @@ struct LaunchPorts {
     uefi_vars: Option<String>,
     /// swtpm control socket when the VM has TPM 2.0 and swtpm is installed.
     tpm_socket: Option<String>,
+    /// Directory holding autounattend.xml, served to the guest as a FAT disk.
+    unattend_dir: Option<String>,
 }
 
 fn build_qemu_command(
@@ -3257,6 +3277,29 @@ fn build_qemu_command(
         &vm.network_model,
         &vm.guest_os,
     );
+
+    if let Some(dir) = &ports.unattend_dir {
+        validate_qemu_path(dir, "autounattend")?;
+        // vvfat: QEMU presents the directory as a read-only FAT disk. Windows
+        // setup reads autounattend.xml from the root of any removable drive.
+        command
+            .arg("-drive")
+            .arg(format!(
+                "if=none,id=virtua-unattend,format=raw,readonly=on,file=fat:{}",
+                dir
+            ));
+        if vm.architecture == "arm64" {
+            command
+                .arg("-device")
+                .arg("usb-storage,drive=virtua-unattend,removable=on");
+        } else {
+            command
+                .arg("-device")
+                .arg("qemu-xhci,id=virtua-unattend-usb")
+                .arg("-device")
+                .arg("usb-storage,bus=virtua-unattend-usb.0,drive=virtua-unattend,removable=on");
+        }
+    }
 
     if let Some(socket) = &ports.tpm_socket {
         validate_qemu_path(socket, "TPM")?;
@@ -3378,6 +3421,68 @@ fn qemu_error_summary(output: &str) -> String {
         .copied()
         .unwrap_or("raison inconnue");
     line.chars().take(220).collect()
+}
+
+/// The answer file Rufus also writes: LabConfig keys lift the hardware checks
+/// in Windows PE, BypassNRO lets the out-of-box setup finish offline (no
+/// network driver before NetKVM is installed from the driver disc).
+fn windows_unattend_xml(architecture: &str) -> String {
+    let arch = if architecture == "arm64" { "arm64" } else { "amd64" };
+    let component = |name: &str, body: String| {
+        format!(
+            r#"    <component name="{name}" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <RunSynchronous>
+{body}      </RunSynchronous>
+    </component>
+"#
+        )
+    };
+    let commands = |items: &[&str]| {
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                format!(
+                    "        <RunSynchronousCommand wcm:action=\"add\"><Order>{}</Order><Path>{}</Path></RunSynchronousCommand>\n",
+                    index + 1,
+                    path
+                )
+            })
+            .collect::<String>()
+    };
+    let lab = |key: &str| format!(r"reg add HKLM\SYSTEM\Setup\LabConfig /v {key} /t REG_DWORD /d 1 /f");
+    let pe = [
+        lab("BypassTPMCheck"),
+        lab("BypassSecureBootCheck"),
+        lab("BypassRAMCheck"),
+        lab("BypassStorageCheck"),
+        lab("BypassCPUCheck"),
+    ];
+    let pe_refs: Vec<&str> = pe.iter().map(String::as_str).collect();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<unattend xmlns=\"urn:schemas-microsoft-com:unattend\">\n  <settings pass=\"windowsPE\">\n{}  </settings>\n  <settings pass=\"specialize\">\n{}  </settings>\n</unattend>\n",
+        component("Microsoft-Windows-Setup", commands(&pe_refs)),
+        component(
+            "Microsoft-Windows-Deployment",
+            commands(&[r"reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f"])
+        ),
+    )
+}
+
+/// Writes the answer file when it applies: a Windows guest with its
+/// installer mounted and the bypass left on.
+fn prepare_windows_unattend(vm: &LocalVm) -> Option<String> {
+    let installer = vm.iso_path.as_deref().map(str::trim).unwrap_or("");
+    if vm.guest_os != "windows" || !vm.windows_setup_bypass || installer.is_empty() {
+        return None;
+    }
+    let dir = local_state_dir()
+        .ok()?
+        .join("Unattend")
+        .join(safe_file_name(&vm.id).ok()?);
+    fs::create_dir_all(&dir).ok()?;
+    fs::write(dir.join("autounattend.xml"), windows_unattend_xml(&vm.architecture)).ok()?;
+    Some(dir.to_string_lossy().to_string())
 }
 
 /// pflash banks on `virt` are exactly 64 MiB; a smaller firmware build
@@ -3510,6 +3615,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         qga_port,
         uefi_vars: prepare_uefi_vars(vm),
         tpm_socket: None,
+        unattend_dir: prepare_windows_unattend(vm),
     };
 
     let log_dir = local_state_dir()?.join("Logs");
@@ -3531,12 +3637,27 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             });
         }
     }
-    if vm.secure_boot {
+    if ports.unattend_dir.is_some() {
+        notes.push("installation Windows: controles TPM/Secure Boot/RAM contournes (autounattend.xml)".to_string());
+    } else if vm.secure_boot {
         notes.push("Secure Boot n'est pas emule en mode local (option ignoree)".to_string());
     }
+    let preferred_accelerator = platform::accelerator_chain(&vm.architecture)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "tcg".to_string());
+    // Why the hardware-accelerated attempts failed, once SPICE is out of the
+    // picture: that is the reason a VM ends up on slow TCG.
+    let mut accelerated_failure: Option<String> = None;
+    let mut spice_unavailable = false;
     let mut failures: Vec<String> = vec![];
 
     for (attempt, plan) in launch_plans(&vm.architecture, &vm.gpu_model).into_iter().enumerate() {
+        // Homebrew's QEMU ships without SPICE: once QEMU said so, the other
+        // SPICE plans can only fail the same way.
+        if spice_unavailable && plan.spice != SpiceMode::Off {
+            continue;
+        }
         let log_file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -3607,12 +3728,18 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 if let Some(note) = plan.note {
                     notes.push(note.to_string());
                 }
-                if let Some(first) = failures.first() {
-                    notes.push(format!(
-                        "1re tentative refusee par QEMU: {} (journal: Logs/{}-qemu.log)",
-                        qemu_error_summary(first),
-                        safe_file_name(&vm.name).unwrap_or_default()
-                    ));
+                if spice_unavailable {
+                    notes.push("QEMU installe sans SPICE (console VNC, pas de son)".to_string());
+                }
+                if plan.accelerator != preferred_accelerator {
+                    if let Some(reason) = &accelerated_failure {
+                        notes.push(format!(
+                            "{} refuse par QEMU: {} (journal: Logs/{}-qemu.log)",
+                            preferred_accelerator.to_uppercase(),
+                            reason,
+                            safe_file_name(&vm.name).unwrap_or_default()
+                        ));
+                    }
                 }
                 if let Some((mut swtpm_child, _)) = tpm {
                     // Reap swtpm once QEMU lets it go, instead of leaving a
@@ -3644,6 +3771,12 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 let details = read_log_from(&log_path, attempt_start)
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(status);
+                let summary = qemu_error_summary(&details);
+                if summary.contains("-spice") {
+                    spice_unavailable = true;
+                } else if plan.accelerator == preferred_accelerator {
+                    accelerated_failure = Some(summary);
+                }
                 failures.push(details);
             }
         }
@@ -4107,6 +4240,32 @@ mod local_mode_tests {
     }
 
     #[test]
+    fn the_windows_answer_file_lifts_the_hardware_checks() {
+        let xml = windows_unattend_xml("arm64");
+        for key in ["BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassNRO"] {
+            assert!(xml.contains(key), "{key} missing");
+        }
+        assert!(xml.contains(r#"processorArchitecture="arm64""#));
+        assert!(!xml.contains(r#"processorArchitecture="amd64""#));
+        assert!(windows_unattend_xml("amd64").contains(r#"processorArchitecture="amd64""#));
+    }
+
+    #[test]
+    fn the_answer_file_is_served_as_a_removable_fat_disk() {
+        let vm = sample_vm("arm64", "std");
+        let mut ports = sample_ports();
+        ports.unattend_dir = Some("/tmp/virtua-unattend".into());
+        let mut plan = launch_plans("arm64", "std").remove(0);
+        plan.uefi_vars = false;
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap_or_else(|_| {
+            // No ARM firmware on the test host: check the x86 wiring instead.
+            build_qemu_command("qemu", &sample_vm("amd64", "std"), &ports, &launch_plans("amd64", "std").remove(0)).unwrap()
+        }));
+        assert!(args.iter().any(|a| a.ends_with("file=fat:/tmp/virtua-unattend") && a.contains("readonly=on")));
+        assert!(args.iter().any(|a| a.starts_with("usb-storage") && a.contains("drive=virtua-unattend")));
+    }
+
+    #[test]
     fn a_qemu_refusal_is_summarised_by_its_error_line() {
         let output = "warning: something minor\nqemu-system-aarch64: -accel hvf: Error: ret = HV_UNSUPPORTED\n";
         assert_eq!(
@@ -4210,6 +4369,7 @@ mod local_mode_tests {
             iso_path: None,
             driver_iso_path: None,
             guest_os: "other".into(),
+            windows_setup_bypass: true,
             network: "user".into(),
             network_model: "virtio".into(),
             gpu_model: gpu_model.into(),
@@ -4244,6 +4404,7 @@ mod local_mode_tests {
             qga_port: 6201,
             uefi_vars: None,
             tpm_socket: None,
+            unattend_dir: None,
         }
     }
 
