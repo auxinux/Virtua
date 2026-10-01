@@ -1402,7 +1402,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.6")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.7")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -3193,17 +3193,29 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
         },
     ]);
     for fallback in chain.into_iter().skip(1) {
-        plans.push(LaunchPlan {
+        // Slower CPU, same machine: the pointer and the UEFI variables (hence
+        // Secure Boot) are what the guest needs most, and TCG supports both.
+        let tcg = LaunchPlan {
             accelerator: fallback,
             spice: SpiceMode::Off,
             audio: false,
-            usb_tablet: false,
+            usb_tablet: true,
             gpu_model: "std".to_string(),
-            uefi_vars: false,
+            uefi_vars: arm64,
             note: Some(
                 "acceleration materielle indisponible: la VM tourne en emulation logicielle (TCG)",
             ),
-        });
+        };
+        plans.push(tcg.clone());
+        if arm64 {
+            plans.push(LaunchPlan {
+                uefi_vars: false,
+                note: Some(
+                    "acceleration materielle indisponible (TCG) et variables UEFI non persistantes",
+                ),
+                ..tcg
+            });
+        }
     }
     plans
 }
@@ -3269,10 +3281,10 @@ fn build_qemu_command(
         // `virt` has no built-in input: without a USB controller an ARM64 guest
         // has neither keyboard nor mouse in the console. It also carries the
         // USB CD-ROMs.
-        command.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
-        if plan.usb_tablet {
-            command.args(["-device", "usb-tablet"]);
-        }
+        // `virt` has no PS/2 fallback either: dropping the tablet left the
+        // guest with no mouse at all (Windows setup lost its pointer). The
+        // xHCI controller is there anyway, so the tablet always is too.
+        command.args(["-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet"]);
     } else if let Some(uefi) = &ports.uefi {
         // Never degraded: an OS installed in UEFI mode cannot boot from SeaBIOS.
         append_pflash(&mut command, uefi)?;
@@ -4113,6 +4125,27 @@ mod local_mode_tests {
         assert_eq!(last.gpu_model, "std");
         // Only the first attempt is silent; every degradation is explained.
         assert!(plans.iter().skip(1).all(|plan| plan.note.is_some()));
+    }
+
+    #[test]
+    fn an_arm64_guest_always_has_a_pointer() {
+        let vm = sample_vm("arm64", "std");
+        let ports = sample_ports();
+        for mut plan in launch_plans("arm64", "std") {
+            plan.uefi_vars = false;
+            let Ok(command) = build_qemu_command("qemu", &vm, &ports, &plan) else {
+                return; // no ARM firmware on this test host
+            };
+            assert!(command_args(&command).iter().any(|a| a == "usb-tablet"), "{:?}", plan);
+        }
+    }
+
+    #[test]
+    fn the_tcg_fallback_keeps_the_pointer_and_secure_boot() {
+        let plans = launch_plans("arm64", "std");
+        let tcg = plans.iter().find(|plan| plan.accelerator == "tcg").expect("tcg plan");
+        assert!(tcg.usb_tablet);
+        assert!(tcg.uefi_vars, "Secure Boot needs the UEFI variable store");
     }
 
     #[test]
