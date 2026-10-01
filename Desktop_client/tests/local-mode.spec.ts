@@ -114,6 +114,9 @@ test("a Windows ARM installer gets NVMe, ramfb and the VirtIO driver disc", asyn
   await expect(page.getByLabel("Bus disque")).toHaveValue("nvme");
   await expect(page.getByLabel("Carte graphique")).toHaveValue("std");
   await expect(page.getByLabel(/pilotes VirtIO Windows/)).toBeChecked();
+  // Windows 11 as on a real PC: Secure Boot and TPM 2.0 come on by default.
+  await expect(page.getByLabel("Secure Boot", { exact: true })).toBeChecked();
+  await expect(page.getByLabel("TPM 2.0", { exact: true })).toBeChecked();
 });
 
 test("the VM configuration offers a second CD-ROM for drivers", async ({ page }) => {

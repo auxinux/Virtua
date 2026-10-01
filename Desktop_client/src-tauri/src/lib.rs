@@ -2,6 +2,8 @@ mod companion;
 mod containers;
 mod docker;
 mod engines;
+mod firmware;
+use firmware::UefiFirmware;
 mod platform;
 
 const KEYCHAIN_SERVICE: &str = "ca.auxinux.virtua.desktop";
@@ -1400,7 +1402,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.5")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.6")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -2738,9 +2740,14 @@ fn local_delete_vm_blocking(id: String, delete_disks: bool) -> Result<(), String
             })?;
         }
         // The UEFI variables and the TPM state belong to this VM only.
-        let vars = uefi_vars_path(&vm);
-        if vars.exists() && is_path_inside(&vars, &disk_root) {
-            let _ = fs::remove_file(vars);
+        for vars in [
+            uefi_vars_path(&vm),
+            firmware::vars_path(&vm, true),
+            firmware::vars_path(&vm, false),
+        ] {
+            if vars.exists() && is_path_inside(&vars, &disk_root) {
+                let _ = fs::remove_file(vars);
+            }
         }
         if let Ok(tpm) = tpm_state_dir(&vm.id) {
             let _ = fs::remove_dir_all(tpm);
@@ -3207,8 +3214,9 @@ struct LaunchPorts {
     spice_password: String,
     qmp_port: u16,
     qga_port: u16,
-    /// Per-VM UEFI variable store, prepared before launch (ARM64).
-    uefi_vars: Option<String>,
+    /// UEFI firmware and the VM's variable store, prepared before launch.
+    /// `None` on x86 means SeaBIOS; on ARM64, `-bios` with the QEMU firmware.
+    uefi: Option<UefiFirmware>,
     /// swtpm control socket when the VM has TPM 2.0 and swtpm is installed.
     tpm_socket: Option<String>,
     /// Directory holding autounattend.xml, served to the guest as a FAT disk.
@@ -3231,21 +3239,30 @@ fn build_qemu_command(
         .arg(vm.cpu.to_string());
 
     platform::machine_args(&mut command, &vm.architecture, &plan.accelerator);
+    let append_pflash = |command: &mut Command, uefi: &UefiFirmware| -> Result<(), String> {
+        validate_qemu_path(&uefi.code, "firmware")?;
+        validate_qemu_path(&uefi.vars, "variables UEFI")?;
+        if uefi.smm {
+            // OVMF Secure Boot builds keep their variables behind SMM: the
+            // guest OS cannot rewrite the Secure Boot keys, like on a real PC.
+            command
+                .args(["-machine", "smm=on"])
+                .args(["-global", "driver=cfi.pflash01,property=secure,value=on"]);
+        }
+        command
+            .arg("-drive")
+            .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", uefi.code))
+            .arg("-drive")
+            .arg(format!("if=pflash,format=raw,unit=1,file={}", uefi.vars));
+        Ok(())
+    };
     if vm.architecture == "arm64" {
-        let firmware = find_qemu_firmware(&vm.architecture).ok_or(
-            "Firmware ARM64 QEMU absent (EDK2/AAVMF). Installez QEMU depuis Configuration.",
-        )?;
-        match ports.uefi_vars.as_deref().filter(|_| plan.uefi_vars) {
-            Some(vars) => {
-                validate_qemu_path(&firmware, "firmware")?;
-                validate_qemu_path(vars, "variables UEFI")?;
-                command
-                    .arg("-drive")
-                    .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", firmware))
-                    .arg("-drive")
-                    .arg(format!("if=pflash,format=raw,unit=1,file={}", vars));
-            }
+        match ports.uefi.as_ref().filter(|_| plan.uefi_vars) {
+            Some(uefi) => append_pflash(&mut command, uefi)?,
             None => {
+                let firmware = find_qemu_firmware(&vm.architecture).ok_or(
+                    "Firmware ARM64 QEMU absent (EDK2/AAVMF). Installez QEMU depuis Configuration.",
+                )?;
                 command.arg("-bios").arg(firmware);
             }
         }
@@ -3256,7 +3273,11 @@ fn build_qemu_command(
         if plan.usb_tablet {
             command.args(["-device", "usb-tablet"]);
         }
-    } else if plan.usb_tablet {
+    } else if let Some(uefi) = &ports.uefi {
+        // Never degraded: an OS installed in UEFI mode cannot boot from SeaBIOS.
+        append_pflash(&mut command, uefi)?;
+    }
+    if vm.architecture != "arm64" && plan.usb_tablet {
         // An absolute pointing device is what keeps the VNC/SPICE cursor
         // aligned with the guest cursor.
         command.args(["-device", "usb-ehci", "-device", "usb-tablet"]);
@@ -3493,6 +3514,23 @@ fn uefi_vars_path(vm: &LocalVm) -> PathBuf {
     Path::new(&vm.disk_path).with_extension("efivars.fd")
 }
 
+/// The firmware of a launch: the bundled Secure Boot-capable EDK2 for
+/// Windows guests and Secure Boot VMs, otherwise the installed QEMU's own
+/// ARM64 firmware with a per-VM variable store (x86: SeaBIOS).
+fn prepare_uefi(vm: &LocalVm) -> Result<Option<UefiFirmware>, String> {
+    if let Some(bundled) = firmware::prepare(vm)? {
+        return Ok(Some(bundled));
+    }
+    Ok(prepare_uefi_vars(vm).and_then(|vars| {
+        Some(UefiFirmware {
+            code: find_qemu_firmware("arm64")?,
+            vars,
+            secure_boot: false,
+            smm: false,
+        })
+    }))
+}
+
 /// The per-VM UEFI variable store, created on first start from the vars
 /// template shipped next to the firmware. `None` falls back to `-bios`.
 fn prepare_uefi_vars(vm: &LocalVm) -> Option<String> {
@@ -3613,9 +3651,9 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         spice_password: random_token(),
         qmp_port,
         qga_port,
-        uefi_vars: prepare_uefi_vars(vm),
+        uefi: prepare_uefi(vm)?,
         tpm_socket: None,
-        unattend_dir: prepare_windows_unattend(vm),
+        unattend_dir: None,
     };
 
     let log_dir = local_state_dir()?.join("Logs");
@@ -3637,10 +3675,17 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             });
         }
     }
+    let secure_boot_active = ports.uefi.as_ref().is_some_and(|uefi| uefi.secure_boot);
+    // A real TPM and real Secure Boot pass Windows 11's checks as on a PC: the
+    // answer-file bypass is only a fallback for hosts that cannot emulate them.
+    if !(vm.tpm2 && swtpm.is_some() && secure_boot_active) {
+        ports.unattend_dir = prepare_windows_unattend(vm);
+    }
     if ports.unattend_dir.is_some() {
-        notes.push("installation Windows: controles TPM/Secure Boot/RAM contournes (autounattend.xml)".to_string());
-    } else if vm.secure_boot {
-        notes.push("Secure Boot n'est pas emule en mode local (option ignoree)".to_string());
+        notes.push(
+            "installation Windows: TPM 2.0 ou Secure Boot indisponible ici, controles de Windows 11 contournes (autounattend.xml)"
+                .to_string(),
+        );
     }
     let preferred_accelerator = platform::accelerator_chain(&vm.architecture)
         .first()
@@ -3730,6 +3775,9 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 }
                 if spice_unavailable {
                     notes.push("QEMU installe sans SPICE (console VNC, pas de son)".to_string());
+                }
+                if secure_boot_active && vm.architecture == "arm64" && !plan.uefi_vars {
+                    notes.push("Secure Boot perdu: firmware charge sans ses variables".to_string());
                 }
                 if plan.accelerator != preferred_accelerator {
                     if let Some(reason) = &accelerated_failure {
@@ -4240,6 +4288,42 @@ mod local_mode_tests {
     }
 
     #[test]
+    fn an_x86_secure_boot_vm_gets_smm_protected_ovmf() {
+        let vm = sample_vm("amd64", "std");
+        let mut ports = sample_ports();
+        ports.uefi = Some(UefiFirmware {
+            code: "/fw/x86_64-code.secboot.fd".into(),
+            vars: "/disks/vm.secboot-vars.fd".into(),
+            secure_boot: true,
+            smm: true,
+        });
+        // Even the most degraded plan keeps UEFI: a UEFI install cannot boot from SeaBIOS.
+        let plan = launch_plans("amd64", "std").pop().unwrap();
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(args.iter().any(|a| a == "smm=on"));
+        assert!(args.iter().any(|a| a == "driver=cfi.pflash01,property=secure,value=on"));
+        assert!(args.iter().any(|a| a.contains("unit=0,readonly=on,file=/fw/x86_64-code.secboot.fd")));
+        assert!(args.iter().any(|a| a.contains("unit=1,file=/disks/vm.secboot-vars.fd")));
+    }
+
+    #[test]
+    fn an_arm64_vm_with_bundled_firmware_boots_from_pflash() {
+        let vm = sample_vm("arm64", "std");
+        let mut ports = sample_ports();
+        ports.uefi = Some(UefiFirmware {
+            code: "/fw/aarch64-code.secboot.fd".into(),
+            vars: "/disks/vm.secboot-vars.fd".into(),
+            secure_boot: true,
+            smm: false,
+        });
+        let plan = launch_plans("arm64", "std").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(args.iter().any(|a| a.contains("file=/fw/aarch64-code.secboot.fd")));
+        assert!(!args.iter().any(|a| a == "-bios"));
+        assert!(!args.iter().any(|a| a == "smm=on"));
+    }
+
+    #[test]
     fn the_windows_answer_file_lifts_the_hardware_checks() {
         let xml = windows_unattend_xml("arm64");
         for key in ["BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassNRO"] {
@@ -4357,7 +4441,7 @@ mod local_mode_tests {
         assert_eq!(safe_download_name(" debian.iso ").unwrap(), "debian.iso");
     }
 
-    fn sample_vm(architecture: &str, gpu_model: &str) -> LocalVm {
+    pub(crate) fn sample_vm(architecture: &str, gpu_model: &str) -> LocalVm {
         LocalVm {
             id: "local-vm-1".into(),
             name: "Test".into(),
@@ -4402,7 +4486,7 @@ mod local_mode_tests {
             spice_password: "secret".into(),
             qmp_port: 6001,
             qga_port: 6201,
-            uefi_vars: None,
+            uefi: None,
             tpm_socket: None,
             unattend_dir: None,
         }

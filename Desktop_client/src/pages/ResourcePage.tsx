@@ -216,6 +216,10 @@ function CreateResourceDialog({
         // boot. ramfb (VGA standard on ARM64) is what it can draw on.
         if (!dirty.has("gpuModel")) next.gpuModel = windows && arm64 ? "std" : "virtio";
         if (!dirty.has("virtioDrivers")) next.virtioDrivers = windows && isInstaller;
+        // Windows 11 as on a real PC: emulated TPM 2.0 and Secure Boot with
+        // the Microsoft keys.
+        if (windows && !dirty.has("secureBoot")) next.secureBoot = true;
+        if (windows && !dirty.has("tpm2")) next.tpm2 = true;
       }
       return next;
     });
@@ -488,7 +492,7 @@ function CreateResourceDialog({
 
         {usageMode === "local" && form.type === "vm" && form.guestOs === "windows" ? (
           <div className="mt-4 rounded border border-virtua-border bg-black/15 px-3 py-2 text-xs leading-5 text-virtua-muted">
-            Les controles TPM, Secure Boot et RAM de l'installeur Windows 11 sont contournes automatiquement (Secure Boot n'est pas emule en local).
+            Windows 11 comme sur un vrai PC : TPM 2.0 emule (swtpm, Mac et Linux) et Secure Boot avec les cles Microsoft 2011 et 2023. Prevoir 4 Gio de RAM et 64 Gio de disque.
             Le pilote reseau (NetKVM) et l'agent invite s'installent ensuite depuis le lecteur des pilotes VirtIO.
           </div>
         ) : null}

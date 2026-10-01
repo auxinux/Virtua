@@ -542,6 +542,8 @@ export function ResourceDetailPage({
                           ...current,
                           guestOs,
                           ...(windowsOnArm ? { diskBus: "nvme", gpuModel: "std" } : {}),
+                          // Windows 11 requires both, as on a real PC.
+                          ...(guestOs === "windows" ? { secureBoot: true, tpm2: true } : {}),
                         }));
                       }}>
                         <option value="other">Linux / autre</option>
@@ -551,8 +553,8 @@ export function ResourceDetailPage({
                     {form.guestOs === "windows" ? (
                       <label className="sm:col-span-2 flex items-center justify-between gap-3 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm">
                         <span>
-                          <span className="block">Contourner les exigences de Windows 11</span>
-                          <span className="text-xs text-virtua-muted">TPM, Secure Boot (non emule en local), RAM et installation hors ligne. Actif tant que l'ISO d'installation est montee.</span>
+                          <span className="block">Repli : contourner les exigences de Windows 11</span>
+                          <span className="text-xs text-virtua-muted">Seulement si TPM 2.0 ou Secure Boot ne peuvent pas etre emules sur cet ordinateur (TPM sur un hote Windows, swtpm absent). Sinon Windows voit un vrai TPM et un vrai Secure Boot.</span>
                         </span>
                         <input type="checkbox" disabled={!canModify} checked={form.windowsSetupBypass} onChange={(event) => setForm((current) => ({ ...current, windowsSetupBypass: event.target.checked }))} />
                       </label>
@@ -591,7 +593,7 @@ export function ResourceDetailPage({
                 <label className="flex items-center justify-between gap-3 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm">
                   <span>
                     <span className="block">Secure Boot</span>
-                    <span className="text-xs text-virtua-muted">Etat applique au prochain demarrage.</span>
+                    <span className="text-xs text-virtua-muted">Firmware UEFI avec les cles Microsoft 2011 et 2023, applique au prochain demarrage.</span>
                   </span>
                   <input type="checkbox" disabled={!canModify} checked={form.secureBoot} onChange={(event) => setForm((current) => ({ ...current, secureBoot: event.target.checked }))} />
                 </label>
