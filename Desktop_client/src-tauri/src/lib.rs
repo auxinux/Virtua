@@ -1402,7 +1402,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.8")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.9")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -3235,6 +3235,9 @@ struct LaunchPorts {
     tpm_device: String,
     /// Directory holding autounattend.xml, served to the guest as a FAT disk.
     unattend_dir: Option<String>,
+    /// Where the guest's serial console is written. The UEFI firmware reports
+    /// boot attempts and Secure Boot refusals there, and nowhere else.
+    serial_log: Option<String>,
 }
 
 fn build_qemu_command(
@@ -3390,6 +3393,15 @@ fn build_qemu_command(
             .arg("intel-hda")
             .arg("-device")
             .arg("hda-duplex,audiodev=audioSpice");
+    }
+
+    if let Some(path) = &ports.serial_log {
+        validate_qemu_path(path, "journal serie")?;
+        command
+            .arg("-chardev")
+            .arg(format!("file,id=virtua-serial,path={}", path))
+            .arg("-serial")
+            .arg("chardev:virtua-serial");
     }
 
     command
@@ -3686,11 +3698,18 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             true,
         ),
         unattend_dir: None,
+        serial_log: None,
     };
 
     let log_dir = local_state_dir()?.join("Logs");
     fs::create_dir_all(&log_dir).map_err(|err| err.to_string())?;
     let log_path = log_dir.join(format!("{}-qemu.log", safe_file_name(&vm.name)?));
+    ports.serial_log = Some(
+        log_dir
+            .join(format!("{}-serial.log", safe_file_name(&vm.name)?))
+            .to_string_lossy()
+            .to_string(),
+    );
     // One file per start, every attempt of the fallback ladder kept in it:
     // wiping it between attempts erased why the accelerated launch failed.
     let _ = fs::write(&log_path, b"");
@@ -4152,6 +4171,17 @@ mod local_mode_tests {
     }
 
     #[test]
+    fn the_serial_console_is_written_to_a_log_file() {
+        let vm = sample_vm("amd64", "std");
+        let mut ports = sample_ports();
+        ports.serial_log = Some("/logs/vm-serial.log".into());
+        let plan = launch_plans("amd64", "std").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(args.iter().any(|a| a == "file,id=virtua-serial,path=/logs/vm-serial.log"));
+        assert!(args.iter().any(|a| a == "chardev:virtua-serial"));
+    }
+
+    #[test]
     fn the_arm64_tpm_never_maps_memory_hvf_refuses() {
         assert_eq!(tpm_device_model("arm64", false, true), "tpm-tis-device,ppi=off");
         assert_eq!(tpm_device_model("arm64", true, true), "tpm-crb-device");
@@ -4567,6 +4597,7 @@ mod local_mode_tests {
             tpm_socket: None,
             tpm_device: tpm_device_model("amd64", false, true),
             unattend_dir: None,
+            serial_log: None,
         }
     }
 
