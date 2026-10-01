@@ -104,6 +104,48 @@ test("the disk bus is offered on x86 VMs so an installer can see its disk", asyn
   await expect(page.getByLabel("Bus disque")).toHaveValue("virtio");
 });
 
+test("a Windows ARM installer gets NVMe, ramfb and the VirtIO driver disc", async ({ page }) => {
+  await localDesktop(page);
+  await page.goto("/#/vms");
+  await page.getByRole("button", { name: /Nouvelle|Nouveau|Creer/i }).first().click();
+  await page.getByLabel("Architecture").selectOption("arm64");
+  await page.getByPlaceholder("/chemin/vers/install.iso").fill("/iso/Win11_24H2_English_Arm64.iso");
+  await expect(page.getByLabel("Systeme invite")).toHaveValue("windows");
+  await expect(page.getByLabel("Bus disque")).toHaveValue("nvme");
+  await expect(page.getByLabel("Carte graphique")).toHaveValue("std");
+  await expect(page.getByLabel(/pilotes VirtIO Windows/)).toBeChecked();
+});
+
+test("the VM configuration offers a second CD-ROM for drivers", async ({ page }) => {
+  await localDesktop(page, { vms: [{ ...degradedVm, state: "stopped", pid: null, startupNotes: null }] });
+  await page.goto("/#/resources/local-vm-1");
+  await page.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByText("ISO pilotes (2e lecteur CD)")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Pilotes VirtIO pour Windows/ })).toBeVisible();
+});
+
+test("console mode folds every bar and the action bar can hide itself", async ({ page }) => {
+  await localDesktop(page, { vms: [{ ...degradedVm, state: "stopped", pid: null }] });
+  await page.goto("/#/console/local-vm-1");
+  const logo = page.getByAltText("AuxiNux Virtua - Desktop Client");
+  await expect(logo).toBeVisible();
+
+  await page.getByTitle("Mode console : replier toutes les barres").click();
+  await expect(logo).toBeHidden();
+  await expect(page.getByPlaceholder("Rechercher...")).toBeHidden();
+
+  // Opt-in auto-hide: the bar leaves until the pointer reaches the top edge.
+  const bar = page.getByRole("button", { name: "Ctrl+Alt+Del" }).locator("xpath=../..");
+  await page.getByRole("button", { name: "Masquer la barre" }).click();
+  await page.mouse.move(400, 400);
+  await expect(bar).toHaveClass(/opacity-0/);
+  await page.mouse.move(400, 4);
+  await expect(bar).toHaveClass(/opacity-100/);
+
+  await page.getByTitle("Quitter le mode console").click();
+  await expect(logo).toBeVisible();
+});
+
 test("creating a Docker container offers to install the missing engine", async ({ page }) => {
   await localDesktop(page);
   await page.goto("/#/docker");

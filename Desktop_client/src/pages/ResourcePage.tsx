@@ -4,6 +4,7 @@ import type { FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { virtuaClient, type CreateResourcePayload } from "@/api/virtuaClient";
+import { guessGuestOs } from "@/api/localVirtua";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { DesktopCreateOptionsResponse, PowerAction, ResourceKind, UsageMode, VirtuaResource, VirtuaUser, VmArchitecture } from "@/types";
 
@@ -146,6 +147,8 @@ function CreateResourceDialog({
     networkModel: "virtio",
     gpuModel: "virtio",
     diskBus: "virtio",
+    guestOs: "other",
+    virtioDrivers: false,
     cpu: "2",
     memory: "2048",
     disk: "20",
@@ -190,17 +193,29 @@ function CreateResourceDialog({
     dirtyFieldsRef.current.add(field);
     setForm((current) => {
       const next = { ...current, [field]: value };
-      if (field === "architecture" && usageMode === "local" && current.type === "vm" && !dirtyFieldsRef.current.has("networkModel")) {
+      if (usageMode !== "local" || next.type !== "vm") return next;
+      const dirty = dirtyFieldsRef.current;
+      if (field === "architecture" && !dirty.has("networkModel")) {
         next.networkModel = value === "amd64" ? "e1000" : "virtio";
       }
-      if (field === "architecture" && usageMode === "local" && value === "arm64" && !dirtyFieldsRef.current.has("diskBus")) {
-        next.diskBus = "virtio";
+      const image = next.image.trim();
+      const isInstaller = image.startsWith("iso:") || (!image.startsWith("template:") && /\.(iso|img)$/i.test(image));
+      if (field === "image" && !dirty.has("guestOs")) {
+        next.guestOs = isInstaller ? guessGuestOs(image.replace(/^iso:/, "")) : "other";
       }
-      if (field === "image" && usageMode === "local" && !dirtyFieldsRef.current.has("diskBus")) {
-        // A template ships an installed disk (virtio drivers included); an ISO
-        // means an installer, which almost never carries virtio-blk drivers.
-        next.diskBus =
-          next.architecture !== "arm64" && String(value).startsWith("iso:") ? "sata" : "virtio";
+      if (field === "image" || field === "architecture" || field === "guestOs") {
+        const windows = next.guestOs === "windows";
+        const arm64 = next.architecture === "arm64";
+        if (!dirty.has("diskBus")) {
+          // A template ships an installed disk (virtio drivers included); an
+          // installer needs a disk it can see without extra drivers: SATA on
+          // x86, NVMe for Windows on ARM (`virt` has no SATA controller).
+          next.diskBus = !isInstaller ? "virtio" : arm64 ? (windows ? "nvme" : "virtio") : "sata";
+        }
+        // Windows on ARM has no virtio-gpu driver: its screen freezes after
+        // boot. ramfb (VGA standard on ARM64) is what it can draw on.
+        if (!dirty.has("gpuModel")) next.gpuModel = windows && arm64 ? "std" : "virtio";
+        if (!dirty.has("virtioDrivers")) next.virtioDrivers = windows && isInstaller;
       }
       return next;
     });
@@ -253,6 +268,8 @@ function CreateResourceDialog({
         networkModel: form.type === "vm" ? form.networkModel : undefined,
         gpuModel: form.type === "vm" ? form.gpuModel : undefined,
         diskBus: form.type === "vm" && usageMode === "local" ? form.diskBus : undefined,
+        guestOs: form.type === "vm" && usageMode === "local" ? form.guestOs : undefined,
+        virtioDrivers: form.type === "vm" && usageMode === "local" ? form.virtioDrivers : undefined,
         cpu: Number(form.cpu),
         memory: Number(form.memory),
         disk: usageMode === "local" && form.type === "lxc" ? 0 : Number(form.disk),
@@ -432,14 +449,24 @@ function CreateResourceDialog({
                   {usageMode === "local" ? <option value="cirrus">Cirrus</option> : null}
                 </select>
               </label>
-              {usageMode === "local" && form.architecture !== "arm64" ? (
-                <label className="space-y-1 text-xs text-virtua-muted">
-                  Bus disque
-                  <select className="virtua-input w-full" value={form.diskBus} onChange={(event) => setField("diskBus", event.target.value)}>
-                    <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option>
-                    <option value="virtio">VirtIO - rapide, pilotes requis</option>
-                  </select>
-                </label>
+              {usageMode === "local" ? (
+                <>
+                  <label className="space-y-1 text-xs text-virtua-muted">
+                    Systeme invite
+                    <select className="virtua-input w-full" value={form.guestOs} onChange={(event) => setField("guestOs", event.target.value)}>
+                      <option value="other">Linux / autre</option>
+                      <option value="windows">Windows</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-xs text-virtua-muted">
+                    Bus disque
+                    <select className="virtua-input w-full" value={form.diskBus} onChange={(event) => setField("diskBus", event.target.value)}>
+                      {form.architecture !== "arm64" ? <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option> : null}
+                      <option value="nvme">NVMe - vu par Windows sans pilote</option>
+                      <option value="virtio">VirtIO - rapide, pilotes requis sous Windows</option>
+                    </select>
+                  </label>
+                </>
               ) : null}
             </>
           ) : null}
@@ -458,6 +485,13 @@ function CreateResourceDialog({
             </label>
           ) : null}
         </div>
+
+        {usageMode === "local" && form.type === "vm" && form.guestOs === "windows" ? (
+          <div className="mt-4 rounded border border-virtua-border bg-black/15 px-3 py-2 text-xs leading-5 text-virtua-muted">
+            Windows 11 exige TPM 2.0 (fourni par swtpm : <span className="font-mono">brew install swtpm</span>), 4 Gio de RAM et 64 Gio de disque.
+            Le pilote reseau (NetKVM) et l'agent invite s'installent ensuite depuis le lecteur des pilotes VirtIO.
+          </div>
+        ) : null}
 
         {isEmulatedArchitecture ? (
           <div className="mt-4 rounded border border-virtua-yellow/50 bg-virtua-yellow/15 px-3 py-2 text-sm text-virtua-yellow">
@@ -482,6 +516,12 @@ function CreateResourceDialog({
                   <input type="checkbox" checked={form.secureBoot} onChange={(event) => setField("secureBoot", event.target.checked)} />
                   Secure Boot
                 </label>
+                {usageMode === "local" ? (
+                  <label className="flex items-center gap-2 text-sm text-virtua-muted sm:col-span-2" title="virtio-win.iso est telecharge une fois dans le Storage puis insere comme second lecteur CD">
+                    <input type="checkbox" checked={form.virtioDrivers} onChange={(event) => setField("virtioDrivers", event.target.checked)} />
+                    Inserer les pilotes VirtIO Windows (2e lecteur CD)
+                  </label>
+                ) : null}
               </>
             ) : null}
 

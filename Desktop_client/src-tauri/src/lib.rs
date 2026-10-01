@@ -273,6 +273,15 @@ struct LocalVm {
     disk_gib: u32,
     disk_path: String,
     iso_path: Option<String>,
+    /// Second CD-ROM, for a driver disc (virtio-win) next to the installer:
+    /// Windows asks for storage/network drivers mid-setup and a single drive
+    /// meant ejecting the installer to provide them.
+    #[serde(default)]
+    driver_iso_path: Option<String>,
+    /// `windows` or `other`. Decides the devices a guest without virtio
+    /// drivers can use (USB CD-ROM, PCI network) on ARM64.
+    #[serde(default = "default_guest_os")]
+    guest_os: String,
     network: String,
     #[serde(default = "default_network_model")]
     network_model: String,
@@ -326,6 +335,8 @@ struct LocalCreateVmPayload {
     memory_mib: u32,
     disk_gib: u32,
     iso_path: Option<String>,
+    driver_iso_path: Option<String>,
+    guest_os: Option<String>,
     network: Option<String>,
     network_model: Option<String>,
     gpu_model: Option<String>,
@@ -339,6 +350,8 @@ struct LocalCreateVmPayload {
 struct LocalUpdateVmPayload {
     name: Option<String>,
     image: Option<String>,
+    driver_image: Option<String>,
+    guest_os: Option<String>,
     cpu: Option<u16>,
     memory_mib: Option<u32>,
     network: Option<String>,
@@ -436,25 +449,64 @@ fn default_disk_bus() -> String {
     "virtio".to_string()
 }
 
-fn normalize_disk_bus(architecture: &str, value: Option<String>) -> String {
-    // The `virt` machine has no AHCI controller: ARM64 guests are always virtio.
-    if architecture == "arm64" {
-        return "virtio".to_string();
+fn default_guest_os() -> String {
+    "other".to_string()
+}
+
+fn normalize_guest_os(value: Option<String>) -> String {
+    match value.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "windows" | "win" => "windows".to_string(),
+        _ => default_guest_os(),
     }
+}
+
+/// Windows installers are recognisable by name (`Win11_23H2_…`,
+/// `windows-11-arm64.iso`, `26100…CLIENT…`); anything else is treated as a
+/// guest that ships virtio drivers.
+fn guess_guest_os(iso_path: Option<&str>) -> String {
+    let name = iso_path
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let windows = name.starts_with("win")
+        || name.contains("windows")
+        || name.contains("_client")
+        || name.contains("clientconsumer")
+        || name.contains("clientbusiness");
+    if windows && !name.contains("virtio") {
+        "windows".to_string()
+    } else {
+        default_guest_os()
+    }
+}
+
+fn normalize_disk_bus(architecture: &str, value: Option<String>) -> String {
     match value.unwrap_or_else(default_disk_bus).as_str() {
-        "sata" | "ide" | "ahci" => "sata".to_string(),
+        "nvme" => "nvme".to_string(),
+        // `virt` has no AHCI controller: an ARM64 SATA request becomes virtio.
+        "sata" | "ide" | "ahci" if architecture != "arm64" => "sata".to_string(),
         _ => "virtio".to_string(),
     }
 }
 
-/// Fresh x86 VMs installed from an ISO get a SATA disk: no mainstream OS
-/// installer ships virtio-blk drivers, and "no disk found" was the single most
-/// common way a local VM looked broken. Templates keep their virtio disk.
-fn default_disk_bus_for_new_vm(architecture: &str, iso_path: Option<&str>) -> String {
-    if architecture != "arm64" && iso_path.map(|p| !p.trim().is_empty()).unwrap_or(false) {
-        return "sata".to_string();
+/// Fresh VMs installed from an ISO get a disk their installer can see without
+/// extra drivers — "no disk found" was the single most common way a local VM
+/// looked broken. x86 gets SATA. Windows on ARM has no AHCI driver story on
+/// `virt` but ships an NVMe driver, so it gets NVMe. Linux on ARM keeps
+/// virtio, which every arm64 kernel carries. Templates keep their virtio disk.
+fn default_disk_bus_for_new_vm(architecture: &str, iso_path: Option<&str>, guest_os: &str) -> String {
+    if !iso_path.map(|p| !p.trim().is_empty()).unwrap_or(false) {
+        return "virtio".to_string();
     }
-    "virtio".to_string()
+    match (architecture, guest_os) {
+        ("arm64", "windows") => "nvme".to_string(),
+        ("arm64", _) => "virtio".to_string(),
+        _ => "sata".to_string(),
+    }
 }
 
 fn normalize_network_mode(value: Option<String>) -> String {
@@ -506,17 +558,35 @@ fn append_gpu_args(command: &mut Command, architecture: &str, gpu_model: &str) {
     command.arg("-device").arg(device);
 }
 
-fn append_disk_args(command: &mut Command, disk_path: &str, disk_bus: &str) {
-    if disk_bus == "sata" {
+fn append_disk_args(command: &mut Command, architecture: &str, disk_path: &str, disk_bus: &str) {
+    if disk_bus == "sata" || disk_bus == "nvme" {
+        command.arg("-drive").arg(format!(
+            "file={},if=none,id=virtua-disk0,format=qcow2,cache=writeback,discard=unmap",
+            disk_path
+        ));
+        if disk_bus == "nvme" {
+            command
+                .arg("-device")
+                .arg("nvme,drive=virtua-disk0,serial=virtua-disk0,bootindex=1");
+        } else {
+            command
+                .arg("-device")
+                .arg("ich9-ahci,id=virtua-ahci")
+                .arg("-device")
+                .arg("ide-hd,drive=virtua-disk0,bus=virtua-ahci.0,bootindex=1");
+        }
+        return;
+    }
+    if architecture == "arm64" {
+        // An explicit device so the disk can carry a boot index: the CD-ROMs
+        // of an ARM64 VM are USB and need an order relative to it.
         command.arg("-drive").arg(format!(
             "file={},if=none,id=virtua-disk0,format=qcow2,cache=writeback,discard=unmap",
             disk_path
         ));
         command
             .arg("-device")
-            .arg("ich9-ahci,id=virtua-ahci")
-            .arg("-device")
-            .arg("ide-hd,drive=virtua-disk0,bus=virtua-ahci.0,bootindex=1");
+            .arg("virtio-blk-pci,drive=virtua-disk0,bootindex=1");
         return;
     }
     command.arg("-drive").arg(format!(
@@ -525,7 +595,76 @@ fn append_disk_args(command: &mut Command, disk_path: &str, disk_bus: &str) {
     ));
 }
 
-fn append_network_args(command: &mut Command, architecture: &str, mode: &str, model: &str) {
+fn validate_qemu_path(path: &str, label: &str) -> Result<(), String> {
+    // QEMU splits -drive options on commas.
+    if path.contains(',') || path.contains('\n') || path.contains('\r') {
+        return Err(format!("Chemin {} invalide (',' non autorise)", label));
+    }
+    Ok(())
+}
+
+/// The installer and the driver disc. On x86 both are ATAPI drives on the q35
+/// chipset AHCI. ARM64 `virt` has no IDE/AHCI, and `-cdrom` there silently
+/// becomes a virtio-blk disk — invisible to Windows setup, which then asked
+/// for "a media driver". USB mass storage on the xHCI controller is read by
+/// every ARM64 installer, Windows included.
+fn append_cdrom_args(
+    command: &mut Command,
+    architecture: &str,
+    iso_path: Option<&str>,
+    driver_iso_path: Option<&str>,
+) -> Result<(), String> {
+    let iso = iso_path.map(str::trim).filter(|p| !p.is_empty());
+    let drivers = driver_iso_path.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(path) = iso {
+        validate_qemu_path(path, "ISO")?;
+    }
+    if let Some(path) = drivers {
+        validate_qemu_path(path, "ISO pilotes")?;
+    }
+
+    if architecture == "arm64" {
+        for (index, path, bootindex) in [(0, iso, Some(0)), (1, drivers, None)] {
+            let Some(path) = path else { continue };
+            command.arg("-drive").arg(format!(
+                "file={},if=none,id=virtua-cd{},media=cdrom,readonly=on",
+                path, index
+            ));
+            let mut device = format!("usb-storage,drive=virtua-cd{},removable=on", index);
+            if let Some(boot) = bootindex {
+                device.push_str(&format!(",bootindex={}", boot));
+            }
+            command.arg("-device").arg(device);
+        }
+        return Ok(());
+    }
+
+    if let Some(path) = iso {
+        // `order=dc` falls through to the disk when the ISO is not bootable,
+        // instead of the old `-boot d` which pinned the VM to a CD-ROM it
+        // could never leave.
+        command
+            .arg("-cdrom")
+            .arg(path)
+            .arg("-boot")
+            .arg("order=dc,menu=on");
+    }
+    if let Some(path) = drivers {
+        // `-cdrom` is IDE index 2; the driver disc takes the next port.
+        command
+            .arg("-drive")
+            .arg(format!("file={},if=ide,index=3,media=cdrom,readonly=on", path));
+    }
+    Ok(())
+}
+
+fn append_network_args(
+    command: &mut Command,
+    architecture: &str,
+    mode: &str,
+    model: &str,
+    guest_os: &str,
+) {
     let mode = normalize_network_mode(Some(mode.to_string()));
     if mode == "isolated" {
         return;
@@ -544,6 +683,9 @@ fn append_network_args(command: &mut Command, architecture: &str, mode: &str, mo
     let device = match effective_model.as_str() {
         "e1000" => "e1000,netdev=net0",
         "rtl8139" => "rtl8139,netdev=net0",
+        // The virtio-win NetKVM driver binds to the PCI transport only. Linux
+        // guests keep the MMIO device so their interface name does not move.
+        _ if architecture == "arm64" && guest_os == "windows" => "virtio-net-pci,netdev=net0",
         _ if architecture == "arm64" => "virtio-net-device,netdev=net0",
         _ => "virtio-net-pci,netdev=net0",
     };
@@ -1246,7 +1388,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.2")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.3")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -1714,10 +1856,7 @@ async fn local_download_template(
     app: tauri::AppHandle,
     payload: DownloadTemplatePayload,
 ) -> Result<Option<LocalVm>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = inventory_guard();
-        local_download_template_blocking(app, payload)
-    })
+    tauri::async_runtime::spawn_blocking(move || local_download_template_blocking(app, payload))
     .await
     .map_err(|err| err.to_string())?
 }
@@ -1733,6 +1872,8 @@ fn local_download_template_blocking(
 
     let safe_name = safe_download_name(&payload.name)?;
 
+    // An ISO never touches the inventory: downloading one (often several GB)
+    // used to hold the inventory lock and freeze every VM start/stop meanwhile.
     if category == "ISO" {
         let destination = PathBuf::from(&config.iso_dir).join(&safe_name);
         download_file_with_progress(&app, &payload.url, &safe_name, &payload.url, &destination)?;
@@ -1762,7 +1903,11 @@ fn local_download_template_blocking(
             status: "extracting".to_string(),
         },
     );
-    let vm = import_template_archive(&archive_path, architecture)?;
+    // Only the import writes the inventory; the download itself runs unlocked.
+    let vm = {
+        let _guard = inventory_guard();
+        import_template_archive(&archive_path, architecture)?
+    };
     emit_download_progress(
         &app,
         DownloadProgressEvent {
@@ -1779,6 +1924,37 @@ fn local_download_template_blocking(
         },
     );
     Ok(Some(vm))
+}
+
+const VIRTIO_WIN_NAME: &str = "virtio-win.iso";
+
+/// ARM64 Windows drivers only exist in recent virtio-win builds; x86 guests
+/// get the stable channel.
+fn virtio_win_url(architecture: &str) -> &'static str {
+    if architecture == "arm64" {
+        "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
+    } else {
+        "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
+    }
+}
+
+/// The virtio-win driver disc (storage, network, balloon, guest agent for
+/// Windows), downloaded once into the ISO library and reused by every VM.
+#[tauri::command]
+async fn local_ensure_virtio_win(app: tauri::AppHandle, architecture: String) -> Result<String, String> {
+    // No inventory lock: a ~700 MB download must not block VM start/stop.
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = read_storage_config()?;
+        ensure_storage_dirs(&config)?;
+        let destination = PathBuf::from(&config.iso_dir).join(VIRTIO_WIN_NAME);
+        if !destination.is_file() {
+            let url = virtio_win_url(&normalize_arch(&architecture));
+            download_file_with_progress(&app, url, VIRTIO_WIN_NAME, url, &destination)?;
+        }
+        Ok(destination.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 /// Deletes the extraction directory on the way out, whatever happened. A
@@ -1867,6 +2043,8 @@ fn import_template_archive(
         disk_gib,
         disk_path: destination_disk.to_string_lossy().to_string(),
         iso_path: None,
+        driver_iso_path: None,
+        guest_os: default_guest_os(),
         network: "user".to_string(),
         network_model: default_network_model(),
         gpu_model: default_gpu_model(),
@@ -2341,6 +2519,10 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         .iso_path
         .clone()
         .filter(|value| !value.trim().is_empty());
+    let guest_os = match payload.guest_os {
+        Some(value) => normalize_guest_os(Some(value)),
+        None => guess_guest_os(iso_path.as_deref()),
+    };
     let vm = LocalVm {
         id,
         name: payload.name.trim().to_string(),
@@ -2350,6 +2532,10 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         disk_gib: payload.disk_gib,
         disk_path: disk_path.to_string_lossy().to_string(),
         iso_path: iso_path.clone(),
+        driver_iso_path: payload
+            .driver_iso_path
+            .filter(|value| !value.trim().is_empty()),
+        guest_os: guest_os.clone(),
         network: normalize_network_mode(payload.network),
         network_model: normalize_network_model(payload.network_model),
         gpu_model: normalize_gpu_model(payload.gpu_model),
@@ -2359,6 +2545,7 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
                 Some(default_disk_bus_for_new_vm(
                     &architecture,
                     iso_path.as_deref(),
+                    &guest_os,
                 ))
             }),
         ),
@@ -2421,6 +2608,15 @@ fn local_update_vm_blocking(id: String, payload: LocalUpdateVmPayload) -> Result
     if let Some(image) = payload.image {
         let image = image.trim().to_string();
         vm.iso_path = if image.is_empty() { None } else { Some(image) };
+    }
+
+    if let Some(image) = payload.driver_image {
+        let image = image.trim().to_string();
+        vm.driver_iso_path = if image.is_empty() { None } else { Some(image) };
+    }
+
+    if let Some(guest_os) = payload.guest_os {
+        vm.guest_os = normalize_guest_os(Some(guest_os));
     }
 
     if let Some(cpu) = payload.cpu {
@@ -2522,6 +2718,14 @@ fn local_delete_vm_blocking(id: String, delete_disks: bool) -> Result<(), String
                     err
                 )
             })?;
+        }
+        // The UEFI variables and the TPM state belong to this VM only.
+        let vars = uefi_vars_path(&vm);
+        if vars.exists() && is_path_inside(&vars, &disk_root) {
+            let _ = fs::remove_file(vars);
+        }
+        if let Ok(tpm) = tpm_state_dir(&vm.id) {
+            let _ = fs::remove_dir_all(tpm);
         }
     }
 
@@ -2899,6 +3103,9 @@ struct LaunchPlan {
     audio: bool,
     usb_tablet: bool,
     gpu_model: String,
+    /// ARM64 only: UEFI firmware on pflash with a per-VM variable store, so
+    /// boot entries (Windows Boot Manager, distro shims) survive a restart.
+    uefi_vars: bool,
     note: Option<&'static str>,
 }
 
@@ -2908,16 +3115,25 @@ struct LaunchPlan {
 fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
     let chain = platform::accelerator_chain(architecture);
     let preferred = chain.first().cloned().unwrap_or_else(|| "tcg".to_string());
+    let arm64 = architecture == "arm64";
     let base = LaunchPlan {
         accelerator: preferred.clone(),
         spice: SpiceMode::Secret,
         audio: true,
         usb_tablet: true,
         gpu_model: gpu_model.to_string(),
+        uefi_vars: arm64,
         note: None,
     };
-    let mut plans = vec![
-        base.clone(),
+    let mut plans = vec![base.clone()];
+    if arm64 {
+        plans.push(LaunchPlan {
+            uefi_vars: false,
+            note: Some("variables UEFI non persistantes (firmware charge en lecture seule)"),
+            ..base.clone()
+        });
+    }
+    plans.extend([
         LaunchPlan {
             spice: SpiceMode::Inline,
             note: Some("QEMU ancien: mot de passe SPICE transmis en ligne"),
@@ -2946,10 +3162,11 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
             audio: false,
             usb_tablet: false,
             gpu_model: "std".to_string(),
+            uefi_vars: false,
             note: Some("peripheriques USB emules indisponibles (pointeur relatif)"),
             ..base.clone()
         },
-    ];
+    ]);
     for fallback in chain.into_iter().skip(1) {
         plans.push(LaunchPlan {
             accelerator: fallback,
@@ -2957,6 +3174,7 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
             audio: false,
             usb_tablet: false,
             gpu_model: "std".to_string(),
+            uefi_vars: false,
             note: Some(
                 "acceleration materielle indisponible: la VM tourne en emulation logicielle (TCG)",
             ),
@@ -2971,6 +3189,10 @@ struct LaunchPorts {
     spice_password: String,
     qmp_port: u16,
     qga_port: u16,
+    /// Per-VM UEFI variable store, prepared before launch (ARM64).
+    uefi_vars: Option<String>,
+    /// swtpm control socket when the VM has TPM 2.0 and swtpm is installed.
+    tpm_socket: Option<String>,
 }
 
 fn build_qemu_command(
@@ -2993,9 +3215,23 @@ fn build_qemu_command(
         let firmware = find_qemu_firmware(&vm.architecture).ok_or(
             "Firmware ARM64 QEMU absent (EDK2/AAVMF). Installez QEMU depuis Configuration.",
         )?;
-        command.arg("-bios").arg(firmware);
+        match ports.uefi_vars.as_deref().filter(|_| plan.uefi_vars) {
+            Some(vars) => {
+                validate_qemu_path(&firmware, "firmware")?;
+                validate_qemu_path(vars, "variables UEFI")?;
+                command
+                    .arg("-drive")
+                    .arg(format!("if=pflash,format=raw,unit=0,readonly=on,file={}", firmware))
+                    .arg("-drive")
+                    .arg(format!("if=pflash,format=raw,unit=1,file={}", vars));
+            }
+            None => {
+                command.arg("-bios").arg(firmware);
+            }
+        }
         // `virt` has no built-in input: without a USB controller an ARM64 guest
-        // has neither keyboard nor mouse in the console.
+        // has neither keyboard nor mouse in the console. It also carries the
+        // USB CD-ROMs.
         command.args(["-device", "qemu-xhci", "-device", "usb-kbd"]);
         if plan.usb_tablet {
             command.args(["-device", "usb-tablet"]);
@@ -3006,14 +3242,36 @@ fn build_qemu_command(
         command.args(["-device", "usb-ehci", "-device", "usb-tablet"]);
     }
 
-    append_disk_args(&mut command, &vm.disk_path, &vm.disk_bus);
+    append_disk_args(&mut command, &vm.architecture, &vm.disk_path, &vm.disk_bus);
+    append_cdrom_args(
+        &mut command,
+        &vm.architecture,
+        vm.iso_path.as_deref(),
+        vm.driver_iso_path.as_deref(),
+    )?;
     append_gpu_args(&mut command, &vm.architecture, &plan.gpu_model);
     append_network_args(
         &mut command,
         &vm.architecture,
         &vm.network,
         &vm.network_model,
+        &vm.guest_os,
     );
+
+    if let Some(socket) = &ports.tpm_socket {
+        validate_qemu_path(socket, "TPM")?;
+        command
+            .arg("-chardev")
+            .arg(format!("socket,id=virtua-tpm-chr,path={}", socket))
+            .arg("-tpmdev")
+            .arg("emulator,id=virtua-tpm,chardev=virtua-tpm-chr")
+            .arg("-device")
+            .arg(if vm.architecture == "arm64" {
+                "tpm-tis-device,tpmdev=virtua-tpm"
+            } else {
+                "tpm-tis,tpmdev=virtua-tpm"
+            });
+    }
 
     // Guest agent over loopback TCP: identical on macOS, Linux and Windows.
     command
@@ -3060,22 +3318,6 @@ fn build_qemu_command(
             .arg("hda-duplex,audiodev=audioSpice");
     }
 
-    if let Some(iso_path) = &vm.iso_path {
-        if !iso_path.trim().is_empty() {
-            if iso_path.contains(',') || iso_path.contains('\n') || iso_path.contains('\r') {
-                return Err("Chemin ISO invalide".to_string());
-            }
-            // `order=dc` falls through to the disk when the ISO is not
-            // bootable, instead of the old `-boot d` which pinned the VM to a
-            // CD-ROM it could never leave.
-            command
-                .arg("-cdrom")
-                .arg(iso_path)
-                .arg("-boot")
-                .arg("order=dc,menu=on");
-        }
-    }
-
     command
         .arg("-display")
         .arg("none")
@@ -3107,6 +3349,91 @@ fn wait_for_qemu(child: &mut std::process::Child) -> Result<(), String> {
     Ok(())
 }
 
+/// pflash banks on `virt` are exactly 64 MiB; a smaller firmware build
+/// (`QEMU_EFI.fd`) only loads through `-bios`.
+const PFLASH_BYTES: u64 = 64 * 1024 * 1024;
+
+fn uefi_vars_path(vm: &LocalVm) -> PathBuf {
+    Path::new(&vm.disk_path).with_extension("efivars.fd")
+}
+
+/// The per-VM UEFI variable store, created on first start from the vars
+/// template shipped next to the firmware. `None` falls back to `-bios`.
+fn prepare_uefi_vars(vm: &LocalVm) -> Option<String> {
+    if vm.architecture != "arm64" {
+        return None;
+    }
+    let firmware = find_qemu_firmware("arm64")?;
+    if fs::metadata(&firmware).ok()?.len() != PFLASH_BYTES {
+        return None;
+    }
+    let path = uefi_vars_path(vm);
+    if !path.is_file() {
+        let template = platform::firmware_vars_template(&firmware).filter(|template| {
+            fs::metadata(template)
+                .map(|meta| meta.len() == PFLASH_BYTES)
+                .unwrap_or(false)
+        });
+        let created = match template {
+            Some(template) => fs::copy(template, &path).map(|_| ()),
+            // EDK2 formats an invalid variable store on first boot.
+            None => fs::File::create(&path).and_then(|file| file.set_len(PFLASH_BYTES)),
+        };
+        if created.is_err() {
+            let _ = fs::remove_file(&path);
+            return None;
+        }
+    }
+    Some(path.to_string_lossy().to_string())
+}
+
+fn tpm_state_dir(vm_id: &str) -> Result<PathBuf, String> {
+    Ok(local_state_dir()?.join("TPM").join(safe_file_name(vm_id)?))
+}
+
+/// One software TPM per launch attempt: `--terminate` makes swtpm exit when
+/// QEMU closes the control channel, which also happens when an attempt of
+/// the fallback ladder fails.
+#[cfg(unix)]
+fn spawn_swtpm(vm: &LocalVm, swtpm: &str) -> Result<(std::process::Child, PathBuf), String> {
+    let state = tpm_state_dir(&vm.id)?;
+    fs::create_dir_all(&state).map_err(|err| format!("Etat TPM impossible: {}", err))?;
+    // A Unix socket path is capped at ~104 bytes on macOS: the Application
+    // Support directory is too deep for it, the per-user temp dir is not.
+    let socket = env::temp_dir().join(format!("virtua-tpm-{}.sock", safe_file_name(&vm.id)?));
+    let _ = fs::remove_file(&socket);
+    let mut command = platform::command(swtpm);
+    command
+        .args(["socket", "--tpm2", "--terminate", "--tpmstate"])
+        .arg(format!("dir={}", state.to_string_lossy()))
+        .arg("--ctrl")
+        .arg(format!("type=unixio,path={}", socket.to_string_lossy()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("swtpm impossible: {}", err))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !socket.exists() {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("swtpm a quitte au demarrage ({})", status));
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("swtpm ne repond pas".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok((child, socket))
+}
+
+#[cfg(not(unix))]
+fn spawn_swtpm(_vm: &LocalVm, _swtpm: &str) -> Result<(std::process::Child, PathBuf), String> {
+    Err("TPM 2.0 logiciel non disponible sur Windows en mode local".to_string())
+}
+
 fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
     let diagnostics = qemu_diagnostics_blocking()?;
     let qemu_path = match vm.architecture.as_str() {
@@ -3124,9 +3451,13 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
     if !Path::new(&vm.disk_path).is_file() {
         return Err(format!("Disque introuvable: {}", vm.disk_path));
     }
-    // QEMU splits drive/cdrom options on commas.
-    if vm.disk_path.contains(',') {
-        return Err("Chemin de disque invalide (',' non autorise)".to_string());
+    validate_qemu_path(&vm.disk_path, "de disque")?;
+    for (label, path) in [("ISO", &vm.iso_path), ("ISO pilotes", &vm.driver_iso_path)] {
+        if let Some(path) = path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            if !Path::new(path).is_file() {
+                return Err(format!("{} introuvable: {}", label, path));
+            }
+        }
     }
 
     let reserved = |pick: fn(&LocalVm) -> Option<u16>| -> Vec<u16> {
@@ -3140,12 +3471,14 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         .ok_or_else(|| "Aucun port SPICE local disponible".to_string())?;
     let qga_port = find_free_port_excluding(6201, 6299, &reserved(|vm| vm.qga_port))
         .ok_or_else(|| "Aucun port agent invite disponible".to_string())?;
-    let ports = LaunchPorts {
+    let mut ports = LaunchPorts {
         vnc_display: vnc_port - 5900,
         spice_port,
         spice_password: random_token(),
         qmp_port,
         qga_port,
+        uefi_vars: prepare_uefi_vars(vm),
+        tpm_socket: None,
     };
 
     let log_dir = local_state_dir()?.join("Logs");
@@ -3155,13 +3488,20 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
     let _ = fs::write(&log_path, b"");
 
     let mut notes: Vec<String> = vec![];
+    let mut swtpm = None;
     if vm.tpm2 {
-        notes.push("TPM 2.0 n'est pas emule en mode local (option ignoree)".to_string());
+        swtpm = find_binary("swtpm");
+        if swtpm.is_none() {
+            notes.push(if cfg!(windows) {
+                "TPM 2.0 non disponible sur Windows en mode local (option ignoree)".to_string()
+            } else {
+                "TPM 2.0 ignore: swtpm est absent (brew install swtpm)".to_string()
+            });
+        }
     }
     let mut failures: Vec<String> = vec![];
 
     for plan in launch_plans(&vm.architecture, &vm.gpu_model) {
-        let mut command = build_qemu_command(&qemu_path, vm, &ports, &plan)?;
         let log_file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -3170,6 +3510,34 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         let log_error = log_file
             .try_clone()
             .map_err(|err| format!("Log QEMU impossible: {}", err))?;
+        let mut tpm = None;
+        if let Some(binary) = swtpm.clone() {
+            match spawn_swtpm(vm, &binary) {
+                Ok(started) => tpm = Some(started),
+                Err(err) => {
+                    notes.push(format!("TPM 2.0 ignore: {}", err));
+                    swtpm = None;
+                }
+            }
+        }
+        ports.tpm_socket = tpm
+            .as_ref()
+            .map(|(_, socket)| socket.to_string_lossy().to_string());
+        let stop_tpm = |tpm: Option<(std::process::Child, PathBuf)>| {
+            if let Some((mut child, socket)) = tpm {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(socket);
+            }
+        };
+
+        let mut command = match build_qemu_command(&qemu_path, vm, &ports, &plan) {
+            Ok(command) => command,
+            Err(err) => {
+                stop_tpm(tpm);
+                return Err(err);
+            }
+        };
         command
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
@@ -3178,6 +3546,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
+                stop_tpm(tpm);
                 failures.push(format!("Lancement QEMU impossible: {}", err));
                 continue;
             }
@@ -3186,6 +3555,13 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
             Ok(()) => {
                 if let Some(note) = plan.note {
                     notes.push(note.to_string());
+                }
+                if let Some((mut swtpm_child, _)) = tpm {
+                    // Reap swtpm once QEMU lets it go, instead of leaving a
+                    // zombie per VM run.
+                    std::thread::spawn(move || {
+                        let _ = swtpm_child.wait();
+                    });
                 }
                 vm.pid = Some(child.id());
                 vm.vnc_port = Some(vnc_port);
@@ -3206,6 +3582,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 return Ok(());
             }
             Err(status) => {
+                stop_tpm(tpm);
                 let details = tail_file(&log_path, 1200)
                     .filter(|value| !value.is_empty())
                     .unwrap_or(status);
@@ -3447,6 +3824,7 @@ pub fn run() {
             local_storage_inventory,
             local_list_remote_templates,
             local_download_template,
+            local_ensure_virtio_win,
             local_import_vm_template,
             local_export_vm_template,
             local_delete_storage_file,
@@ -3526,6 +3904,7 @@ mod local_mode_tests {
             audio: false,
             usb_tablet: false,
             gpu_model: "std".into(),
+            uefi_vars: false,
             note: None,
         };
         let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
@@ -3557,32 +3936,125 @@ mod local_mode_tests {
     }
 
     #[test]
-    fn arm64_disks_are_always_virtio() {
+    fn arm64_disks_are_virtio_or_nvme() {
         assert_eq!(normalize_disk_bus("arm64", Some("sata".into())), "virtio");
+        assert_eq!(normalize_disk_bus("arm64", Some("nvme".into())), "nvme");
         assert_eq!(normalize_disk_bus("amd64", Some("sata".into())), "sata");
         assert_eq!(normalize_disk_bus("amd64", None), "virtio");
     }
 
     #[test]
-    fn x86_installers_get_a_bus_their_drivers_know() {
+    fn installers_get_a_bus_their_drivers_know() {
         assert_eq!(
-            default_disk_bus_for_new_vm("amd64", Some("/iso/debian.iso")),
+            default_disk_bus_for_new_vm("amd64", Some("/iso/debian.iso"), "other"),
             "sata"
         );
-        assert_eq!(default_disk_bus_for_new_vm("amd64", None), "virtio");
+        assert_eq!(default_disk_bus_for_new_vm("amd64", None, "other"), "virtio");
         assert_eq!(
-            default_disk_bus_for_new_vm("arm64", Some("/iso/debian.iso")),
+            default_disk_bus_for_new_vm("arm64", Some("/iso/debian.iso"), "other"),
             "virtio"
         );
+        assert_eq!(
+            default_disk_bus_for_new_vm("arm64", Some("/iso/Win11_ARM64.iso"), "windows"),
+            "nvme"
+        );
+    }
+
+    #[test]
+    fn windows_installers_are_recognised_but_not_the_driver_disc() {
+        assert_eq!(guess_guest_os(Some("/iso/Win11_24H2_English_Arm64.iso")), "windows");
+        assert_eq!(guess_guest_os(Some("/iso/windows-11-arm64.iso")), "windows");
+        assert_eq!(
+            guess_guest_os(Some("/iso/26100.1742.240906-0331.ge_release_svc_refresh_CLIENTCONSUMER_RET_A64FRE_en-us.iso")),
+            "windows"
+        );
+        assert_eq!(guess_guest_os(Some("/iso/virtio-win.iso")), "other");
+        assert_eq!(guess_guest_os(Some("/iso/debian-13-arm64-netinst.iso")), "other");
+        assert_eq!(guess_guest_os(None), "other");
     }
 
     #[test]
     fn a_sata_disk_declares_its_controller() {
         let mut cmd = Command::new("qemu");
-        append_disk_args(&mut cmd, "/disks/vm.qcow2", "sata");
+        append_disk_args(&mut cmd, "amd64", "/disks/vm.qcow2", "sata");
         let args = command_args(&cmd);
         assert!(args.iter().any(|a| a.starts_with("ich9-ahci")));
         assert!(args.iter().any(|a| a.contains("bus=virtua-ahci.0")));
+    }
+
+    #[test]
+    fn an_nvme_disk_carries_a_serial() {
+        let mut cmd = Command::new("qemu");
+        append_disk_args(&mut cmd, "arm64", "/disks/vm.qcow2", "nvme");
+        let args = command_args(&cmd);
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("nvme,drive=virtua-disk0,serial=")));
+    }
+
+    #[test]
+    fn arm64_cdroms_are_usb_and_the_installer_boots_first() {
+        let mut cmd = Command::new("qemu");
+        append_cdrom_args(
+            &mut cmd,
+            "arm64",
+            Some("/iso/Win11_Arm64.iso"),
+            Some("/iso/virtio-win.iso"),
+        )
+        .unwrap();
+        let args = command_args(&cmd);
+        assert!(!args.iter().any(|a| a == "-cdrom"));
+        assert!(args
+            .iter()
+            .any(|a| a == "usb-storage,drive=virtua-cd0,removable=on,bootindex=0"));
+        assert!(args
+            .iter()
+            .any(|a| a == "usb-storage,drive=virtua-cd1,removable=on"));
+        assert!(args.iter().any(|a| a.contains("virtio-win.iso") && a.contains("media=cdrom")));
+    }
+
+    #[test]
+    fn x86_takes_a_second_cdrom_for_drivers() {
+        let mut cmd = Command::new("qemu");
+        append_cdrom_args(&mut cmd, "amd64", Some("/iso/win.iso"), Some("/iso/virtio-win.iso")).unwrap();
+        let args = command_args(&cmd);
+        assert!(args.iter().any(|a| a == "-cdrom"));
+        assert!(args.iter().any(|a| a.contains("index=3") && a.contains("virtio-win.iso")));
+    }
+
+    #[test]
+    fn a_driver_iso_with_a_comma_is_refused() {
+        let mut cmd = Command::new("qemu");
+        assert!(append_cdrom_args(&mut cmd, "amd64", None, Some("/iso/a,b.iso")).is_err());
+    }
+
+    #[test]
+    fn windows_on_arm_gets_a_pci_network_card() {
+        let mut windows = Command::new("qemu");
+        append_network_args(&mut windows, "arm64", "user", "virtio", "windows");
+        assert!(command_args(&windows).iter().any(|a| a == "virtio-net-pci,netdev=net0"));
+        let mut linux = Command::new("qemu");
+        append_network_args(&mut linux, "arm64", "user", "virtio", "other");
+        assert!(command_args(&linux).iter().any(|a| a == "virtio-net-device,netdev=net0"));
+    }
+
+    #[test]
+    fn a_tpm_socket_adds_the_emulated_tpm() {
+        let vm = sample_vm("amd64", "virtio");
+        let mut ports = sample_ports();
+        ports.tpm_socket = Some("/tmp/virtua-tpm-test.sock".into());
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(args.iter().any(|a| a == "emulator,id=virtua-tpm,chardev=virtua-tpm-chr"));
+        assert!(args.iter().any(|a| a == "tpm-tis,tpmdev=virtua-tpm"));
+    }
+
+    #[test]
+    fn arm64_ladder_can_drop_the_uefi_variable_store() {
+        let plans = launch_plans("arm64", "virtio");
+        assert!(plans[0].uefi_vars);
+        assert!(plans.iter().any(|plan| !plan.uefi_vars && plan.note.is_some()));
+        assert!(launch_plans("amd64", "virtio").iter().all(|plan| !plan.uefi_vars));
     }
 
     #[test]
@@ -3645,6 +4117,8 @@ mod local_mode_tests {
             disk_gib: 20,
             disk_path: "/disks/vm.qcow2".into(),
             iso_path: None,
+            driver_iso_path: None,
+            guest_os: "other".into(),
             network: "user".into(),
             network_model: "virtio".into(),
             gpu_model: gpu_model.into(),
@@ -3677,6 +4151,8 @@ mod local_mode_tests {
             spice_password: "secret".into(),
             qmp_port: 6001,
             qga_port: 6201,
+            uefi_vars: None,
+            tpm_socket: None,
         }
     }
 

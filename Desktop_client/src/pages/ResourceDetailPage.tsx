@@ -68,6 +68,8 @@ type UpdateResourcePayload = {
   name?: string;
   displayName?: string;
   image?: string;
+  driverImage?: string;
+  guestOs?: string;
   cpu?: number;
   memory?: number;
   disk?: number;
@@ -107,6 +109,8 @@ export function ResourceDetailPage({
     name: resource?.name ?? "",
     displayName: resource?.displayName ?? "",
     image: resource?.image ?? "",
+    driverImage: resource?.driverImage ?? "",
+    guestOs: resource?.guestOs ?? "other",
     cpu: resource?.cpuCores ? String(resource.cpuCores) : "",
     memory: resource?.memoryMib ? String(resource.memoryMib) : "",
     disk: resource?.diskGib ? String(resource.diskGib) : "",
@@ -124,6 +128,7 @@ export function ResourceDetailPage({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteDisks, setDeleteDisks] = useState(false);
   const [localIsoFiles, setLocalIsoFiles] = useState<LocalStorageFile[]>([]);
+  const [isDownloadingDrivers, setDownloadingDrivers] = useState(false);
   const [snapshots, setSnapshots] = useState<LocalSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
   const [snapshotPending, setSnapshotPending] = useState<string | null>(null);
@@ -134,6 +139,8 @@ export function ResourceDetailPage({
       name: resource.name,
       displayName: resource.displayName,
       image: resource.image ?? "",
+      driverImage: resource.driverImage ?? "",
+      guestOs: resource.guestOs ?? "other",
       cpu: resource.cpuCores ? String(resource.cpuCores) : "",
       memory: resource.memoryMib ? String(resource.memoryMib) : "",
       disk: resource.diskGib ? String(resource.diskGib) : "",
@@ -211,6 +218,8 @@ export function ResourceDetailPage({
       if (nextName && nextName !== resource.name) payload.name = nextName;
       if (nextDisplayName && nextDisplayName !== resource.displayName) payload.displayName = nextDisplayName;
       if (nextImage !== (resource.image ?? "")) payload.image = nextImage;
+      if (isLocal && form.driverImage.trim() !== (resource.driverImage ?? "")) payload.driverImage = form.driverImage.trim();
+      if (isLocal && form.guestOs !== (resource.guestOs ?? "other")) payload.guestOs = form.guestOs;
       if (form.cpu && Number(form.cpu) !== resource.cpuCores) payload.cpu = Number(form.cpu);
       if (form.memory && Number(form.memory) !== resource.memoryMib) payload.memory = Number(form.memory);
       if (form.network !== (resource.network ?? "user")) payload.network = form.network;
@@ -254,7 +263,7 @@ export function ResourceDetailPage({
     }
   };
 
-  const browseIso = async () => {
+  const browseIso = async (field: "image" | "driverImage" = "image") => {
     setError(null);
     try {
       const selected = await open({
@@ -264,10 +273,25 @@ export function ResourceDetailPage({
         filters: [{ name: "Images disque", extensions: ["iso", "img"] }],
       });
       if (typeof selected === "string") {
-        setForm((current) => ({ ...current, image: selected }));
+        setForm((current) => ({ ...current, [field]: selected }));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Selection ISO impossible");
+    }
+  };
+
+  const fetchVirtioDrivers = async () => {
+    setDownloadingDrivers(true);
+    setError(null);
+    try {
+      const path = await localVirtua.ensureVirtioDrivers(resource.architecture === "amd64" ? "amd64" : "arm64");
+      setForm((current) => ({ ...current, driverImage: path }));
+      const inventory = await localVirtua.storageInventory().catch(() => null);
+      if (inventory) setLocalIsoFiles(inventory.iso);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Telechargement des pilotes impossible");
+    } finally {
+      setDownloadingDrivers(false);
     }
   };
 
@@ -415,7 +439,39 @@ export function ResourceDetailPage({
                 </div>
                 <p className="text-xs text-virtua-muted">Sauvegarde requise. Si la VM est demarree, le changement ISO s'applique au prochain demarrage.</p>
               </div>
-            ) : (
+            ) : null}
+            {resource.source === "local" && resource.kind === "vm" ? (
+              <div className="space-y-2 text-xs text-virtua-muted">
+                ISO pilotes (2e lecteur CD)
+                <select
+                  className="virtua-input w-full"
+                  disabled={!canModify}
+                  value={localIsoFiles.some((file) => file.path === form.driverImage) ? form.driverImage : ""}
+                  onChange={(event) => setForm((current) => ({ ...current, driverImage: event.target.value }))}
+                >
+                  <option value="">Aucune ISO du Storage</option>
+                  {localIsoFiles.map((file) => (
+                    <option key={file.path} value={file.path}>{file.name}</option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    className="virtua-input min-w-0 flex-1"
+                    disabled={!canModify}
+                    placeholder="Aucun disque de pilotes"
+                    value={form.driverImage}
+                    onChange={(event) => setForm((current) => ({ ...current, driverImage: event.target.value }))}
+                  />
+                  <button type="button" disabled={!canModify} onClick={() => void browseIso("driverImage")} className="virtua-button shrink-0">Parcourir</button>
+                  <button type="button" disabled={!canModify || !form.driverImage} onClick={() => setForm((current) => ({ ...current, driverImage: "" }))} className="virtua-button shrink-0">Ejecter</button>
+                </div>
+                <button type="button" disabled={!canModify || isDownloadingDrivers} onClick={() => void fetchVirtioDrivers()} className="virtua-button w-full">
+                  {isDownloadingDrivers ? "Telechargement virtio-win.iso..." : "Pilotes VirtIO pour Windows (virtio-win.iso)"}
+                </button>
+                <p className="text-xs text-virtua-muted">Pendant l'installation de Windows : « Charger un pilote » puis parcourir ce lecteur (viostor, NetKVM).</p>
+              </div>
+            ) : null}
+            {resource.source === "local" && resource.kind === "vm" ? null : (
               <label className="space-y-1 text-xs text-virtua-muted">
                 Image
                 <input className="virtua-input w-full" disabled={!canModify} value={form.image} onChange={(event) => setForm((current) => ({ ...current, image: event.target.value }))} />
@@ -455,14 +511,24 @@ export function ResourceDetailPage({
                     {resource.source === "local" ? <option value="cirrus">Cirrus</option> : null}
                   </select>
                 </label>
-                {isLocal && resource.architecture !== "arm64" ? (
-                  <label className="space-y-1 text-xs text-virtua-muted">
-                    Bus disque
-                    <select className="virtua-input w-full" disabled={!canModify} value={form.diskBus} onChange={(event) => setForm((current) => ({ ...current, diskBus: event.target.value }))}>
-                      <option value="virtio">VirtIO - rapide, pilotes requis</option>
-                      <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option>
-                    </select>
-                  </label>
+                {isLocal ? (
+                  <>
+                    <label className="space-y-1 text-xs text-virtua-muted">
+                      Bus disque
+                      <select className="virtua-input w-full" disabled={!canModify} value={form.diskBus} onChange={(event) => setForm((current) => ({ ...current, diskBus: event.target.value }))}>
+                        <option value="virtio">VirtIO - rapide, pilotes requis sous Windows</option>
+                        <option value="nvme">NVMe - vu par Windows sans pilote</option>
+                        {resource.architecture !== "arm64" ? <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option> : null}
+                      </select>
+                    </label>
+                    <label className="space-y-1 text-xs text-virtua-muted">
+                      Systeme invite
+                      <select className="virtua-input w-full" disabled={!canModify} value={form.guestOs} onChange={(event) => setForm((current) => ({ ...current, guestOs: event.target.value }))}>
+                        <option value="other">Linux / autre</option>
+                        <option value="windows">Windows</option>
+                      </select>
+                    </label>
+                  </>
                 ) : null}
               </>
             ) : null}
@@ -520,7 +586,11 @@ export function ResourceDetailPage({
               ["Carte reseau", resource.networkModel ?? "n/a"],
               ["Carte graphique", resource.gpuModel ?? "n/a"],
               ...(resource.source === "local" && resource.kind === "vm"
-                ? ([["Bus disque", resource.diskBus ?? "virtio"]] as Array<[string, string]>)
+                ? ([
+                    ["Bus disque", resource.diskBus ?? "virtio"],
+                    ["Systeme invite", resource.guestOs === "windows" ? "Windows" : "Linux / autre"],
+                    ["ISO pilotes", resource.driverImage ?? "aucune"],
+                  ] as Array<[string, string]>)
                 : []),
               ["TPM 2.0", yesNo(resource.tpm2)],
               ["Secure Boot", yesNo(resource.secureBoot)],

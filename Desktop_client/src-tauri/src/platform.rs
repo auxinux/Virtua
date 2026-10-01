@@ -319,11 +319,20 @@ pub fn machine_args(cmd: &mut Command, arch: &str, accel: &str) {
     } else {
         "q35".to_string()
     };
+    // Cross-architecture TCG (x86 guest on Apple Silicon) defaults to a single
+    // host thread for every vCPU because x86 memory ordering is stronger than
+    // ARM's. Multi-threaded TCG is what makes a multi-vCPU x86 guest usable
+    // on a Mac; QEMU only prints a warning about it.
+    let accel_arg = if accel == "tcg" {
+        "tcg,thread=multi".to_string()
+    } else {
+        accel.to_string()
+    };
     cmd.args([
         "-machine",
         &machine,
         "-accel",
-        accel,
+        &accel_arg,
         "-cpu",
         match accel {
             "tcg" => "max",
@@ -388,6 +397,22 @@ pub fn firmware(arch: &str) -> Option<String> {
     }
     None
 }
+/// The variable-store template shipped next to an EDK2 code image
+/// (Homebrew `edk2-arm-vars.fd`, Debian `AAVMF_VARS.fd`).
+pub fn firmware_vars_template(code: &str) -> Option<PathBuf> {
+    let dir = Path::new(code).parent()?;
+    ["edk2-arm-vars.fd", "AAVMF_VARS.fd", "QEMU_VARS.fd"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn logical_cores() -> f32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as f32)
+        .unwrap_or(1.0)
+}
+
 pub fn terminate(pid: u32) -> Result<(), String> {
     let mut s = sysinfo::System::new();
     s.refresh_processes(
@@ -417,7 +442,9 @@ pub fn process_metrics(pids: &[u32]) -> HashMap<u32, (f32, u64, u64)> {
     // A single sample always reports 0% CPU: sysinfo needs two.
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&wanted), true, refresh);
-    let cores = sysinfo::System::new_all().cpus().len().max(1) as f32;
+    // `System::new_all()` here enumerated every process, disk and network
+    // interface of the host on each poll, only to count CPUs.
+    let cores = logical_cores();
     for pid in pids {
         if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
             result.insert(
@@ -434,7 +461,13 @@ pub fn process_metrics(pids: &[u32]) -> HashMap<u32, (f32, u64, u64)> {
 }
 
 pub fn metrics() -> Result<LocalHostMetrics, String> {
-    let mut s = sysinfo::System::new_all();
+    // CPU and memory only: a full `new_all()` also walked every process of the
+    // host (hundreds on a Mac) on each dashboard refresh.
+    let mut s = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing()
+            .with_cpu(sysinfo::CpuRefreshKind::nothing().with_cpu_usage())
+            .with_memory(sysinfo::MemoryRefreshKind::everything()),
+    );
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     s.refresh_cpu_usage();
     let mem = s.total_memory();
@@ -493,6 +526,12 @@ mod tests {
             .collect();
         assert!(args.contains(&"q35,kernel-irqchip=off".to_string()));
         assert!(args.contains(&"qemu64,-hypervisor".to_string()));
+    }
+    #[test]
+    fn tcg_runs_one_host_thread_per_vcpu() {
+        let mut cmd = Command::new("qemu");
+        machine_args(&mut cmd, "amd64", "tcg");
+        assert!(cmd.get_args().any(|a| a == "tcg,thread=multi"));
     }
     #[test]
     fn tcg_is_always_the_last_resort() {

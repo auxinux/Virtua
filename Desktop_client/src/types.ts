@@ -70,6 +70,10 @@ export interface VirtuaResource {
   ip?: string;
   uptime?: string;
   image?: string;
+  /** Local VMs: second CD-ROM holding a driver disc (virtio-win). */
+  driverImage?: string;
+  /** Local VMs: `windows` or `other`. */
+  guestOs?: string;
   network?: string;
   networkModel?: string;
   gpuModel?: string;
@@ -311,6 +315,8 @@ export interface LocalVm {
   diskGib: number;
   diskPath: string;
   isoPath?: string | null;
+  driverIsoPath?: string | null;
+  guestOs?: string | null;
   network: string;
   networkModel?: string | null;
   gpuModel?: string | null;

@@ -18,7 +18,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
+import { useConsolePrefs } from "@/consolePrefs";
 import type { ResourceKind, UsageMode, VirtuaConnection, VirtuaNode, VirtuaResource, VirtuaTask, VirtuaUser } from "@/types";
 import { StatusBadge } from "@/components/StatusBadge";
 import { useLanguage } from "@/i18n";
@@ -141,6 +142,10 @@ export function Layout({
 }) {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const { t, language, setLanguage } = useLanguage();
+  const location = useLocation();
+  const consolePrefs = useConsolePrefs();
+  // Console focus mode: every application bar gives way to the VM screen.
+  const hideChrome = consolePrefs.focus && location.pathname.startsWith("/console/");
   const runningTasks = tasks.filter((task) => task.status === "running");
   const navItems = usageMode === "local" ? localNavItems : cloudNavItems;
   const syncLabel = connection?.lastSync ? `${t("layout.subtitle_local")} ${formatSyncTime(connection.lastSync, language)}` : "";
@@ -153,7 +158,7 @@ export function Layout({
 
   return (
     <div className="flex h-screen min-h-0 bg-virtua-bg text-virtua-text">
-      <aside className={`flex flex-col border-r border-virtua-border bg-[#090d12] transition-[width] duration-300 ${isSidebarCollapsed ? "w-16 min-w-[4rem]" : "w-72 min-w-[18rem]"}`}>
+      <aside className={`${hideChrome ? "hidden" : "flex"} flex-col border-r border-virtua-border bg-[#090d12] transition-[width] duration-300 ${isSidebarCollapsed ? "w-16 min-w-[4rem]" : "w-72 min-w-[18rem]"}`}>
         <div className={`border-b border-virtua-border ${isSidebarCollapsed ? "px-2 py-4 flex justify-center" : "px-4 py-4"}`}>
           {isSidebarCollapsed ? (
              <img src="/brand/auxinux-virtua-mark.svg" alt="Virtua" className="h-8 w-8" draggable={false} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
@@ -210,7 +215,7 @@ export function Layout({
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-12 items-center gap-3 border-b border-virtua-border bg-virtua-panel/80 px-5">
+        <header className={`${hideChrome ? "hidden" : "flex"} h-12 items-center gap-3 border-b border-virtua-border bg-virtua-panel/80 px-5`}>
           <div className="min-w-0 flex-1 flex items-baseline gap-3">
             <p className="truncate text-sm font-medium">{headerTitle}</p>
             {headerSubtitle ? <p className="text-xs text-virtua-muted hidden md:block">{headerSubtitle}</p> : null}
@@ -255,7 +260,7 @@ export function Layout({
           </button>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-auto p-4">{children}</main>
+        <main className={`min-h-0 flex-1 overflow-auto ${hideChrome ? "p-0" : "p-4"}`}>{children}</main>
       </div>
     </div>
   );

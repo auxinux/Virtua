@@ -47,8 +47,12 @@ export type CreateResourcePayload = {
   network?: string;
   networkModel?: string;
   gpuModel?: string;
-  /** Local mode only: virtio (fast) or sata (compatible with OS installers). */
+  /** Local mode only: virtio (fast), sata or nvme (seen by OS installers). */
   diskBus?: string;
+  /** Local mode only: `windows` or `other`. */
+  guestOs?: string;
+  /** Local mode only: mount virtio-win.iso as a second CD-ROM (downloaded once). */
+  virtioDrivers?: boolean;
   cpu?: number;
   memory?: number;
   disk?: number;

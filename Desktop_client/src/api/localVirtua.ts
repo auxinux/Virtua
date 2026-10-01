@@ -94,6 +94,8 @@ function mapLocalVm(vm: LocalVm): VirtuaResource {
     diskGib: vm.diskGib,
     uptime: formatDuration(vm.uptimeSeconds),
     image: vm.isoPath || undefined,
+    driverImage: vm.driverIsoPath || undefined,
+    guestOs: vm.guestOs ?? "other",
     network: vm.network,
     networkModel: vm.networkModel ?? "virtio",
     gpuModel: vm.gpuModel ?? "virtio",
@@ -153,6 +155,14 @@ function mapLocalContainer(resource: LocalContainerResource): VirtuaResource {
 
 function normalizeArchitecture(value: unknown): VmArchitecture {
   return value === "amd64" || value === "x86_64" ? "amd64" : "arm64";
+}
+
+/** Same heuristic as `guess_guest_os` in the Rust backend. */
+export function guessGuestOs(path: string): "windows" | "other" {
+  const name = (path.split(/[\\/]/).pop() ?? "").toLowerCase();
+  const windows = name.startsWith("win") || name.includes("windows") || name.includes("_client")
+    || name.includes("clientconsumer") || name.includes("clientbusiness");
+  return windows && !name.includes("virtio") ? "windows" : "other";
 }
 
 export const modeStore = {
@@ -307,18 +317,22 @@ export const localVirtua = {
       }
 
       const isoPath = image.startsWith("iso:") ? image.slice("iso:".length) : image;
+      const architecture = normalizeArchitecture(payload.architecture);
+      const driverIsoPath = payload.virtioDrivers ? await this.ensureVirtioDrivers(architecture) : undefined;
       const vm = await invoke<LocalVm>("local_create_vm", {
         payload: {
           name: payload.name,
-          architecture: normalizeArchitecture(payload.architecture),
+          architecture,
           cpu: payload.cpu ?? 2,
           memoryMib: payload.memory ?? 2048,
           diskGib: payload.disk ?? 20,
           isoPath: isoPath || undefined,
+          driverIsoPath,
+          guestOs: payload.guestOs,
           network: payload.network || "user",
-          networkModel: (payload as CreateResourcePayload & { networkModel?: string }).networkModel || "virtio",
-          gpuModel: (payload as CreateResourcePayload & { gpuModel?: string }).gpuModel || "virtio",
-          diskBus: (payload as CreateResourcePayload & { diskBus?: string }).diskBus,
+          networkModel: payload.networkModel || "virtio",
+          gpuModel: payload.gpuModel || "virtio",
+          diskBus: payload.diskBus,
           tpm2: payload.tpm2 ?? false,
           secureBoot: payload.secureBoot ?? false,
         },
@@ -347,7 +361,20 @@ export const localVirtua = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  /** Path of virtio-win.iso in the ISO library, downloaded on first use. */
+  async ensureVirtioDrivers(architecture: VmArchitecture) {
+    const taskId = pushTask({ label: "Telechargement pilotes VirtIO", target: "virtio-win.iso", status: "running", progress: 20 });
+    try {
+      const path = await invoke<string>("local_ensure_virtio_win", { architecture });
+      updateTask(taskId, { status: "completed", progress: 100 });
+      return path;
+    } catch (error) {
+      updateTask(taskId, { status: "failed", progress: 100 });
+      throw new Error(error instanceof Error ? error.message : String(error));
+    }
+  },
+
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; guestOs?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
     const taskId = pushTask({ label: "Modification VM locale", target: resourceId, status: "running", progress: 25 });
     try {
       const vm = await invoke<LocalVm>("local_update_vm", {
@@ -355,6 +382,8 @@ export const localVirtua = {
         payload: {
           name: payload.name ?? payload.displayName,
           image: payload.image,
+          driverImage: payload.driverImage,
+          guestOs: payload.guestOs,
           cpu: payload.cpu,
           memoryMib: payload.memory,
           network: payload.network,

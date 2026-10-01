@@ -294,16 +294,16 @@ pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
         "Installation de QEMU. Le système peut demander une autorisation administrateur.",
     );
     match env::consts::OS {
-        "macos" => mac_script(&format!("{}\nbrew install qemu", brew_prefix()))?,
+        "macos" => mac_script(&format!("{}\nbrew install qemu swtpm", brew_prefix()))?,
         "windows" => winget("SoftwareFreedomConservancy.QEMU")?,
         "linux" => linux_script(if find_binary("apt-get").is_some() {
-            "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 qemu-system-arm qemu-utils qemu-efi-aarch64 ovmf"
+            "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 qemu-system-arm qemu-utils qemu-efi-aarch64 ovmf swtpm"
         } else if find_binary("dnf").is_some() {
-            "dnf install -y qemu-system-x86 qemu-system-aarch64 qemu-img edk2-aarch64 edk2-ovmf"
+            "dnf install -y qemu-system-x86 qemu-system-aarch64 qemu-img edk2-aarch64 edk2-ovmf swtpm"
         } else if find_binary("zypper").is_some() {
-            "zypper --non-interactive install qemu qemu-x86 qemu-arm qemu-tools qemu-ovmf-x86_64 qemu-uefi-aarch64"
+            "zypper --non-interactive install qemu qemu-x86 qemu-arm qemu-tools qemu-ovmf-x86_64 qemu-uefi-aarch64 swtpm"
         } else if find_binary("pacman").is_some() {
-            "pacman -S --needed --noconfirm qemu-full edk2-aarch64 edk2-ovmf"
+            "pacman -S --needed --noconfirm qemu-full edk2-aarch64 edk2-ovmf swtpm"
         } else {
             return Err("Distribution non prise en charge par l’installation automatique. Installez QEMU via votre gestionnaire de paquets, puis actualisez.".into());
         })?,

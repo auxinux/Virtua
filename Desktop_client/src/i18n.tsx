@@ -85,6 +85,12 @@ const translations: Record<Language, Dictionary> = {
     "console.connected": "Connecté",
     "console.disconnected": "Déconnecté",
     "console.error": "Erreur WebSocket console",
+    "console.show_list": "Afficher la liste des machines",
+    "console.hide_list": "Replier la liste des machines",
+    "console.show_details": "Afficher les barres d'information",
+    "console.hide_details": "Replier les barres d'information",
+    "console.enter_focus": "Mode console : replier toutes les barres",
+    "console.exit_focus": "Quitter le mode console",
 
     // Auth / Usage Mode
     "auth.connect": "Se connecter",
@@ -195,6 +201,12 @@ const translations: Record<Language, Dictionary> = {
     "console.connected": "Connected",
     "console.disconnected": "Disconnected",
     "console.error": "Console WebSocket error",
+    "console.show_list": "Show the machine list",
+    "console.hide_list": "Fold the machine list",
+    "console.show_details": "Show the information bars",
+    "console.hide_details": "Fold the information bars",
+    "console.enter_focus": "Console mode: fold every bar",
+    "console.exit_focus": "Leave console mode",
 
     // Auth / Usage Mode
     "auth.connect": "Connect",

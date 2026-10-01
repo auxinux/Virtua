@@ -1,9 +1,11 @@
 import RFB from "@novnc/novnc";
 import { SpiceMainConn, sendCtrlAltDel as spiceSendCtrlAltDel } from "spice-client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Maximize2, MousePointer2, RotateCcw, Send, Volume2 } from "lucide-react";
+import { EyeOff, Maximize2, MousePointer2, Pin, RotateCcw, Send, Volume2 } from "lucide-react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useEffect, useId, useRef, useState } from "react";
 import { localVirtua } from "@/api/localVirtua";
+import { setConsolePrefs, useConsolePrefs } from "@/consolePrefs";
 import { virtuaClient } from "@/api/virtuaClient";
 import { installSpiceAudioFallback, resumeSpiceAudio } from "./spiceAudioFallback";
 import type { ConsoleMode, DesktopConsoleTicketResponse, PowerAction, VirtuaResource } from "@/types";
@@ -51,11 +53,14 @@ function CloudGraphicalConsole({
   resource,
   runResourceAction = (resourceId, action) => virtuaClient.runAction(resourceId, action),
   onChanged,
+  toolbarExtras,
 }: {
   resource: VirtuaResource;
   runResourceAction?: (resourceId: string, action: PowerAction) => Promise<unknown>;
   onChanged?: () => void | Promise<void>;
+  toolbarExtras?: ReactNode;
 }) {
+  const { autoHideActions } = useConsolePrefs();
   const rawId = useId().replace(/[:]/g, "");
   const screenId = `virtua-console-screen-${rawId}`;
   const shellRef = useRef<HTMLDivElement | null>(null);
@@ -313,6 +318,13 @@ function CloudGraphicalConsole({
   }, []);
 
   useEffect(() => {
+    if (autoHideActions) {
+      // Hover-only: the bar starts hidden and the pointer brings it back.
+      setToolbarVisible(false);
+      if (toolbarTimerRef.current) window.clearTimeout(toolbarTimerRef.current);
+      toolbarTimerRef.current = null;
+      return;
+    }
     if (!isFullscreen) {
       setToolbarVisible(true);
       if (toolbarTimerRef.current) window.clearTimeout(toolbarTimerRef.current);
@@ -330,7 +342,7 @@ function CloudGraphicalConsole({
     return () => {
       if (toolbarTimerRef.current) window.clearTimeout(toolbarTimerRef.current);
     };
-  }, [isFullscreen]);
+  }, [isFullscreen, autoHideActions]);
 
   const sendCtrlAltDel = () => {
     try {
@@ -377,6 +389,35 @@ function CloudGraphicalConsole({
     }
   };
 
+  // Pointer within this many pixels of the top edge reveals a hidden bar.
+  const revealZonePx = 24;
+
+  // Capture phase: noVNC and SPICE stop mouse events on their canvas, so a
+  // bubbling handler never sees the pointer while it is over the VM screen.
+  const trackPointer = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!autoHideActions) {
+      showToolbarBriefly();
+      return;
+    }
+    const top = shellRef.current?.getBoundingClientRect().top ?? 0;
+    if (event.clientY - top <= revealZonePx) revealToolbar();
+  };
+
+  const revealToolbar = () => {
+    if (toolbarTimerRef.current) window.clearTimeout(toolbarTimerRef.current);
+    toolbarTimerRef.current = null;
+    setToolbarVisible(true);
+  };
+
+  const concealToolbarSoon = () => {
+    if (!autoHideActions) return;
+    if (toolbarTimerRef.current) window.clearTimeout(toolbarTimerRef.current);
+    toolbarTimerRef.current = window.setTimeout(() => {
+      setToolbarVisible(false);
+      toolbarTimerRef.current = null;
+    }, 450);
+  };
+
   const showToolbarBriefly = () => {
     if (!isFullscreen) return;
     setToolbarVisible(true);
@@ -406,7 +447,7 @@ function CloudGraphicalConsole({
 
     setWindowFullscreen(false);
     setAppFullscreen(false);
-    setToolbarVisible(true);
+    setToolbarVisible(!autoHideActions);
     window.setTimeout(() => rfbRef.current?.focus(), 150);
   }
 
@@ -462,17 +503,19 @@ function CloudGraphicalConsole({
   return (
     <div
       ref={shellRef}
-      onMouseMove={showToolbarBriefly}
-      className={`flex flex-col bg-[#05070a] ${
+      onMouseMoveCapture={trackPointer}
+      className={`relative flex flex-col bg-[#05070a] ${
         isFullscreen
           ? "fixed inset-0 z-[100] h-screen w-screen rounded-none"
           : "h-full min-h-[24rem] rounded-b"
       }`}
     >
       <div
-        className={`flex flex-wrap items-center justify-between gap-2 border-b border-virtua-border bg-black/75 px-3 py-2 transition-transform duration-150 ${
-          isFullscreen ? "absolute left-0 right-0 top-0 z-20" : ""
-        } ${isFullscreen && !isToolbarVisible ? "-translate-y-full" : "translate-y-0"}`}
+        onMouseEnter={autoHideActions ? revealToolbar : undefined}
+        onMouseLeave={concealToolbarSoon}
+        className={`flex flex-wrap items-center justify-between gap-2 border-b border-virtua-border bg-black/75 px-3 py-2 transition duration-150 ${
+          isFullscreen || autoHideActions ? "absolute left-0 right-0 top-0 z-20 backdrop-blur-sm" : ""
+        } ${(isFullscreen || autoHideActions) && !isToolbarVisible ? "pointer-events-none -translate-y-full opacity-0" : "translate-y-0 opacity-100"}`}
       >
         <div className="flex items-center gap-2 text-xs text-virtua-muted">
           <span className="h-2 w-2 rounded-full bg-virtua-green" />
@@ -485,8 +528,18 @@ function CloudGraphicalConsole({
           <ConsoleButton label="Ctrl+Alt+Del" icon={Send} disabled={!isConnected} onClick={sendCtrlAltDel} />
           <ConsoleButton label="Redemarrer" icon={RotateCcw} disabled={!resource.permissions.canPower || isRestarting} onClick={() => void restartResource()} />
           <ConsoleButton label={isFullscreen ? "Quitter plein ecran" : "Plein ecran"} icon={Maximize2} onClick={() => void toggleFullscreen()} />
+          <ConsoleButton
+            label={autoHideActions ? "Epingler la barre" : "Masquer la barre"}
+            icon={autoHideActions ? Pin : EyeOff}
+            onClick={() => setConsolePrefs({ autoHideActions: !autoHideActions })}
+          />
+          {toolbarExtras}
         </div>
       </div>
+      {(isFullscreen || autoHideActions) && !isToolbarVisible ? (
+        // A sliver hinting where the hidden bar lives.
+        <div className="pointer-events-none absolute left-1/2 top-0 z-20 h-1 w-16 -translate-x-1/2 rounded-b bg-white/25" />
+      ) : null}
 
       <div className={`relative min-h-0 flex-1 bg-black ${isFullscreen ? "h-screen" : ""}`}>
         <div ref={containerRef} id={screenId} className="h-full w-full" />
@@ -504,10 +557,13 @@ export function GraphicalConsole({
   resource,
   runResourceAction = (resourceId, action) => virtuaClient.runAction(resourceId, action),
   onChanged,
+  toolbarExtras,
 }: {
   resource: VirtuaResource;
   runResourceAction?: (resourceId: string, action: PowerAction) => Promise<unknown>;
   onChanged?: () => void | Promise<void>;
+  /** Extra buttons appended to the console action bar (view controls). */
+  toolbarExtras?: ReactNode;
 }) {
-  return <CloudGraphicalConsole resource={resource} runResourceAction={runResourceAction} onChanged={onChanged} />;
+  return <CloudGraphicalConsole resource={resource} runResourceAction={runResourceAction} onChanged={onChanged} toolbarExtras={toolbarExtras} />;
 }
