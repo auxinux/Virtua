@@ -1402,7 +1402,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.10")
+        .user_agent("AuxiNux-Virtua-Desktop/0.2.11")
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -2740,11 +2740,7 @@ fn local_delete_vm_blocking(id: String, delete_disks: bool) -> Result<(), String
             })?;
         }
         // The UEFI variables and the TPM state belong to this VM only.
-        for vars in [
-            uefi_vars_path(&vm),
-            firmware::vars_path(&vm, true),
-            firmware::vars_path(&vm, false),
-        ] {
+        for vars in std::iter::once(uefi_vars_path(&vm)).chain(firmware::all_vars_paths(&vm)) {
             if vars.exists() && is_path_inside(&vars, &disk_root) {
                 let _ = fs::remove_file(vars);
             }

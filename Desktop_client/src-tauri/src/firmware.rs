@@ -7,7 +7,7 @@ use std::io::Read as _;
 
 /// Bumped whenever a bundled image changes: extracted copies live in a
 /// directory named after it, so an update never mixes old and new files.
-const BUNDLE_VERSION: &str = "edk2-2025.02-8+deb13u1-ms2023";
+const BUNDLE_VERSION: &str = "aa64-qemu11.1.2-sb_x64-deb13u1_ms2023";
 
 struct Blob {
     name: &'static str,
@@ -76,7 +76,22 @@ fn extract(blob: &Blob) -> Result<PathBuf, String> {
 /// Per-VM variable store, named after its template so switching Secure Boot
 /// on or off never reuses a store enrolled for the other mode.
 pub fn vars_path(vm: &LocalVm, secure_boot: bool) -> PathBuf {
-    Path::new(&vm.disk_path).with_extension(if secure_boot { "secboot-vars.fd" } else { "uefi-vars.fd" })
+    let kind = if secure_boot { "secboot" } else { "uefi" };
+    // ARM64 stores carry the firmware generation: the 0.2.6 stores came from
+    // Debian's AAVMF and must not be paired with the QEMU-based build.
+    let generation = if vm.architecture == "arm64" { "-q11" } else { "" };
+    Path::new(&vm.disk_path).with_extension(format!("{kind}-vars{generation}.fd"))
+}
+
+/// Every variable store a VM may have accumulated, current or retired.
+pub fn all_vars_paths(vm: &LocalVm) -> Vec<PathBuf> {
+    let disk = Path::new(&vm.disk_path);
+    vec![
+        vars_path(vm, true),
+        vars_path(vm, false),
+        disk.with_extension("secboot-vars.fd"),
+        disk.with_extension("uefi-vars.fd"),
+    ]
 }
 
 /// Bundled firmware for the VMs that need it: Windows guests (Windows 11
@@ -145,7 +160,9 @@ mod tests {
     fn secure_boot_and_plain_stores_never_share_a_file() {
         let mut vm = crate::local_mode_tests::sample_vm("arm64", "std");
         vm.disk_path = "/disks/win.qcow2".into();
+        assert_eq!(vars_path(&vm, true), PathBuf::from("/disks/win.secboot-vars-q11.fd"));
+        assert_eq!(vars_path(&vm, false), PathBuf::from("/disks/win.uefi-vars-q11.fd"));
+        vm.architecture = "amd64".into();
         assert_eq!(vars_path(&vm, true), PathBuf::from("/disks/win.secboot-vars.fd"));
-        assert_eq!(vars_path(&vm, false), PathBuf::from("/disks/win.uefi-vars.fd"));
     }
 }

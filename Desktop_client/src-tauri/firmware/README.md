@@ -7,17 +7,21 @@ extraites au premier usage dans `Local/Firmware/<version>/`.
 
 | Fichier | Origine |
 | --- | --- |
-| `aarch64-code.secboot.fd.gz` | `AAVMF_CODE.secboot.fd` — Debian `qemu-efi-aarch64` 2025.02-8+deb13u1 |
-| `aarch64-vars.fd.gz` | `AAVMF_VARS.fd` (vide, Secure Boot désactivé) — même paquet |
-| `aarch64-vars.windows.fd.gz` | `AAVMF_VARS.fd` + clés Microsoft, Secure Boot activé (voir ci-dessous) |
+| `aarch64-code.secboot.fd.gz` | ArmVirtQemu compilé par `build-aarch64.sh` : sources EDK2 de QEMU v11.1.2 (`roms/edk2` @ `4dfdca63`), options du `edk2-aarch64-code.fd` de QEMU + `SECURE_BOOT_ENABLE`, sans shell UEFI |
+| `aarch64-vars.fd.gz` | `QEMU_VARS.fd` du même build (vide, Secure Boot désactivé) |
+| `aarch64-vars.windows.fd.gz` | ce même magasin + clés Microsoft et dbx, Secure Boot activé (voir ci-dessous) |
 | `x86_64-code.secboot.fd.gz` | `OVMF_CODE_4M.secboot.fd` (exige SMM) — Debian `ovmf` 2025.02-8+deb13u1 |
 | `x86_64-vars.fd.gz` | `OVMF_VARS_4M.fd` (vide) — même paquet |
 | `x86_64-vars.windows.fd.gz` | `OVMF_VARS_4M.fd` + clés Microsoft, Secure Boot activé |
 
-Paquets source (SHA-256 des `.deb`) :
+Pourquoi ne pas reprendre l'AAVMF de Debian sur ARM64 : sous HVF sur un Mac
+M4 (macOS 27), il laissait Windows bloqué sur « Start boot option », alors que
+le firmware de QEMU démarrait le même ISO. Le firmware ARM64 est donc compilé
+depuis exactement les sources et options de celui de QEMU (DEBUG silencieux,
+politique NX `nx.broken.shim.grub`), avec Secure Boot en plus.
 
-- `qemu-efi-aarch64_2025.02-8+deb13u1_all.deb` —
-  `a00b2411a79c8aeafd95a7c868ac3cd1aab592f1af9fff965f02d81a625276ed`
+Paquet source x86 (SHA-256 du `.deb`) :
+
 - `ovmf_2025.02-8+deb13u1_all.deb` —
   `78e0d54df11fc77406cb7a0bc9a39e5bca6d1cbe06556b91d9a73491c52decdf`
 
@@ -27,11 +31,11 @@ Production PCA 2011, Windows UEFI CA 2023, UEFI CA 2011/2023 et Option ROM
 UEFI CA 2023. Ils ont été générés avec `virt-firmware` (Red Hat) :
 
 ```sh
-virt-fw-vars -i AAVMF_VARS.fd     -o AAVMF_VARS.win.fd \
+virt-fw-vars -i edk2-aarch64-secure-vars.fd -o vars.windows.fd \
   --enroll-microsoft --microsoft-db all --microsoft-kek all --sb
 virt-fw-vars -i OVMF_VARS_4M.fd   -o OVMF_VARS_4M.win.fd \
   --enroll-microsoft --microsoft-db all --microsoft-kek all --sb
-gzip -9c AAVMF_VARS.win.fd > aarch64-vars.windows.fd.gz   # etc.
+gzip -9c vars.windows.fd > aarch64-vars.windows.fd.gz   # etc.
 ```
 
 Après toute mise à jour d'une image, changer `BUNDLE_VERSION` dans
