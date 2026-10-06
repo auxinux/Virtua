@@ -12,6 +12,28 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.5",
+      items: fr
+        ? [
+            "VirtuaOS : nouvelle section Paramètres → VirtuaOS (administrateurs, uniquement sur un hôte VirtuaOS) pour choisir la branche VirtuaOS et le canal du noyau, PROD ou DEV. Le choix est inscrit dans /etc/virtuaos/channel, le même fichier que lit `vos`.",
+            "Changer la branche VirtuaOS ne modifie que ce fichier ; la mise à niveau reste faite par `vos os upgrade`. La dernière version publiée sur la branche choisie est affichée.",
+            "Changer le canal du noyau réécrit la source APT du noyau (suite kernel ou kernel-dev), installe le méta-paquet du canal et met GRUB à jour. Le retour en PROD purge les noyaux -dev seulement si un noyau PROD est bien présent dans /boot. Aucun redémarrage n'est lancé : une bannière « Redémarrage requis » reste affichée tant que le noyau actif ne correspond pas au canal choisi. Chaque changement est inscrit au journal d'audit.",
+            "Tableau de bord : le noyau utilisé est affiché sous la version du système, avec un badge PROD/DEV pour les noyaux AuxiNux.",
+            "Clic droit : un menu contextuel Virtua remplace celui du navigateur dans toute l'interface — sur une VM, un LXC ou un conteneur Docker : ouvrir, console, démarrer, arrêter, redémarrer, copier le nom ; ailleurs : copier/coller, liens et raccourcis de navigation. Les consoles gardent leur comportement habituel.",
+            "Console texte : l'affichage ne s'écrit plus par-dessus lui-même. La police du terminal arrivait souvent après le premier calcul de la taille des caractères ; le terminal recalcule maintenant cette taille dès qu'elle est chargée. Rendu WebGL pour un défilement fluide, et la taille du terminal est transmise correctement aux nœuds distants.",
+            "Console graphique des VM : le relais VNC/SPICE n'accumule plus les images quand le navigateur dessine moins vite que la VM (source du retard croissant), et le pointeur de la VM est de nouveau dessiné localement par le navigateur, sans attendre l'aller-retour réseau.",
+          ]
+        : [
+            "VirtuaOS: new Settings → VirtuaOS section (administrators, only on a VirtuaOS host) to pick the VirtuaOS branch and the kernel channel, PROD or DEV. The choice is stored in /etc/virtuaos/channel, the same file `vos` reads.",
+            "Changing the VirtuaOS branch only changes that file; upgrading is still done by `vos os upgrade`. The latest version published on the selected branch is shown.",
+            "Changing the kernel channel rewrites the kernel APT source (suite kernel or kernel-dev), installs the channel's meta-package and updates GRUB. Going back to PROD purges the -dev kernels only once a PROD kernel is confirmed in /boot. No reboot is started: a \"Reboot required\" banner stays visible until the running kernel matches the selected channel. Every change is recorded in the audit log.",
+            "Dashboard: the running kernel is shown under the system version, with a PROD/DEV badge for AuxiNux kernels.",
+            "Right-click: a Virtua context menu replaces the browser's across the interface — on a VM, LXC or Docker container: open, console, start, stop, restart, copy name; elsewhere: copy/paste, links and navigation shortcuts. Consoles keep their usual behaviour.",
+            "Text console: output no longer draws over itself. The terminal font often arrived after the character size was first measured; the terminal now re-measures as soon as it loads. WebGL rendering for smooth scrolling, and the terminal size now reaches remote nodes correctly.",
+            "VM graphical console: the VNC/SPICE relay no longer piles up frames when the browser draws slower than the VM (the source of the growing lag), and the VM pointer is drawn locally by the browser again, without waiting for the network round-trip.",
+          ],
+    },
+    {
       v: "0.8.4",
       items: fr
         ? [
