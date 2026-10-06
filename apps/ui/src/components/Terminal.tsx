@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { apiPost, wsUrl } from "../api/client";
 import "@xterm/xterm/css/xterm.css";
 
@@ -11,6 +12,11 @@ interface TerminalProps {
   ticketBody?: unknown;
   className?: string;
 }
+
+const TERMINAL_FONT = "JetBrains Mono, Fira Code, monospace";
+// Same stack with an inert trailing space: assigning it is a real option change,
+// which makes xterm re-measure its character cell (see remeasure below).
+const TERMINAL_FONT_ALT = `${TERMINAL_FONT} `;
 
 export function Terminal({ url, ticketPath, ticketBody, className = "" }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -38,7 +44,7 @@ export function Terminal({ url, ticketPath, ticketBody, className = "" }: Termin
         cursor: "#228be6",
         selectionBackground: "#228be640",
       },
-      fontFamily: "JetBrains Mono, Fira Code, monospace",
+      fontFamily: TERMINAL_FONT,
       fontSize: 13,
       lineHeight: 1.4,
       cursorBlink: true,
@@ -57,6 +63,15 @@ export function Terminal({ url, ticketPath, ticketBody, className = "" }: Termin
 
     term.open(host);
 
+    // The default DOM renderer rebuilds a <span> per cell and stutters on bursty
+    // output (apt, logs, top). WebGL draws the grid on the GPU; on a browser
+    // without WebGL, or if the context is lost, xterm falls back to the DOM.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch { /* no WebGL: keep the DOM renderer */ }
+
     /** Fit only once the host actually has a box, else xterm computes 0 cols. */
     const safeFit = () => {
       if (disposed || host.clientWidth === 0 || host.clientHeight === 0) return;
@@ -72,6 +87,20 @@ export function Terminal({ url, ticketPath, ticketBody, className = "" }: Termin
 
     // Layout is not settled on the first paint; measure on the next frame.
     openFrame = requestAnimationFrame(safeFit);
+
+    // JetBrains Mono comes from Google Fonts with display=swap, so it often
+    // lands AFTER xterm measured its cell with the fallback font. xterm keeps
+    // the stale cell width and the real glyphs then overlap each other — the
+    // "text written over itself" console. Re-measure whenever a font finishes
+    // loading, then refit so the PTY gets the corrected geometry.
+    const remeasure = () => {
+      if (disposed) return;
+      term.options.fontFamily = term.options.fontFamily === TERMINAL_FONT ? TERMINAL_FONT_ALT : TERMINAL_FONT;
+      safeFit();
+    };
+    const fonts = (document as Document & { fonts?: FontFaceSet }).fonts;
+    fonts?.addEventListener("loadingdone", remeasure);
+    void fonts?.load(`13px "JetBrains Mono"`).then((loaded) => { if (loaded.length > 0) remeasure(); }).catch(() => {});
 
     const connect = async () => {
       try {
@@ -94,21 +123,28 @@ export function Terminal({ url, ticketPath, ticketBody, className = "" }: Termin
           term.write("\x1b[32mConnected\x1b[0m\r\n");
         };
 
+        // One streaming decoder for the whole session: a multi-byte UTF-8
+        // character split across two frames must not turn into two U+FFFD.
+        const decoder = new TextDecoder();
         ws.onmessage = (event) => {
-          const raw = typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
-          try {
-            const msg = JSON.parse(raw) as { type: string; data: string };
-            if (msg.type === "output") term.write(msg.data);
-          } catch {
+          if (disposed) return;
+          const raw = typeof event.data === "string" ? event.data : decoder.decode(event.data as ArrayBuffer, { stream: true });
+          let msg: { type?: unknown; data?: unknown } | null = null;
+          try { msg = JSON.parse(raw); } catch { /* raw PTY bytes */ }
+          if (msg && typeof msg === "object" && typeof msg.type === "string") {
+            if (msg.type === "output" && typeof msg.data === "string") term.write(msg.data);
+          } else {
+            // Not one of our envelopes (e.g. a bare "42" from the shell) — show it as-is.
             term.write(raw);
           }
         };
 
         ws.onclose = (event) => {
+          if (disposed) return;
           const reason = event.reason ? `: ${event.reason}` : "";
           term.write(`\r\n\x1b[31mDisconnected${reason}\x1b[0m\r\n`);
         };
-        ws.onerror = () => term.write(`\r\n\x1b[31mConnection error (${resolvedUrl.replace(/\?.*$/, "?ticket=...")})\x1b[0m\r\n`);
+        ws.onerror = () => !disposed && term.write(`\r\n\x1b[31mConnection error (${resolvedUrl.replace(/\?.*$/, "?ticket=...")})\x1b[0m\r\n`);
       } catch (error) {
         term.write(`\r\n\x1b[31m${error instanceof Error ? error.message : "Connection failed"}\x1b[0m\r\n`);
       }
@@ -133,6 +169,7 @@ export function Terminal({ url, ticketPath, ticketBody, className = "" }: Termin
 
     return () => {
       disposed = true;
+      fonts?.removeEventListener("loadingdone", remeasure);
       if (openFrame !== null) cancelAnimationFrame(openFrame);
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeObserver?.disconnect();

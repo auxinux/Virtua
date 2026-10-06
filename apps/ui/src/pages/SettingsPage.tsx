@@ -6,6 +6,7 @@ import { apiGet, apiPut, apiPost, apiDelete } from "../api/client";
 import { ConfirmModal } from "../components/ui/Modal";
 import { ResourceAclPanel } from "../components/acl/ResourceAclPanel";
 import { MfaSettingsCard } from "../components/settings/MfaSettingsCard";
+import { VirtuaOsSettingsCard } from "../components/settings/VirtuaOsSettingsCard";
 import { applyTheme, getStoredTheme, type AppTheme } from "../utils/theme";
 import type { DatacenterConfig, DatacenterJoinToken, DatacenterNode } from "@auxinux/shared";
 
@@ -455,6 +456,9 @@ export default function SettingsPage() {
           </Link>
         </div>
       )}
+
+      {/* VirtuaOS — absent on a plain Debian/Ubuntu host */}
+      {!isNodeSettingsRoute && <VirtuaOsSettingsCard />}
 
       {/* General */}
       {showNodeSections && <div className="card p-5 space-y-4">

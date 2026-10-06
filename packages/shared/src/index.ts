@@ -23,3 +23,4 @@ export * from "./schemas/datacenter";
 export * from "./schemas/desktop";
 export * from "./schemas/template";
 export * from "./desktop/inventory";
+export * from "./virtuaos";

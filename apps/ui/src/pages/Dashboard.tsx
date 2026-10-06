@@ -8,6 +8,8 @@ import { Sparkline } from "../components/ui/Sparkline";
 import { formatBytes, formatUptime } from "../utils/formatBytes";
 import type { SystemStats, SystemInfo, ResourceCounts } from "@auxinux/shared";
 import { useSimpleMode } from "../utils/useSimpleMode";
+import { useAuth } from "../utils/useAuth";
+import { useVirtuaOsStatus, VirtuaOsRebootBanner } from "../components/settings/VirtuaOsSettingsCard";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Plus, Monitor, Play, Square, RefreshCcw, ExternalLink,
@@ -101,6 +103,8 @@ function GuestOverviewCard({ title, items, basePath, isSimple = false }: {
 export default function Dashboard() {
   const { t } = useTranslation();
   const { isSimpleMode } = useSimpleMode();
+  const { isAdmin } = useAuth();
+  const { data: virtuaOs } = useVirtuaOsStatus(isAdmin);
   const [history, setHistory] = useState<{ cpu: number[]; mem: number[]; disk: number[] }>({ cpu: [], mem: [], disk: [] });
 
   const { data: stats, isLoading: statsLoading } = useQuery<SystemStats>({
@@ -168,14 +172,26 @@ export default function Dashboard() {
               <div>
                 <h1 className="text-xl font-bold text-text-100">{t("nav.dashboard")}</h1>
                 {info && <p className="text-sm text-text-500 mt-0.5">{info.hostname} — {info.os}</p>}
+                {info && (
+                  <p className="text-[11px] text-text-500 mt-0.5 flex items-center gap-1.5">
+                    {t("dashboard.kernel")} <span className="font-mono text-text-400">{info.kernel}</span>
+                    {/* DEV/PROD only means something on an AuxiNux kernel. */}
+                    {/auxinux/i.test(info.kernel) && (
+                      <span className={`rounded px-1 py-px text-[9px] font-semibold ${info.kernel.includes("-dev-") ? "bg-amber-900/40 text-amber-300" : "bg-emerald-900/30 text-emerald-300"}`}>
+                        {info.kernel.includes("-dev-") ? "DEV" : "PROD"}
+                      </span>
+                    )}
+                  </p>
+                )}
               </div>
               {info && (
                 <div className="text-right text-xs text-text-500">
-                  <div>{t("dashboard.kernel")}: {info.kernel}</div>
                   <div>{t("dashboard.uptime")}: {formatUptime(info.uptime)}</div>
                 </div>
               )}
             </div>
+
+            <VirtuaOsRebootBanner status={virtuaOs} />
 
             {/* Resource Gauges */}
             <div className="card p-6">

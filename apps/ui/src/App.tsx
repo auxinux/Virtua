@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from "
 import { Sidebar } from "./components/Layout/Sidebar";
 import { TopBar } from "./components/Layout/TopBar";
 import { TaskDrawer } from "./components/Layout/TaskDrawer";
+import { AppContextMenu } from "./components/ui/AppContextMenu";
 import { useAuth } from "./utils/useAuth";
 import { initializeTheme } from "./utils/theme";
 import { AccessDenied } from "./components/auth/AccessDenied";
@@ -109,6 +110,7 @@ function ProtectedLayout({ children }: { children: React.ReactNode }) {
         </main>
       </div>
       <TaskDrawer />
+      <AppContextMenu />
     </div>
   );
 }

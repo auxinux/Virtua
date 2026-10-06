@@ -26,6 +26,8 @@ import {
 import { startCrashWatcher, markExpectedTransition } from "./crashWatcher.js";
 import { callRunner, type RunnerProgress } from "./runnerClient.js";
 import { registerDesktopApi, type DesktopResourceRow } from "./desktop.js";
+import { registerVirtuaOsApi } from "./virtuaos.js";
+import { createBackpressureForwarder, rawDataToBuffer } from "./wsPipe.js";
 import {
   generateNumericCode, maskPhone, maskEmail, isLikelyPhone, isLikelyEmail, normalizePhone,
   sendSms, sendEmail, type TwilioConfig, type SmtpConfig,
@@ -10795,11 +10797,8 @@ vncWss.on("connection", async (rawWs: WebSocket) => {
         { method: "POST" },
       );
       const remoteWs = new WebSocket(remoteTicket.url);
-      remoteWs.on("message", (data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(data, { binary: true, compress: false });
-        }
-      });
+      const forward = createBackpressureForwarder(ws, remoteWs);
+      remoteWs.on("message", (data) => forward(rawDataToBuffer(data)));
       ws.on("message", (data) => {
         if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data as Buffer);
       });
@@ -10826,11 +10825,7 @@ vncWss.on("connection", async (rawWs: WebSocket) => {
     const vncSocket = net.createConnection({ host, port });
     vncSocket.setNoDelay(true);
     (ws as unknown as { _socket?: { setNoDelay?: (enabled: boolean) => void } })._socket?.setNoDelay?.(true);
-    vncSocket.on("data", (data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data, { binary: true, compress: false });
-      }
-    });
+    vncSocket.on("data", createBackpressureForwarder(ws, vncSocket));
     ws.on("message", (data) => { vncSocket.write(data as Buffer); });
     ws.on("close", () => vncSocket.destroy());
     vncSocket.on("error", () => ws.close(1011, "VNC connection error"));
@@ -10845,11 +10840,7 @@ spiceWss.on("connection", async (rawWs: WebSocket) => {
   const ticket = ws.auxinuxTicket;
   if (!ticket || !ticket.target) { ws.close(); return; }
 
-  const toBuffer = (data: RawData) => {
-    if (Buffer.isBuffer(data)) return data;
-    if (Array.isArray(data)) return Buffer.concat(data);
-    return Buffer.from(data);
-  };
+  const toBuffer = (data: RawData) => rawDataToBuffer(data);
 
   // SPICE is a client-talks-first protocol: the browser sends its link header
   // the instant the WS opens, i.e. while we are still awaiting the runner /
@@ -10874,9 +10865,8 @@ spiceWss.on("connection", async (rawWs: WebSocket) => {
         { method: "POST" },
       );
       const remoteWs = new WebSocket(remoteTicket.url);
-      remoteWs.on("message", (data) => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true, compress: false });
-      });
+      const forward = createBackpressureForwarder(ws, remoteWs);
+      remoteWs.on("message", (data) => forward(toBuffer(data)));
       remoteWs.on("open", () => {
         ws.off("message", queueEarlyMessage);
         for (const chunk of earlyMessages.splice(0)) {
@@ -10911,9 +10901,7 @@ spiceWss.on("connection", async (rawWs: WebSocket) => {
     const spiceSocket = net.createConnection({ host, port });
     spiceSocket.setNoDelay(true);
     (ws as unknown as { _socket?: { setNoDelay?: (enabled: boolean) => void } })._socket?.setNoDelay?.(true);
-    spiceSocket.on("data", (data) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(data, { binary: true, compress: false });
-    });
+    spiceSocket.on("data", createBackpressureForwarder(ws, spiceSocket));
     // net queues writes issued before "connect" completes, so it is safe to
     // flush the early messages and start piping immediately.
     ws.off("message", queueEarlyMessage);
@@ -10955,6 +10943,14 @@ termWss.on("connection", (rawWs: WebSocket) => {
       ticket.kind === "remote-vm-console"
     )
   ) {
+    // The browser sends its first resize the moment the socket opens, while we
+    // are still asking the remote node for a ticket. Dropping it left the
+    // remote PTY at 80x24 under a wider xterm: every long line wrapped at the
+    // wrong column and redrew over the previous ones. Queue until the far end
+    // is open, then replay in order.
+    const earlyMessages: string[] = [];
+    const queueEarly = (msg: RawData) => { earlyMessages.push(rawDataToBuffer(msg).toString()); };
+    ws.on("message", queueEarly);
     void (async () => {
       try {
         const remoteNodeName = ticket.kind === "remote-host" ? ticket.target : ticket.proxyNode;
@@ -10981,6 +10977,8 @@ termWss.on("connection", (rawWs: WebSocket) => {
               body: JSON.stringify({ initialCommand: ticket.initialCommand }),
             }
           : { method: "POST" });
+        // The browser may have left while we were fetching the ticket.
+        if (ws.readyState !== WebSocket.OPEN) return;
         remoteWs = new WebSocket(remoteTicket.url);
         remoteWs.on("message", (data) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(data.toString());
@@ -10993,8 +10991,12 @@ termWss.on("connection", (rawWs: WebSocket) => {
         remoteWs.on("close", () => {
           if (ws.readyState === WebSocket.OPEN) ws.close();
         });
-        ws.on("message", (msg) => {
-          if (remoteWs?.readyState === WebSocket.OPEN) remoteWs.send(msg.toString());
+        remoteWs.on("open", () => {
+          ws.off("message", queueEarly);
+          for (const msg of earlyMessages.splice(0)) remoteWs?.send(msg);
+          ws.on("message", (msg) => {
+            if (remoteWs?.readyState === WebSocket.OPEN) remoteWs.send(msg.toString());
+          });
         });
         ws.on("close", () => {
           try { remoteWs?.close(); } catch {}
@@ -11294,6 +11296,20 @@ async function buildDesktopCreateOptions(type: "vm" | "lxc" | "docker"): Promise
 
   return { nodes, images, networks, defaults };
 }
+
+registerVirtuaOsApi({
+  app,
+  callRunner,
+  requireAdmin,
+  audit: (req, entry) => securityLog(db, {
+    userId: req.session.userId!,
+    username: req.session.username,
+    ip: getClientIp(req),
+    resourceType: "host",
+    resourceName: "virtuaos",
+    ...entry,
+  }),
+});
 
 registerDesktopApi({
   app,

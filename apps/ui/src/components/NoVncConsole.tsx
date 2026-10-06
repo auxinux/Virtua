@@ -29,16 +29,6 @@ export function NoVncConsole({ ticketPath, className = "", bare = false, resizeS
   useEffect(() => {
     let disposed = false;
     let statusTimer: number | null = null;
-    let cursorObserver: MutationObserver | null = null;
-
-    const hideLocalCursor = () => {
-      const container = containerRef.current;
-      if (!container) return;
-      container.style.setProperty("cursor", "none", "important");
-      for (const element of Array.from(container.querySelectorAll<HTMLElement>("canvas, div"))) {
-        element.style.setProperty("cursor", "none", "important");
-      }
-    };
 
     const disconnectCurrent = () => {
       if (rfbRef.current) {
@@ -67,9 +57,11 @@ export function NoVncConsole({ ticketPath, className = "", bare = false, resizeS
         rfb.background = "#000";
         rfb.qualityLevel = 7;
         rfb.compressionLevel = 2;
-        cursorObserver = new MutationObserver(hideLocalCursor);
-        cursorObserver.observe(containerRef.current, { childList: true, subtree: true });
-        hideLocalCursor();
+        // The guest cursor is drawn locally by noVNC (cursor pseudo-encoding),
+        // so it follows the mouse with no round-trip. Do NOT force
+        // `cursor: none` on the canvas: that hid this local cursor whenever the
+        // DOM changed, leaving only the guest-side pointer, which lags by a full
+        // network round-trip and made the whole console feel slow.
 
         rfb.addEventListener("connect", () => {
           setStatus(t("msg.connectionConnected"));
@@ -106,7 +98,6 @@ export function NoVncConsole({ ticketPath, className = "", bare = false, resizeS
     return () => {
       disposed = true;
       if (statusTimer) window.clearTimeout(statusTimer);
-      cursorObserver?.disconnect();
       disconnectCurrent();
     };
   }, [resizeSession, t, ticketPath]);
