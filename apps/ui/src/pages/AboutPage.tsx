@@ -12,6 +12,18 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.6",
+      items: fr
+        ? [
+            "Snapshots LXC : la création n'échoue plus avec « Runner timeout for action: lxc_snapshot_create » après 2 minutes. Un snapshot copie tout le système de fichiers du conteneur ; le panneau abandonnait au bout de 120 s alors que la copie continuait en arrière-plan et ralentissait tout backup lancé juste après. La tâche affiche maintenant la vraie progression (Go copiés / Go total).",
+            "Backups VM et LXC : le niveau de compression zstd par défaut passe de 9 à 3. Le niveau 9 rendait les gros backups limités par le processeur, à quelques Mo/s sur un hôte chargé ; le niveau 3 suit la vitesse du disque. Le niveau 9 reste disponible dans la fenêtre de backup.",
+          ]
+        : [
+            "LXC snapshots: creation no longer fails with \"Runner timeout for action: lxc_snapshot_create\" after 2 minutes. A snapshot copies the container's whole filesystem; the panel gave up after 120 s while the copy kept running in the background, slowing down any backup started right after. The task now shows real progress (GB copied / GB total).",
+            "VM and LXC backups: the default zstd compression level goes from 9 to 3. Level 9 made large backups CPU-bound, at a few MB/s on a loaded host; level 3 keeps up with the disk. Level 9 is still available in the backup dialog.",
+          ],
+    },
+    {
       v: "0.8.5",
       items: fr
         ? [
