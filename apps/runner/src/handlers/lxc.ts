@@ -117,7 +117,7 @@ export async function handleLxc(action: string, params: unknown, emit?: Progress
     case "lxc_cache_list": return listCache();
     case "lxc_cache_delete": return clearCache();
     case "lxc_cache_delete_entry": return deleteCacheEntry(p.dist as string, p.release as string);
-    case "lxc_snapshot_create": return createSnapshot(p.name as string, p.snapName as string, p.description as string | undefined, p.freeze === true);
+    case "lxc_snapshot_create": return createSnapshot(p.name as string, p.snapName as string, p.description as string | undefined, p.freeze === true, emit);
     case "lxc_snapshot_list": return listSnapshots(p.name as string);
     case "lxc_snapshot_rollback": return rollbackSnapshot(p.name as string, p.snapName as string);
     case "lxc_snapshot_delete": return deleteSnapshot(p.name as string, p.snapName as string);
@@ -2524,7 +2524,7 @@ async function readSnapshotEntries(name: string) {
   return [...snapshots.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function createManualSnapshot(name: string, snapName: string, description?: string) {
+async function createManualSnapshot(name: string, snapName: string, description?: string, emit?: ProgressEmitter) {
   const safeSnapName = validateSnapshotName(snapName);
   const sourceDir = path.join(LXC_DIR, name);
   const finalDir = manualSnapshotDir(name, safeSnapName);
@@ -2543,6 +2543,23 @@ async function createManualSnapshot(name: string, snapName: string, description?
   // produces a snapshot holding just the config — which is why rolling one back
   // changed nothing.
   const externalRootfs = await externalRootfsPath(name);
+
+  // A manual snapshot is a full copy of the rootfs (tens of GB is common), so
+  // report real progress: bytes consumed on the destination filesystem vs the
+  // source size. statfs is O(1) — no tree walk while cp is hammering the disk.
+  const sourceBytes = await directorySizeBytes(sourceDir);
+  const externalBytes = externalRootfs ? await directorySizeBytes(externalRootfs) : 0;
+  const totalBytes = sourceBytes !== undefined && externalBytes !== undefined ? sourceBytes + externalBytes : undefined;
+  const freeAtStart = await freeBytes(parentDir);
+  const progressTimer = emit && totalBytes && freeAtStart !== undefined
+    ? setInterval(() => {
+        void freeBytes(parentDir).then((free) => {
+          if (free === undefined) return;
+          const copied = Math.max(0, Math.min(totalBytes, freeAtStart - free));
+          emit({ percent: Math.floor((copied / totalBytes) * 100), bytesCurrent: copied, bytesTotal: totalBytes, message: "Copying container filesystem" });
+        });
+      }, 3000)
+    : undefined;
 
   try {
     const copiedContainerDir = path.join(tmpDir, "container");
@@ -2565,10 +2582,22 @@ async function createManualSnapshot(name: string, snapName: string, description?
   } catch (error) {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     throw error;
+  } finally {
+    if (progressTimer) clearInterval(progressTimer);
   }
 }
 
-async function createSnapshot(name: string, snapName: string, description?: string, freeze = false) {
+/** Bytes available on the filesystem holding `dir` (undefined if statfs fails). */
+async function freeBytes(dir: string): Promise<number | undefined> {
+  try {
+    const st = await fs.statfs(dir);
+    return Number(st.bavail) * Number(st.bsize);
+  } catch {
+    return undefined;
+  }
+}
+
+async function createSnapshot(name: string, snapName: string, description?: string, freeze = false, emit?: ProgressEmitter) {
   const safeSnapName = validateSnapshotName(snapName);
   const wasRunning = (await getLxcState(name)) === "RUNNING";
   // Hot snapshot by default: production containers keep running. We only stop
@@ -2598,11 +2627,11 @@ async function createSnapshot(name: string, snapName: string, description?: stri
         nativeError = error;
       }
 
-      const result = await createManualSnapshot(name, safeSnapName, description);
+      const result = await createManualSnapshot(name, safeSnapName, description, emit);
       return { ...result, nativeError: errorMessage(nativeError) };
     }
 
-    return createManualSnapshot(name, safeSnapName, description);
+    return createManualSnapshot(name, safeSnapName, description, emit);
   } finally {
     if (stopDuringSnapshot) {
       await lxcCmd("lxc-start", "-n", name, "-d").catch(() => {});

@@ -5847,7 +5847,7 @@ app.post("/api/internal/lxc/:name/snapshot/create", async (req, reply) => {
   const { snapName: snapNameRaw, description } = req.body as { snapName?: string; description?: string };
   const snapName = normalizeLxcSnapshotName(snapNameRaw);
   if (!snapName) return reply.status(400).send({ error: LXC_SNAPSHOT_NAME_ERROR });
-  const result = await callRunner("lxc_snapshot_create", { name, snapName, description });
+  const result = await callRunner("lxc_snapshot_create", { name, snapName, description }, BACKUP_TIMEOUT_MS);
   db.prepare("INSERT INTO snapshots (resource_type, resource_name, snapshot_name, description, created_by) VALUES ('lxc', ?, ?, ?, NULL)")
     .run(name, snapName, description ?? null);
   return result;
@@ -8270,7 +8270,9 @@ app.post("/api/lxc/:name/snapshot/create", async (req, reply) => {
           method: "POST",
           body: JSON.stringify({ snapName, description }),
         })
-      : await callRunner("lxc_snapshot_create", { name, snapName, description });
+      // A manual LXC snapshot copies the whole rootfs: the default 120 s runner
+      // timeout failed the task while cp kept running in the background.
+      : await callRunner("lxc_snapshot_create", { name, snapName, description }, BACKUP_TIMEOUT_MS, onBackupProgress(task.id));
     if (!node || node.isLocal) {
       db.prepare("INSERT INTO snapshots (resource_type, resource_name, snapshot_name, description, created_by) VALUES ('lxc', ?, ?, ?, ?)")
         .run(name, snapName, description ?? null, req.session.userId!);
@@ -11481,7 +11483,7 @@ registerDesktopApi({
     }
     if (type === "lxc") {
       if (remote) return fetchRemoteNode(remote, `/api/internal/lxc/${encodeURIComponent(name)}/snapshot/create`, { method: "POST", body: JSON.stringify(input) });
-      const result = await callRunner("lxc_snapshot_create", { name, snapName: input.name, description: input.description }, 15 * 60_000);
+      const result = await callRunner("lxc_snapshot_create", { name, snapName: input.name, description: input.description }, BACKUP_TIMEOUT_MS);
       db.prepare("INSERT INTO snapshots (resource_type, resource_name, snapshot_name, description, created_by) VALUES ('lxc', ?, ?, ?, NULL)").run(name, input.name, input.description ?? null);
       return result;
     }

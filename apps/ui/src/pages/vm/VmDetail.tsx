@@ -1820,7 +1820,7 @@ function VmBackupTab({ vmName, nodeName }: { vmName: string; nodeName?: string }
   const [restoreTarget, setRestoreTarget] = useState<{ id: string; filename: string; storagePool: string; format: string } | null>(null);
   const [format, setFormat] = useState<"tar.gz" | "qcow2">("qcow2");
   const [compress, setCompress] = useState(true);
-  const [compressionLevel, setCompressionLevel] = useState(9);
+  const [compressionLevel, setCompressionLevel] = useState(3);
   const [pool, setPool] = useState("");
   const [restoreName, setRestoreName] = useState("");
   const [restorePool, setRestorePool] = useState("");
@@ -1972,8 +1972,8 @@ function VmBackupTab({ vmName, nodeName }: { vmName: string; nodeName?: string }
             <div>
               <label className="label">Niveau de compression (zstd)</label>
               <select className="select" value={compressionLevel} onChange={(e) => setCompressionLevel(parseInt(e.target.value, 10))}>
-                <option value={3}>3 — Rapide (ratio faible)</option>
-                <option value={9}>9 — Équilibré (recommandé)</option>
+                <option value={3}>3 — Rapide (recommandé)</option>
+                <option value={9}>9 — Compact (2-4× plus lent)</option>
                 <option value={19}>19 — Maximum (plus lent)</option>
               </select>
             </div>

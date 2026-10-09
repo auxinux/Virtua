@@ -21,8 +21,11 @@ export interface Compressor {
   isZstd: boolean;
 }
 
-/** Default zstd level: 9 + long-range matching = strong ratio, still fast. */
-const ZSTD_LEVEL = parseInt(process.env.BACKUP_ZSTD_LEVEL ?? "9", 10);
+/**
+ * Default zstd level: 3 + long-range matching keeps up with disk reads; 9 made
+ * a ~100 GB container backup CPU-bound at a few MB/s on a loaded host.
+ */
+const ZSTD_LEVEL = parseInt(process.env.BACKUP_ZSTD_LEVEL ?? "3", 10);
 /** Long-range match window log (2^27 = 128 MiB) helps on big disk images. */
 const ZSTD_LONG = parseInt(process.env.BACKUP_ZSTD_LONG ?? "27", 10);
 

@@ -84,8 +84,9 @@ export const BackupVmSchema = z.object({
   storagePool: z.string().min(1),
   format: z.enum(["tar.gz", "qcow2"]),
   compress: z.boolean().default(true),
-  // zstd level for the tar.gz (archive) format; 9 is the balanced default.
-  compressionLevel: z.number().int().min(1).max(19).default(9),
+  // zstd level for the tar.gz (archive) format; 3 is the default: multi-threaded
+  // it runs at disk speed, while 9 made large backups CPU-bound.
+  compressionLevel: z.number().int().min(1).max(19).default(3),
   notes: z.string().max(500).optional(),
 });
 

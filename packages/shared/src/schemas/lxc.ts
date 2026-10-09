@@ -63,8 +63,9 @@ export const BackupLxcSchema = z.object({
   storagePool: z.string().min(1).default("local"),
   format: z.enum(["tar.gz", "archive"]).default("tar.gz"),
   compress: z.boolean().default(true),
-  // zstd compression level (1 fastest … 19 max ratio); 9 is the balanced default.
-  compressionLevel: z.number().int().min(1).max(19).default(9),
+  // zstd compression level (1 fastest … 19 max ratio); 3 is the default: multi-threaded
+  // it runs at disk speed, while 9 made large backups CPU-bound.
+  compressionLevel: z.number().int().min(1).max(19).default(3),
 });
 
 export const GpuDeviceAssignmentSchema = z.object({
