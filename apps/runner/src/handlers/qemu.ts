@@ -7,8 +7,8 @@ import { parseVirtuaConfig, isUnsafeArchivePath } from "@auxinux/shared";
 import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, decompressorFor, runTarPipeline } from "./compression.js";
 import type { ProgressEmitter } from "../runner.js";
 import { assertOutsideLxcRootfs, isProtectedHostDir } from "./lxcRootfsGuard.js";
-import { buildPveVmXml, parsePveVmConfig, parseSnapshotRef, validatePbsConnection } from "./pbsConfig.js";
-import { readPbsBlob, restorePbsArchive } from "./pbsClient.js";
+import { buildPveQemuConf, buildPveVmXml, parseLibvirtForPve, parsePveVmConfig, parseSnapshotRef, validatePbsConnection, type PruneKeep } from "./pbsConfig.js";
+import { backupToPbs, prunePbsGroup, readPbsBlob, restorePbsArchive } from "./pbsClient.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -268,6 +268,7 @@ export async function handleQemu(action: string, params: unknown, emit?: Progres
     case "qemu_backup": return backupVm(p, emit);
     case "qemu_restore_backup": return restoreVmBackup(p);
     case "qemu_restore_pbs": return restoreVmFromPbs(p, emit);
+    case "qemu_backup_pbs": return backupVmToPbs(p, emit);
     case "qemu_create_from_template": return createVmFromTemplate(p);
     case "qemu_repair_disk": return repairVmDisk(p);
     case "qemu_rename": return renameVm(p.name as string, p.newName as string);
@@ -2802,6 +2803,66 @@ async function qemuImgWithProgress(args: string[], emit?: ProgressEmitter): Prom
   });
 }
 
+type FrozenDisk = { disk: { device: string; source: string }; overlayPath: string };
+
+/**
+ * Live-backup freeze: atomically redirect writes of every listed disk to a
+ * temporary external overlay, so the base images stop changing and can be read
+ * consistently while the VM keeps running. Undo with thawVmDisks().
+ */
+async function freezeVmDisks(name: string, disks: Array<{ device: string; source: string }>, timestamp: string): Promise<FrozenDisk[]> {
+  const overlays: FrozenDisk[] = [];
+  const diskSpecs: string[] = [];
+  for (const disk of disks) {
+    const overlayPath = path.join(
+      path.dirname(disk.source),
+      `${path.basename(disk.source)}.auxinux-backup-${timestamp}.qcow2`,
+    );
+    await fs.unlink(overlayPath).catch(() => {});
+    diskSpecs.push("--diskspec", `${disk.device},snapshot=external,file=${overlayPath}`);
+    overlays.push({ disk, overlayPath });
+  }
+  await virsh(
+    "snapshot-create-as",
+    name,
+    `auxinux-live-backup-${timestamp}`,
+    "--disk-only",
+    "--atomic",
+    "--no-metadata",
+    ...diskSpecs,
+  );
+  return overlays;
+}
+
+async function thawVmDisks(name: string, overlays: FrozenDisk[]) {
+  // Pivot ALL disks back from their overlays (live backup cleanup).
+  // CRITICAL: only delete the overlay when the pivot SUCCEEDED. If blockcommit
+  // fails, the domain is still pointing at the overlay — deleting it would
+  // leave the VM referencing a missing file and it could never start again
+  // ("Cannot access storage file ... No such file or directory").
+  const pivotFailures: string[] = [];
+  for (const { disk, overlayPath } of overlays) {
+    let pivoted = false;
+    try {
+      await virsh("blockcommit", name, disk.device, "--active", "--verbose", "--pivot");
+      pivoted = true;
+    } catch (err) {
+      pivotFailures.push(`${disk.device}: ${(err as Error).message}`);
+      console.error(`[backup] blockcommit --pivot failed for disk ${disk.device} — keeping overlay ${overlayPath} (it is still the live disk):`, (err as Error).message);
+    }
+    if (pivoted) {
+      await fs.unlink(overlayPath).catch(() => {});
+    }
+  }
+  if (pivotFailures.length > 0) {
+    // Surface the problem instead of silently leaving the VM on a temp overlay.
+    throw new Error(
+      `Backup file was created, but the live disk could not be pivoted back to its base for: ${pivotFailures.join("; ")}. ` +
+      `The temporary overlay was kept so the VM stays bootable; commit it manually with: virsh blockcommit ${name} <disk> --active --pivot`,
+    );
+  }
+}
+
 async function backupVm(p: Record<string, unknown>, emit?: ProgressEmitter) {
   const name = p.name as string;
   const storagePool = p.storagePool as string;
@@ -2838,28 +2899,7 @@ async function backupVm(p: Record<string, unknown>, emit?: ProgressEmitter) {
   const liveBackup = state === "running" || state === "paused";
 
   // For live backup: create external snapshots for ALL writable disks atomically
-  const overlays: Array<{ disk: (typeof writableDisks)[0]; overlayPath: string }> = [];
-  if (liveBackup) {
-    const diskSpecs: string[] = [];
-    for (const disk of writableDisks) {
-      const overlayPath = path.join(
-        path.dirname(disk.source!),
-        `${path.basename(disk.source!)}.auxinux-backup-${timestamp}.qcow2`,
-      );
-      await fs.unlink(overlayPath).catch(() => {});
-      diskSpecs.push("--diskspec", `${disk.device},snapshot=external,file=${overlayPath}`);
-      overlays.push({ disk, overlayPath });
-    }
-    await virsh(
-      "snapshot-create-as",
-      name,
-      `auxinux-live-backup-${timestamp}`,
-      "--disk-only",
-      "--atomic",
-      "--no-metadata",
-      ...diskSpecs,
-    );
-  }
+  const overlays = liveBackup ? await freezeVmDisks(name, writableDisks, timestamp) : [];
 
   try {
     if (format === "qcow2") {
@@ -2902,32 +2942,7 @@ async function backupVm(p: Record<string, unknown>, emit?: ProgressEmitter) {
       }
     }
   } finally {
-    // Pivot ALL disks back from their overlays (live backup cleanup).
-    // CRITICAL: only delete the overlay when the pivot SUCCEEDED. If blockcommit
-    // fails, the domain is still pointing at the overlay — deleting it would
-    // leave the VM referencing a missing file and it could never start again
-    // ("Cannot access storage file ... No such file or directory").
-    const pivotFailures: string[] = [];
-    for (const { disk, overlayPath } of overlays) {
-      let pivoted = false;
-      try {
-        await virsh("blockcommit", name, disk.device, "--active", "--verbose", "--pivot");
-        pivoted = true;
-      } catch (err) {
-        pivotFailures.push(`${disk.device}: ${(err as Error).message}`);
-        console.error(`[backup] blockcommit --pivot failed for disk ${disk.device} — keeping overlay ${overlayPath} (it is still the live disk):`, (err as Error).message);
-      }
-      if (pivoted) {
-        await fs.unlink(overlayPath).catch(() => {});
-      }
-    }
-    if (pivotFailures.length > 0) {
-      // Surface the problem instead of silently leaving the VM on a temp overlay.
-      throw new Error(
-        `Backup file was created, but the live disk could not be pivoted back to its base for: ${pivotFailures.join("; ")}. ` +
-        `The temporary overlay was kept so the VM stays bootable; commit it manually with: virsh blockcommit ${name} <disk> --active --pivot`,
-      );
-    }
+    await thawVmDisks(name, overlays);
   }
 
   const stat = await fs.stat(destPath);
@@ -3346,6 +3361,129 @@ async function restoreVmFromPbs(p: Record<string, unknown>, emit?: ProgressEmitt
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+interface ExposedDisk {
+  path: string;
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Present a VM disk image as a plain raw file, which is what
+ * proxmox-backup-client reads for a `.img` archive. qcow2 images are exported
+ * read-only through qemu-storage-daemon's FUSE export (no copy, follows the
+ * backing chain); if FUSE is unavailable we fall back to a temporary raw copy
+ * next to the image.
+ */
+async function exposeDiskAsRaw(source: string, workDir: string, key: string, emit?: ProgressEmitter): Promise<ExposedDisk> {
+  const info = JSON.parse((await execFileAsync("qemu-img", ["info", "-U", "--output=json", source])).stdout) as { format: string };
+  if (info.format === "raw") return { path: source, cleanup: async () => {} };
+
+  const target = path.join(workDir, `${key}.raw`);
+  await fs.writeFile(target, "", { mode: 0o600 });
+  const pidFile = path.join(workDir, `${key}.pid`);
+  const blockdev = JSON.stringify({
+    driver: info.format,
+    "node-name": "src",
+    "read-only": true,
+    "force-share": true,
+    file: { driver: "file", filename: source, "read-only": true, "force-share": true },
+  });
+  try {
+    await execFileAsync("qemu-storage-daemon", [
+      "--blockdev", blockdev,
+      "--export", `type=fuse,id=exp,node-name=src,mountpoint=${target.replace(/,/g, ",,")},writable=off`,
+      "--daemonize",
+      "--pidfile", pidFile,
+    ], { timeout: 60_000 });
+    return {
+      path: target,
+      cleanup: async () => {
+        const pid = Number((await fs.readFile(pidFile, "utf8").catch(() => "")).trim());
+        if (pid > 0) {
+          try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+          for (let i = 0; i < 50; i += 1) {
+            try { process.kill(pid, 0); } catch { break; }
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        }
+        await execFileAsync("fusermount3", ["-u", target]).catch(() => {});
+        await fs.rm(target, { force: true }).catch(() => {});
+      },
+    };
+  } catch (error) {
+    console.warn(`[pbs-backup] FUSE export unavailable for ${source} (${(error as Error).message}); using a temporary raw copy`);
+    emit?.({ message: `Preparing a temporary raw copy of ${key}` });
+    await execFileAsync("qemu-img", ["convert", "-U", "-O", "raw", source, target]);
+    return { path: target, cleanup: () => fs.rm(target, { force: true }) };
+  }
+}
+
+/**
+ * Back a VM up to PBS in Proxmox VE's layout (vm/<name>). A running VM is
+ * frozen the same way as a local live backup (temporary overlays, pivoted back
+ * afterwards), so the uploaded images are consistent.
+ */
+async function backupVmToPbs(p: Record<string, unknown>, emit?: ProgressEmitter) {
+  const conn = validatePbsConnection(p.connection);
+  const name = validateVmName(String(p.name ?? ""));
+  const keep = (p.keep ?? {}) as PruneKeep;
+
+  const xml = await virsh("dumpxml", name);
+  const info = parseLibvirtForPve(xml);
+  if (info.disks.length === 0) throw new Error("No writable disk found for VM");
+  for (const disk of info.disks) {
+    const meta = JSON.parse((await execFileAsync("qemu-img", ["info", "-U", "--output=json", disk.source])).stdout) as { "virtual-size": number };
+    disk.sizeBytes = meta["virtual-size"];
+  }
+  const nvramSize = info.nvramPath ? await fs.stat(info.nvramPath).then((st) => st.size, () => undefined) : undefined;
+  const autostart = /Autostart:\s+enable/i.test(await virsh("dominfo", name).catch(() => ""));
+  const plan = buildPveQemuConf(info, { autostart, nvramSize });
+  const warnings: string[] = [];
+  if (info.uefi && !plan.efidisk) warnings.push("UEFI variables were not included (no 4M OVMF variable store): the VM will boot with fresh UEFI settings after a restore.");
+  if (info.tpm) warnings.push("TPM contents are not backed up (Proxmox format): a restored VM gets a fresh TPM.");
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const live = ["running", "paused"].includes(await getDomainState(name));
+  const devices = new Map(parseDiskBlocks(xml).filter((d) => d.deviceType === "disk" && !d.readonly && d.source).map((d) => [d.source, d.device]));
+  // Work files stay on the VM's pool (temporary raw fallback can be large).
+  const workDir = await fs.mkdtemp(path.join(path.dirname(info.disks[0].source), ".auxinux-pbs-backup-"));
+  const exposed: ExposedDisk[] = [];
+  let overlays: FrozenDisk[] = [];
+  let snapshot: string | undefined;
+  try {
+    if (live) {
+      emit?.({ percent: 3, message: "Freezing disks (live backup)" });
+      overlays = await freezeVmDisks(name, info.disks.map((d) => ({ device: devices.get(d.source) ?? "", source: d.source })).filter((d) => d.device), timestamp);
+    }
+    const confPath = path.join(workDir, "qemu-server.conf");
+    await fs.writeFile(confPath, plan.conf, { mode: 0o600 });
+    const specs = [`qemu-server.conf:${confPath}`];
+    for (const d of plan.disks) {
+      const e = await exposeDiskAsRaw(info.disks[d.index].source, workDir, d.key, emit);
+      exposed.push(e);
+      specs.push(`${d.archive}:${e.path}`);
+    }
+    if (plan.efidisk && info.nvramPath) {
+      const efiCopy = path.join(workDir, "efidisk0.raw");
+      await fs.copyFile(info.nvramPath, efiCopy);
+      specs.push(`drive-efidisk0.img:${efiCopy}`);
+    }
+    emit?.({ percent: 10, message: "Uploading to Proxmox Backup Server" });
+    snapshot = await backupToPbs(conn, specs, { type: "vm", id: name });
+  } finally {
+    // Release the image readers BEFORE pivoting: blockcommit writes into the bases.
+    for (const e of exposed) await e.cleanup().catch(() => {});
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    if (overlays.length) await thawVmDisks(name, overlays);
+  }
+
+  try {
+    await prunePbsGroup(conn, `vm/${name}`, keep);
+  } catch (error) {
+    warnings.push(`Backup done, but pruning old backups failed: ${(error as Error).message}`);
+  }
+  return { ok: true, snapshot, warnings };
 }
 
 // ── Template-based VM creation ────────────────────────────────────────────────

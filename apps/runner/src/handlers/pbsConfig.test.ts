@@ -13,6 +13,13 @@ import {
   sanitizeGuestName,
   snapshotRef,
   validatePbsConnection,
+  parseLibvirtForPve,
+  buildPveQemuConf,
+  buildPveCtConf,
+  pveOstypeFromOsRelease,
+  parseBackupStartLine,
+  pruneArgs,
+  OVMF_VARS_4M_SIZE,
 } from "./pbsConfig";
 
 const WIN11_CONF = `#Windows 11 poste%20compta
@@ -312,5 +319,99 @@ describe("sanitizeGuestName", () => {
     expect(sanitizeGuestName("my vm (old)", "vm-100")).toBe("my-vm-old");
     expect(sanitizeGuestName("123", "vm-100")).toBe("vm-100");
     expect(sanitizeGuestName(undefined, "ct-200")).toBe("ct-200");
+  });
+});
+
+describe("Virtua → Proxmox (backup)", () => {
+  const XML = `<domain type='kvm'>
+  <name>compta</name>
+  <uuid>3b2d5e8a-1f4c-4a6b-9c1d-2e3f4a5b6c7d</uuid>
+  <description>Poste &amp; compta
+ligne 2</description>
+  <memory unit='KiB'>8388608</memory>
+  <vcpu placement='static'>4</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.2'>hvm</type>
+    <loader readonly='yes' secure='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>
+    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.ms.fd'>/var/lib/libvirt/qemu/nvram/compta_VARS.fd</nvram>
+  </os>
+  <features><acpi/><apic/><hyperv mode='custom'><relaxed state='on'/></hyperv><smm state='on'/></features>
+  <devices>
+    <disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='/pool/compta.qcow2'/><target dev='sda' bus='sata'/></disk>
+    <disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='/pool/compta-data.qcow2'/><target dev='vda' bus='virtio'/></disk>
+    <disk type='file' device='cdrom'><source file='/iso/virtio.iso'/><target dev='sdb' bus='sata'/><readonly/></disk>
+    <interface type='bridge'><mac address='52:54:00:AA:BB:CC'/><source bridge='br-lan'/><model type='e1000e'/></interface>
+    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>
+    <tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>
+    <video><model type='qxl' ram='65536'/></video>
+  </devices>
+</domain>`;
+
+  it("reads a libvirt domain", () => {
+    const info = parseLibvirtForPve(XML);
+    expect(info).toMatchObject({
+      name: "compta", vcpus: 4, memoryMb: 8192, uefi: true, secureBoot: true, machine: "q35",
+      isWindows: true, agent: true, video: "qxl", tpm: true, uuid: "3b2d5e8a-1f4c-4a6b-9c1d-2e3f4a5b6c7d",
+      nvramPath: "/var/lib/libvirt/qemu/nvram/compta_VARS.fd",
+    });
+    expect(info.disks.map((d) => [d.bus, d.source])).toEqual([["sata", "/pool/compta.qcow2"], ["virtio", "/pool/compta-data.qcow2"]]);
+    expect(info.nics).toEqual([{ model: "e1000e", mac: "52:54:00:aa:bb:cc", bridge: "br-lan" }]);
+  });
+
+  it("round-trips through the restore parser", () => {
+    const info = parseLibvirtForPve(XML);
+    info.disks[0].sizeBytes = 64 * 1024 ** 3;
+    const plan = buildPveQemuConf(info, { autostart: true, nvramSize: OVMF_VARS_4M_SIZE });
+    expect(plan.disks).toEqual([{ key: "sata0", archive: "drive-sata0.img", index: 0 }, { key: "virtio0", archive: "drive-virtio0.img", index: 1 }]);
+    expect(plan.efidisk).toBe(true);
+    expect(plan.conf).not.toContain("tpmstate0");
+    const spec = parsePveVmConfig(plan.conf);
+    expect(spec).toMatchObject({
+      name: "compta", vcpus: 4, memoryMb: 8192, uefi: true, secureBoot: true, efiType: "4m", hasEfiDisk: true,
+      machine: "q35", isWindows: true, agent: true, video: "qxl", tpm: "2.0", onboot: true,
+      smbiosUuid: "3b2d5e8a-1f4c-4a6b-9c1d-2e3f4a5b6c7d", description: "Poste & compta\nligne 2",
+    });
+    expect(spec.warnings).toEqual([]);
+    expect(spec.disks.map((d) => [d.key, d.archive, d.sizeBytes])).toEqual([["virtio0", "drive-virtio0.img", undefined], ["sata0", "drive-sata0.img", 64 * 1024 ** 3]]);
+    expect(spec.bootOrder).toEqual(["sata0", "net0"]);
+    expect(spec.nics[0]).toMatchObject({ model: "e1000e", mac: "52:54:00:aa:bb:cc", bridge: "br-lan" });
+  });
+
+  it("keeps the TPM of a Windows VM created by Virtua (no hyperv marker)", () => {
+    const xml = XML.replace(/<hyperv[\s\S]*?<\/hyperv>/, "");
+    const spec = parsePveVmConfig(buildPveQemuConf(parseLibvirtForPve(xml), { autostart: false }).conf);
+    expect(spec.tpm).toBe("2.0");
+  });
+
+  it("skips the efidisk when the NVRAM is not a 4M store", () => {
+    expect(buildPveQemuConf(parseLibvirtForPve(XML), { autostart: false, nvramSize: 131072 }).efidisk).toBe(false);
+  });
+
+  it("builds a pct.conf the restore parser reads back", () => {
+    const conf = buildPveCtConf({
+      hostname: "dns-01", arch: "amd64", ostype: "debian", cpuCores: 2, memoryMb: 1024, swapMb: 0, nesting: true, autostart: true, rootfsSizeGb: 8,
+      nics: [{ name: "eth0", link: "br-lan", hwaddr: "00:16:3e:aa:bb:cc", ipv4: "192.168.1.53/24", ipv4Gateway: "192.168.1.1" }, { link: "lxcbr0" }],
+      nameservers: ["1.1.1.1"],
+    });
+    const spec = parsePveCtConfig(conf);
+    expect(spec).toMatchObject({ hostname: "dns-01", arch: "amd64", ostype: "debian", cores: 2, memoryMb: 1024, swapMb: 0, nesting: true, onboot: true, unprivileged: false, rootfsSizeGb: 8, nameservers: ["1.1.1.1"] });
+    expect(spec.nics.map((n) => [n.name, n.bridge, n.hwaddr, n.ip, n.gw])).toEqual([
+      ["eth0", "br-lan", "00:16:3e:aa:bb:cc", "192.168.1.53/24", "192.168.1.1"],
+      ["eth1", "lxcbr0", undefined, "dhcp", undefined],
+    ]);
+    expect(spec.warnings).toEqual([]);
+  });
+
+  it("maps os-release to a Proxmox ostype", () => {
+    expect(pveOstypeFromOsRelease('ID=debian\nVERSION_ID="13"')).toBe("debian");
+    expect(pveOstypeFromOsRelease('ID="rocky"\nID_LIKE="rhel centos fedora"')).toBe("centos");
+    expect(pveOstypeFromOsRelease("ID=linuxmint\nID_LIKE=ubuntu")).toBe("ubuntu");
+    expect(pveOstypeFromOsRelease("ID=weird")).toBe("unmanaged");
+  });
+
+  it("parses the client's start line and prune options", () => {
+    expect(parseBackupStartLine("Starting backup: ns/site1/vm/compta/2026-10-30T02:00:00Z\nClient name: x")).toBe("vm/compta/2026-10-30T02:00:00Z");
+    expect(parseBackupStartLine("Starting backup: ct/dns-01/2026-10-30T02:00:00Z")).toBe("ct/dns-01/2026-10-30T02:00:00Z");
+    expect(pruneArgs({ keepLast: 3, keepDaily: 7, keepWeekly: 0, keepMonthly: -1 })).toEqual(["--keep-last", "3", "--keep-daily", "7"]);
   });
 });

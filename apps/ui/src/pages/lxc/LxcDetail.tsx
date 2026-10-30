@@ -19,6 +19,7 @@ import { useAuth } from "../../utils/useAuth";
 import { formatBytes } from "../../utils/formatBytes";
 import { resourceLabel } from "../../utils/resourceLabel";
 import type { LxcContainer, LxcStats, LxcSnapshot, TaskProgress } from "@auxinux/shared";
+import PbsBackupButton from "../storage/PbsBackupButton";
 
 type Backup = { id: string; filename: string; sizeBytes: number; createdAt: string; storagePool?: string; nodeName?: string };
 const MAX_LXC_DISK_GB = 65536;
@@ -559,9 +560,12 @@ function LxcBackupTab({ name, nodeName }: { name: string; nodeName?: string }) {
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h3 className="text-sm font-semibold text-text-300">Backups ({backups.length})</h3>
-        <button onClick={() => setCreateOpen(true)} className="btn-primary text-sm">
-          + Create Backup
-        </button>
+        <div className="flex items-center gap-2">
+          <PbsBackupButton kind="lxc" name={name} className="btn-secondary text-sm" />
+          <button onClick={() => setCreateOpen(true)} className="btn-primary text-sm">
+            + Create Backup
+          </button>
+        </div>
       </div>
 
       {backups.length === 0 ? (

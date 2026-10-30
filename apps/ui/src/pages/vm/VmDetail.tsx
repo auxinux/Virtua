@@ -29,6 +29,7 @@ import {
   Copy, PackagePlus, Pencil, Download
 } from "lucide-react";
 import type { IsoFile, TaskProgress, VmInfo, VmRdpConsoleInfo, VmStats, VmSnapshot } from "@auxinux/shared";
+import PbsBackupButton from "../storage/PbsBackupButton";
 
 type TabId = "summary" | "console" | "hardware" | "network" | "firewall" | "acl" | "snapshots" | "backup" | "logs" | "crashes";
 type VmDiskLibraryEntry = IsoFile & { path: string };
@@ -1894,7 +1895,8 @@ function VmBackupTab({ vmName, nodeName }: { vmName: string; nodeName?: string }
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        <PbsBackupButton kind="vm" name={vmName} />
         <button onClick={() => setBackupOpen(true)} className="btn-primary">+ Create Backup</button>
       </div>
 

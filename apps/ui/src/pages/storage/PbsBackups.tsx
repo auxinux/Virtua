@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiDelete, apiGet, apiPost, apiPut } from "../../api/client";
 import { ConfirmModal, Modal } from "../../components/ui/Modal";
 import { formatBytes, formatDate } from "../../utils/formatBytes";
+import PbsJobs from "./PbsJobs";
 
 type PbsRemote = {
   id: number;
@@ -131,7 +132,7 @@ export default function PbsBackups({ pools }: { pools: StoragePool[] }) {
             Proxmox Backup Server
             <span className="ml-2 align-middle inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-amber-500/15 text-amber-300">Beta</span>
           </h2>
-          <p className="text-sm text-text-400">Restore Proxmox VE virtual machines and containers straight from a PBS datastore.</p>
+          <p className="text-sm text-text-400">Back up Virtua guests to a PBS datastore and restore Virtua or Proxmox VE backups from it.</p>
         </div>
         <button onClick={() => setEditing("new")} className="btn-secondary">Add PBS</button>
       </div>
@@ -151,7 +152,7 @@ export default function PbsBackups({ pools }: { pools: StoragePool[] }) {
 
       {remotes.length === 0 ? (
         <div className="card p-6 text-center text-sm text-text-500">
-          No PBS connected. Add one with a PBS API token (Datastore.Reader is enough to restore).
+          No PBS connected. Add one with a PBS API token: DatastoreBackup to back up, DatastoreReader to restore Proxmox VE backups (DatastorePowerUser covers both).
         </div>
       ) : (
         <>
@@ -235,6 +236,8 @@ export default function PbsBackups({ pools }: { pools: StoragePool[] }) {
               </tbody>
             </table>
           </div>
+
+          <PbsJobs remotes={remotes} />
         </>
       )}
 

@@ -10,8 +10,8 @@ import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, de
 import type { ProgressEmitter } from "../runner.js";
 import { isExternalRootfs, buildBackupTarArgs, checkSnapshotRestorable } from "./lxcLayout.js";
 import { auditLxcRootfsPermissions } from "./lxcRootfsGuard.js";
-import { buildPveLxcConfig, ctNicIpv4, lxcIncludeCandidates, parsePveCtConfig, parseSnapshotRef, validatePbsConnection } from "./pbsConfig.js";
-import { readPbsBlob, restorePbsArchive } from "./pbsClient.js";
+import { buildPveCtConf, buildPveLxcConfig, ctNicIpv4, lxcIncludeCandidates, parsePveCtConfig, parseSnapshotRef, pveOstypeFromOsRelease, validatePbsConnection, type PruneKeep } from "./pbsConfig.js";
+import { backupToPbs, prunePbsGroup, readPbsBlob, restorePbsArchive } from "./pbsClient.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -126,6 +126,7 @@ export async function handleLxc(action: string, params: unknown, emit?: Progress
     case "lxc_backup": return backupContainer(p, emit);
     case "lxc_restore_backup": return restoreContainerBackup(p);
     case "lxc_restore_pbs": return restoreContainerFromPbs(p, emit);
+    case "lxc_backup_pbs": return backupContainerToPbs(p, emit);
     case "lxc_usb_attach": return attachUsbDevice(p);
     case "lxc_usb_detach": return detachUsbDevice(p);
     case "lxc_gpu_attach": return attachGpuDevice(p);
@@ -3014,4 +3015,77 @@ async function restoreContainerFromPbs(p: Record<string, unknown>, emit?: Progre
     else await fs.rm(rootfsPath, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
+}
+
+/**
+ * Back a container up to PBS in Proxmox VE's layout (ct/<name>: pct.conf +
+ * root.pxar). Like the local hot backup, a running container is archived
+ * live (crash-consistent). Restorable by Virtua and by Proxmox VE.
+ */
+async function backupContainerToPbs(p: Record<string, unknown>, emit?: ProgressEmitter) {
+  const conn = validatePbsConnection(p.connection);
+  const name = String(p.name ?? "");
+  validateSafePart(name, "name");
+  const keep = (p.keep ?? {}) as PruneKeep;
+
+  const cfg = await readConfig(name);
+  const parsed = parseContainerConfig(cfg, name);
+  const rootfs = await containerRootfsPath(name);
+  if (!(await fs.stat(rootfs).then((st) => st.isDirectory(), () => false))) {
+    throw new Error(`Root filesystem of ${name} not found at ${rootfs}`);
+  }
+  const cpuQuota = getCfgValue(cfg, "lxc.cgroup2.cpu.max")?.split(/\s+/)[0];
+  const swapRaw = getCfgValue(cfg, "lxc.cgroup2.memory.swap.max");
+  const swapMb = swapRaw && swapRaw !== "max" ? parseInt(swapRaw.replace(/[^\d]/g, ""), 10) || 0 : 512;
+
+  let osRelease = "";
+  for (const rel of ["etc/os-release", "usr/lib/os-release"]) {
+    const full = path.join(rootfs, rel);
+    // Never follow a guest-controlled symlink out of the rootfs.
+    if (await fs.lstat(full).then((st) => st.isFile(), () => false)) {
+      osRelease = await fs.readFile(full, "utf8").catch(() => "");
+      if (osRelease) break;
+    }
+  }
+
+  // Proxmox allocates the rootfs from this size on restore: take the
+  // configured size, or the used space plus headroom.
+  let rootfsSizeGb = parseInt((getCfgValue(cfg, "lxc.rootfs.options") ?? "").match(/size=(\d+)G/i)?.[1] ?? "0", 10);
+  if (!rootfsSizeGb) {
+    const { stdout } = await execFileAsync("du", ["-sxb", rootfs]).catch(() => ({ stdout: "0" }));
+    rootfsSizeGb = Math.max(4, Math.ceil((parseInt(stdout, 10) * 1.3) / 1024 ** 3) + 1);
+  }
+
+  const conf = buildPveCtConf({
+    hostname: name,
+    arch: parsed.arch,
+    ostype: osRelease ? pveOstypeFromOsRelease(osRelease) : undefined,
+    cpuCores: cpuQuota && cpuQuota !== "max" ? Math.max(1, Math.round(parseInt(cpuQuota, 10) / 100000)) : undefined,
+    memoryMb: parsed.memoryMb,
+    swapMb,
+    nesting: getCfgValue(cfg, "lxc.apparmor.allow_nesting") === "1",
+    autostart: parsed.autostart,
+    rootfsSizeGb,
+    nics: parseLxcNics(cfg),
+    nameservers: (await readContainerDns(name)).filter((s) => net.isIP(s) !== 0),
+  });
+
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "auxinux-pbs-ct-"));
+  let snapshot: string | undefined;
+  try {
+    const confPath = path.join(workDir, "pct.conf");
+    await fs.writeFile(confPath, conf, { mode: 0o600 });
+    emit?.({ percent: 5, message: "Uploading the container filesystem to Proxmox Backup Server" });
+    snapshot = await backupToPbs(conn, [`pct.conf:${confPath}`, `root.pxar:${rootfs}`], { type: "ct", id: name });
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+
+  const warnings: string[] = [];
+  try {
+    await prunePbsGroup(conn, `ct/${name}`, keep);
+  } catch (error) {
+    warnings.push(`Backup done, but pruning old backups failed: ${(error as Error).message}`);
+  }
+  return { ok: true, snapshot, warnings };
 }

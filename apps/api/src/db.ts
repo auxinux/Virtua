@@ -516,6 +516,29 @@ function migrate(db: Database.Database) {
     );
   `);
 
+  // Scheduled backups to a PBS remote. days = JS weekday digits (0 = Sunday),
+  // time = server-local HH:MM. targets = JSON {"vms": "all" | [names], "cts": …}.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pbs_backup_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      remote_id INTEGER NOT NULL REFERENCES pbs_remotes(id) ON DELETE CASCADE,
+      targets TEXT NOT NULL,
+      days TEXT NOT NULL DEFAULT '0123456',
+      time TEXT NOT NULL DEFAULT '02:00',
+      keep_last INTEGER,
+      keep_daily INTEGER,
+      keep_weekly INTEGER,
+      keep_monthly INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT,
+      last_status TEXT,
+      last_message TEXT,
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   // Index used by pruneAuditLogs() and the audit log query endpoint.
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)");
 

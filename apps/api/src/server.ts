@@ -44,6 +44,7 @@ import {
   KEY_PATH,
 } from "./ssl.js";
 import { walkFiles, isManagedStorageLocation } from "./storageScan.js";
+import { isPbsJobDue } from "./pbsSchedule.js";
 import { clientHost, isLoopbackHost, webOrigin } from "./wsHost.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
@@ -10561,6 +10562,256 @@ app.post("/api/pbs/remotes/:id/restore", async (req, reply) => {
   });
   return sanitizeTask(task);
 });
+
+// ── Backups to PBS (on demand + scheduled jobs) ────────────────────────────
+
+type PbsKeep = { keepLast?: number; keepDaily?: number; keepWeekly?: number; keepMonthly?: number };
+
+const pbsBackupsInFlight = new Set<string>();
+
+/**
+ * Back one local guest up to a PBS remote as a tracked task. Resolves with the
+ * final task status (failures are recorded on the task, not thrown).
+ */
+async function runPbsGuestBackup(
+  remote: PbsRemoteRow,
+  kind: "vm" | "lxc",
+  name: string,
+  keep: PbsKeep,
+  owner: { id: number; username: string },
+  ip: string,
+): Promise<{ taskId: string; status: string; error?: string }> {
+  const key = `${kind}/${name}`;
+  const task = createTask(owner.id, owner.username, {
+    kind: kind === "vm" ? "vm-backup" : "lxc-backup",
+    action: kind === "vm" ? "vm.pbs.backup" : "lxc.pbs.backup",
+    label: `Back up ${kind === "vm" ? "VM" : "container"} ${name} to PBS ${remote.name}`,
+    resourceType: kind,
+    resourceName: name,
+    message: "Backing up to Proxmox Backup Server",
+    detail: `${remote.name}:${remote.datastore}`,
+  });
+  const done = runTrackedTask(task, ip, async ({ update }) => {
+    if (pbsBackupsInFlight.has(key)) throw new Error(`A PBS backup of ${name} is already running`);
+    pbsBackupsInFlight.add(key);
+    try {
+      const result = await callRunner<{ ok: boolean; snapshot?: string; warnings?: string[] }>(
+        kind === "vm" ? "qemu_backup_pbs" : "lxc_backup_pbs",
+        { connection: pbsConnectionFromRow(remote), name, keep },
+        BACKUP_TIMEOUT_MS,
+        onBackupProgress(task.id),
+      );
+      for (const warning of result.warnings ?? []) update({ message: `Note: ${warning}` });
+      update({ progressPercent: 100, message: "Backed up to PBS", detail: result.snapshot ?? `${remote.name}:${remote.datastore}` });
+      return result;
+    } finally {
+      pbsBackupsInFlight.delete(key);
+    }
+  });
+  await done;
+  const final = getTaskRecord(task.id);
+  return { taskId: task.id, status: final?.status ?? "failed", error: final?.error };
+}
+
+function readKeep(body: Record<string, unknown>): PbsKeep {
+  const n = (v: unknown) => {
+    const x = Number(v);
+    return Number.isInteger(x) && x > 0 && x <= 1000 ? x : undefined;
+  };
+  return { keepLast: n(body.keepLast), keepDaily: n(body.keepDaily), keepWeekly: n(body.keepWeekly), keepMonthly: n(body.keepMonthly) };
+}
+
+app.post("/api/pbs/remotes/:id/backup", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemote((req.params as { id: string }).id);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const kind = body.resourceType === "vm" ? "vm" : body.resourceType === "lxc" ? "lxc" : null;
+  const name = String(body.name ?? "").trim();
+  if (!kind || !name) return reply.status(400).send({ error: "resourceType (vm|lxc) and name are required" });
+  const node = await getResourceNodeAsync(kind, name);
+  if (node && !node.isLocal) return reply.status(400).send({ error: `${name} runs on node ${node.name}: back it up from that node` });
+  void runPbsGuestBackup(remote, kind, name, readKeep(body), { id: req.session.userId!, username: req.session.username ?? "unknown" }, getClientIp(req));
+  return { ok: true };
+});
+
+type PbsJobRow = {
+  id: number;
+  name: string;
+  remote_id: number;
+  targets: string;
+  days: string;
+  time: string;
+  keep_last: number | null;
+  keep_daily: number | null;
+  keep_weekly: number | null;
+  keep_monthly: number | null;
+  enabled: number;
+  last_run_at: string | null;
+  last_status: string | null;
+  last_message: string | null;
+  created_by: number | null;
+};
+
+type PbsJobTargets = { vms: "all" | string[]; cts: "all" | string[] };
+
+function parseJobTargets(raw: unknown): PbsJobTargets {
+  const t = (raw ?? {}) as Record<string, unknown>;
+  const norm = (v: unknown): "all" | string[] => v === "all"
+    ? "all"
+    : Array.isArray(v) ? [...new Set(v.map((x) => String(x).trim()).filter((x) => /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$/.test(x)))] : [];
+  return { vms: norm(t.vms), cts: norm(t.cts) };
+}
+
+function mapPbsJob(row: PbsJobRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    remoteId: row.remote_id,
+    targets: JSON.parse(row.targets) as PbsJobTargets,
+    days: row.days,
+    time: row.time,
+    keepLast: row.keep_last ?? undefined,
+    keepDaily: row.keep_daily ?? undefined,
+    keepWeekly: row.keep_weekly ?? undefined,
+    keepMonthly: row.keep_monthly ?? undefined,
+    enabled: !!row.enabled,
+    lastRunAt: row.last_run_at,
+    lastStatus: row.last_status,
+    lastMessage: row.last_message,
+  };
+}
+
+function jobValuesFromBody(body: Record<string, unknown>) {
+  const name = String(body.name ?? "").trim();
+  if (!name || name.length > 64) throw Object.assign(new Error("Job name is required (max 64 chars)"), { statusCode: 400 });
+  const remoteId = Number(body.remoteId);
+  if (!db.prepare("SELECT 1 FROM pbs_remotes WHERE id = ?").get(remoteId)) throw Object.assign(new Error("PBS remote not found"), { statusCode: 400 });
+  const days = [...new Set(String(body.days ?? "").split("").filter((d) => /^[0-6]$/.test(d)))].sort().join("");
+  if (!days) throw Object.assign(new Error("Pick at least one day"), { statusCode: 400 });
+  const time = String(body.time ?? "");
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw Object.assign(new Error("Time must be HH:MM"), { statusCode: 400 });
+  const targets = parseJobTargets(body.targets);
+  if ((targets.vms !== "all" && targets.vms.length === 0) && (targets.cts !== "all" && targets.cts.length === 0)) {
+    throw Object.assign(new Error("Select at least one VM or container"), { statusCode: 400 });
+  }
+  const keep = readKeep(body);
+  return { name, remoteId, days, time, targets: JSON.stringify(targets), keep, enabled: body.enabled === false ? 0 : 1 };
+}
+
+app.get("/api/pbs/jobs", async (req, reply) => {
+  requireAdmin(req, reply);
+  return (db.prepare("SELECT * FROM pbs_backup_jobs ORDER BY name").all() as PbsJobRow[]).map(mapPbsJob);
+});
+
+app.post("/api/pbs/jobs", async (req, reply) => {
+  requireAdmin(req, reply);
+  const v = jobValuesFromBody((req.body as Record<string, unknown> | undefined) ?? {});
+  const result = db.prepare(`
+    INSERT INTO pbs_backup_jobs (name, remote_id, targets, days, time, keep_last, keep_daily, keep_weekly, keep_monthly, enabled, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(v.name, v.remoteId, v.targets, v.days, v.time, v.keep.keepLast ?? null, v.keep.keepDaily ?? null, v.keep.keepWeekly ?? null, v.keep.keepMonthly ?? null, v.enabled, req.session.userId!);
+  auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.job.create", resourceType: "pbs", resourceName: v.name, result: "success" });
+  return mapPbsJob(db.prepare("SELECT * FROM pbs_backup_jobs WHERE id = ?").get(result.lastInsertRowid) as PbsJobRow);
+});
+
+app.put("/api/pbs/jobs/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const id = Number((req.params as { id: string }).id);
+  if (!db.prepare("SELECT 1 FROM pbs_backup_jobs WHERE id = ?").get(id)) return reply.status(404).send({ error: "Job not found" });
+  const v = jobValuesFromBody((req.body as Record<string, unknown> | undefined) ?? {});
+  db.prepare(`
+    UPDATE pbs_backup_jobs SET name = ?, remote_id = ?, targets = ?, days = ?, time = ?, keep_last = ?, keep_daily = ?, keep_weekly = ?, keep_monthly = ?, enabled = ?
+    WHERE id = ?
+  `).run(v.name, v.remoteId, v.targets, v.days, v.time, v.keep.keepLast ?? null, v.keep.keepDaily ?? null, v.keep.keepWeekly ?? null, v.keep.keepMonthly ?? null, v.enabled, id);
+  auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.job.update", resourceType: "pbs", resourceName: v.name, result: "success" });
+  return mapPbsJob(db.prepare("SELECT * FROM pbs_backup_jobs WHERE id = ?").get(id) as PbsJobRow);
+});
+
+app.delete("/api/pbs/jobs/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = db.prepare("SELECT * FROM pbs_backup_jobs WHERE id = ?").get(Number((req.params as { id: string }).id)) as PbsJobRow | undefined;
+  if (!row) return reply.status(404).send({ error: "Job not found" });
+  db.prepare("DELETE FROM pbs_backup_jobs WHERE id = ?").run(row.id);
+  auditLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.job.delete", resourceType: "pbs", resourceName: row.name, result: "success" });
+  return { ok: true };
+});
+
+app.post("/api/pbs/jobs/:id/run", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = db.prepare("SELECT * FROM pbs_backup_jobs WHERE id = ?").get(Number((req.params as { id: string }).id)) as PbsJobRow | undefined;
+  if (!row) return reply.status(404).send({ error: "Job not found" });
+  if (pbsJobsRunning.has(row.id)) return reply.status(409).send({ error: "This job is already running" });
+  void runPbsJob(row, getClientIp(req));
+  return { ok: true };
+});
+
+const pbsJobsRunning = new Set<number>();
+
+/** Guests of this node a job covers ("all" is resolved at run time). */
+async function resolveJobGuests(targets: PbsJobTargets): Promise<Array<{ kind: "vm" | "lxc"; name: string }>> {
+  const pick = async (sel: "all" | string[], action: "qemu_vms" | "lxc_containers") => {
+    if (sel !== "all") return sel;
+    const list = await callRunner<Array<{ name: string }>>(action).catch(() => []);
+    return list.map((g) => g.name);
+  };
+  const vms = await pick(targets.vms, "qemu_vms");
+  const cts = await pick(targets.cts, "lxc_containers");
+  return [...vms.map((name) => ({ kind: "vm" as const, name })), ...cts.map((name) => ({ kind: "lxc" as const, name }))];
+}
+
+async function runPbsJob(job: PbsJobRow, ip = "scheduler") {
+  if (pbsJobsRunning.has(job.id)) return;
+  pbsJobsRunning.add(job.id);
+  const startedAt = new Date().toISOString();
+  db.prepare("UPDATE pbs_backup_jobs SET last_run_at = ?, last_status = 'running', last_message = NULL WHERE id = ?").run(startedAt, job.id);
+  try {
+    const remote = db.prepare("SELECT * FROM pbs_remotes WHERE id = ?").get(job.remote_id) as PbsRemoteRow | undefined;
+    if (!remote) throw new Error("PBS remote no longer exists");
+    const ownerRow = job.created_by
+      ? db.prepare("SELECT id, username FROM users WHERE id = ?").get(job.created_by) as { id: number; username: string } | undefined
+      : undefined;
+    const owner = ownerRow ?? (db.prepare("SELECT id, username FROM users WHERE role = 'ADMIN' ORDER BY id LIMIT 1").get() as { id: number; username: string });
+    const keep: PbsKeep = {
+      keepLast: job.keep_last ?? undefined,
+      keepDaily: job.keep_daily ?? undefined,
+      keepWeekly: job.keep_weekly ?? undefined,
+      keepMonthly: job.keep_monthly ?? undefined,
+    };
+    const guests = await resolveJobGuests(JSON.parse(job.targets) as PbsJobTargets);
+    const failed: string[] = [];
+    // One guest at a time: parallel full-image reads would saturate the disks.
+    for (const g of guests) {
+      const r = await runPbsGuestBackup(remote, g.kind, g.name, keep, owner, ip);
+      if (r.status !== "completed") failed.push(`${g.name}: ${r.error ?? r.status}`);
+    }
+    const status = guests.length === 0 ? "failed" : failed.length === 0 ? "ok" : failed.length === guests.length ? "failed" : "partial";
+    const message = guests.length === 0
+      ? "No guest matched this job"
+      : failed.length === 0 ? `${guests.length} guest(s) backed up` : `${guests.length - failed.length}/${guests.length} backed up — ${failed.join("; ")}`;
+    db.prepare("UPDATE pbs_backup_jobs SET last_status = ?, last_message = ? WHERE id = ?").run(status, message.slice(0, 2000), job.id);
+    auditLog(db, { userId: owner?.id ?? null, username: owner?.username ?? "scheduler", ip, action: "pbs.job.run", resourceType: "pbs", resourceName: job.name, result: status === "ok" ? "success" : "error", details: message.slice(0, 500) });
+  } catch (error) {
+    db.prepare("UPDATE pbs_backup_jobs SET last_status = 'failed', last_message = ? WHERE id = ?").run((error as Error).message, job.id);
+  } finally {
+    pbsJobsRunning.delete(job.id);
+  }
+}
+
+// A job cut short by an API restart must not stay "running" forever.
+db.prepare("UPDATE pbs_backup_jobs SET last_status = 'failed', last_message = 'Interrupted (API restarted)' WHERE last_status = 'running'").run();
+
+// Scheduler tick. Jobs run in the API process (server-local time); a job whose
+// slot was missed while the node was down runs once when it comes back that day.
+setInterval(() => {
+  try {
+    const now = new Date();
+    for (const job of db.prepare("SELECT * FROM pbs_backup_jobs WHERE enabled = 1").all() as PbsJobRow[]) {
+      if (isPbsJobDue(job, now) && !pbsJobsRunning.has(job.id)) void runPbsJob(job);
+    }
+  } catch (error) {
+    console.error("[pbs-jobs] scheduler tick failed:", error);
+  }
+}, 30_000).unref();
 
 // ── Audit Logs ─────────────────────────────────────────────────────────────
 app.get("/api/audit-logs", async (req, reply) => {

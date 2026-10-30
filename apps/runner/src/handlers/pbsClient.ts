@@ -6,7 +6,7 @@
  * through the environment (PBS_PASSWORD), never argv, so they don't show in ps.
  */
 import { spawn } from "child_process";
-import { buildPbsRepository, type PbsConnection } from "./pbsConfig.js";
+import { buildPbsRepository, parseBackupStartLine, pruneArgs, type PbsConnection, type PruneKeep } from "./pbsConfig.js";
 
 const PBS_CLIENT = process.env.PBS_CLIENT_BIN ?? "proxmox-backup-client";
 
@@ -125,4 +125,30 @@ export async function restorePbsArchive(
   opts: RunOptions & { extraArgs?: string[] } = {},
 ): Promise<void> {
   await runPbsClient(conn, ["restore", ...nsArgs(conn), snapshot, archive, target, ...(opts.extraArgs ?? [])], opts);
+}
+
+/**
+ * Create a snapshot. `specs` are `archive:path` pairs (drive-x.img:/raw/file,
+ * root.pxar:/dir, qemu-server.conf:/file). Returns the snapshot reference.
+ */
+export async function backupToPbs(
+  conn: PbsConnection,
+  specs: string[],
+  group: { type: "vm" | "ct"; id: string },
+  opts: RunOptions = {},
+): Promise<string | undefined> {
+  const { stdout, stderr } = await runPbsClient(conn, [
+    "backup", ...specs,
+    "--backup-type", group.type,
+    "--backup-id", group.id,
+    ...nsArgs(conn),
+  ], opts);
+  return parseBackupStartLine(`${stdout}\n${stderr}`);
+}
+
+/** Apply a retention policy to one backup group (vm/<id> or ct/<id>). */
+export async function prunePbsGroup(conn: PbsConnection, group: string, keep: PruneKeep): Promise<void> {
+  const args = pruneArgs(keep);
+  if (args.length === 0) return;
+  await runPbsClient(conn, ["prune", group, ...args, ...nsArgs(conn)], { timeoutMs: 10 * 60_000 });
 }

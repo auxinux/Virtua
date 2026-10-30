@@ -322,6 +322,8 @@ export function parsePveVmConfig(text: string): PveVmSpec {
   }
 
   const ostype = values.ostype;
+  // Windows 11 needs a TPM; Virtua-made backups don't ship tpmstate0.
+  if (!tpm && ostype === "win11") tpm = "2.0";
   const isWindows = !!ostype && /^(win|w2k|wxp|wvista)/.test(ostype);
   const agentRaw = values.agent ? parsePropertyString(values.agent) : undefined;
   const agent = !!agentRaw && truthy(agentRaw.props.enabled ?? agentRaw.positional);
@@ -668,4 +670,213 @@ export function lxcIncludeCandidates(ostype?: string): string[] {
     ...(distro !== "common" && /^[a-z0-9]+$/.test(distro) ? [`/usr/share/lxc/config/${distro}.common.conf`] : []),
     "/usr/share/lxc/config/common.conf",
   ];
+}
+
+// ── Virtua → Proxmox (backup to PBS) ─────────────────────────────────────────
+// Backups are written in Proxmox VE's own layout (vm/<id>, ct/<id>,
+// qemu-server.conf / pct.conf, drive-*.img, root.pxar) so that both Virtua and
+// a real Proxmox VE can restore them.
+
+export interface VirtuaVmDisk {
+  /** libvirt target bus */
+  bus: string;
+  /** libvirt source file */
+  source: string;
+  sizeBytes?: number;
+}
+
+export interface VirtuaVmInfo {
+  name: string;
+  vcpus: number;
+  memoryMb: number;
+  uefi: boolean;
+  secureBoot: boolean;
+  machine: "q35" | "pc";
+  isWindows: boolean;
+  agent: boolean;
+  video: "vga" | "virtio" | "qxl";
+  tpm: boolean;
+  uuid?: string;
+  nvramPath?: string;
+  disks: VirtuaVmDisk[];
+  nics: Array<{ model: string; mac?: string; bridge?: string }>;
+  description?: string;
+}
+
+const attr = (block: string, re: RegExp) => re.exec(block)?.[1];
+
+/** Read what Proxmox needs from a libvirt domain XML (`virsh dumpxml`). */
+export function parseLibvirtForPve(xml: string): VirtuaVmInfo {
+  const memMatch = /<memory\b[^>]*?(?:unit=['"](\w+)['"])?[^>]*>(\d+)<\/memory>/i.exec(xml);
+  const unit = (memMatch?.[1] ?? "KiB").toLowerCase();
+  const memRaw = Number(memMatch?.[2] ?? 524288);
+  const memoryMb = Math.round(unit === "mib" ? memRaw : unit === "gib" ? memRaw * 1024 : unit === "b" || unit === "bytes" ? memRaw / 1024 / 1024 : memRaw / 1024);
+  const os = /<os\b[\s\S]*?<\/os>/i.exec(xml)?.[0] ?? "";
+  const loader = /<loader\b[^>]*>/i.exec(os)?.[0] ?? "";
+  const devices = /<devices>[\s\S]*<\/devices>/i.exec(xml)?.[0] ?? "";
+  const video = /<video>[\s\S]*?<\/video>/i.exec(devices)?.[0] ?? "";
+  const videoModel = attr(video, /<model[^>]*type=['"]([^'"]+)['"]/i);
+
+  const disks: VirtuaVmDisk[] = [...devices.matchAll(/<disk\b[\s\S]*?<\/disk>/gi)]
+    .map((m) => m[0])
+    .filter((b) => /device=['"]disk['"]/i.test(b) && !/<readonly\s*\/?>/i.test(b))
+    .map((b) => ({ bus: attr(b, /<target[^>]*bus=['"]([^'"]+)['"]/i) ?? "virtio", source: attr(b, /<source[^>]*file=['"]([^'"]+)['"]/i) ?? "" }))
+    .filter((d) => d.source);
+
+  const nics = [...devices.matchAll(/<interface\b[\s\S]*?<\/interface>/gi)].map((m) => ({
+    model: attr(m[0], /<model[^>]*type=['"]([^'"]+)['"]/i) ?? "virtio",
+    mac: attr(m[0], /<mac[^>]*address=['"]([^'"]+)['"]/i)?.toLowerCase(),
+    bridge: attr(m[0], /<source[^>]*bridge=['"]([^'"]+)['"]/i),
+  }));
+
+  const nvram = /<nvram\b[^>]*>([^<]+)<\/nvram>/i.exec(os)?.[1]?.trim();
+  return {
+    name: /<name>([^<]+)<\/name>/i.exec(xml)?.[1] ?? "vm",
+    vcpus: Number(/<vcpu\b[^>]*>(\d+)<\/vcpu>/i.exec(xml)?.[1] ?? 1),
+    memoryMb,
+    uefi: !!loader || /firmware=['"]efi['"]/i.test(os),
+    secureBoot: /secure=['"]yes['"]/i.test(loader),
+    machine: /machine=['"][^'"]*q35/i.test(os) ? "q35" : "pc",
+    isWindows: /<hyperv\b/i.test(xml),
+    agent: /org\.qemu\.guest_agent\.0/.test(devices),
+    video: videoModel === "qxl" ? "qxl" : videoModel === "virtio" ? "virtio" : "vga",
+    tpm: /<tpm\b/i.test(devices),
+    uuid: /<uuid>([0-9a-fA-F-]{36})<\/uuid>/.exec(xml)?.[1]?.toLowerCase(),
+    nvramPath: nvram,
+    disks,
+    nics,
+    description: /<description>([\s\S]*?)<\/description>/i.exec(xml)?.[1],
+  };
+}
+
+function pveDescription(text?: string): string[] {
+  if (!text) return [];
+  const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"").replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  return decoded.split(/\r?\n/).map((l) => `#${encodeURIComponent(l).replace(/%20/g, " ")}`);
+}
+
+/** OVMF 4M variable store size — only that size can be handed to Proxmox as efidisk. */
+export const OVMF_VARS_4M_SIZE = 540672;
+
+export interface PveVmBackupPlan {
+  conf: string;
+  /** archive name → libvirt disk index (order of info.disks) */
+  disks: Array<{ key: string; archive: string; index: number }>;
+  /** include drive-efidisk0.img from info.nvramPath */
+  efidisk: boolean;
+}
+
+export function buildPveQemuConf(info: VirtuaVmInfo, opts: { autostart: boolean; nvramSize?: number }): PveVmBackupPlan {
+  const counters: Record<string, number> = {};
+  const disks = info.disks.map((d, index) => {
+    // Proxmox q35 has no real IDE either; keep the bus otherwise.
+    const pveBus = d.bus === "virtio" || d.bus === "scsi" || d.bus === "sata" || d.bus === "ide" ? d.bus : "virtio";
+    const n = counters[pveBus] ?? 0;
+    counters[pveBus] = n + 1;
+    return { key: `${pveBus}${n}`, archive: `drive-${pveBus}${n}.img`, index };
+  });
+  const efidisk = info.uefi && !!info.nvramPath && opts.nvramSize === OVMF_VARS_4M_SIZE;
+  const lines = [
+    ...pveDescription(info.description),
+    `name: ${info.name}`,
+    // Virtua-created Windows VMs carry no OS marker in libvirt; a TPM almost
+    // always means Windows 11, and win11 is what makes a restore re-add one.
+    `ostype: ${info.tpm ? "win11" : info.isWindows ? "win10" : "l26"}`,
+    `cores: ${info.vcpus}`,
+    `sockets: 1`,
+    `cpu: host`,
+    `memory: ${info.memoryMb}`,
+    `bios: ${info.uefi ? "ovmf" : "seabios"}`,
+    `machine: ${info.machine}`,
+    `vga: ${info.video === "vga" ? "std" : info.video}`,
+    `agent: ${info.agent ? 1 : 0}`,
+    `onboot: ${opts.autostart ? 1 : 0}`,
+  ];
+  if (disks.some((d) => d.key.startsWith("scsi"))) lines.push("scsihw: virtio-scsi-single");
+  disks.forEach((d) => {
+    const size = info.disks[d.index].sizeBytes;
+    lines.push(`${d.key}: virtua:${d.key},discard=on${size ? `,size=${Math.max(1, Math.ceil(size / 1024 ** 3))}G` : ""}`);
+  });
+  if (efidisk) lines.push(`efidisk0: virtua:efidisk0,efitype=4m,pre-enrolled-keys=${info.secureBoot ? 1 : 0},size=528K`);
+  // No tpmstate0 line: it would point Proxmox at a volume that is not in the
+  // backup. "ostype: win11" carries the TPM need instead (see parsePveVmConfig).
+  info.nics.forEach((nic, i) => {
+    const model = NIC_MODELS.includes(nic.model) ? nic.model : "virtio";
+    lines.push(`net${i}: ${model}${nic.mac ? `=${nic.mac.toUpperCase()}` : ""},bridge=${nic.bridge ?? "vmbr0"}`);
+  });
+  const bootKeys = [...(disks[0] ? [disks[0].key] : []), ...info.nics.map((_, i) => `net${i}`)];
+  if (bootKeys.length) lines.push(`boot: order=${bootKeys.join(";")}`);
+  if (info.uuid) lines.push(`smbios1: uuid=${info.uuid}`);
+  return { conf: `${lines.join("\n")}\n`, disks, efidisk };
+}
+
+export interface VirtuaCtInfo {
+  hostname: string;
+  arch: string;
+  ostype?: string;
+  cpuCores?: number;
+  memoryMb: number;
+  swapMb: number;
+  nesting: boolean;
+  autostart: boolean;
+  rootfsSizeGb: number;
+  nics: Array<{ name?: string; link?: string; hwaddr?: string; ipv4?: string; ipv4Gateway?: string }>;
+  nameservers: string[];
+}
+
+const PVE_CT_OSTYPES = ["debian", "devuan", "ubuntu", "centos", "fedora", "opensuse", "archlinux", "alpine", "gentoo", "nixos"];
+
+/** Map /etc/os-release ID (+ ID_LIKE) to a Proxmox CT ostype. */
+export function pveOstypeFromOsRelease(osRelease: string): string {
+  const get = (k: string) => new RegExp(`^${k}=["']?([^"'\\n]*)`, "m").exec(osRelease)?.[1]?.toLowerCase() ?? "";
+  const aliases: Record<string, string> = { rocky: "centos", almalinux: "centos", rhel: "centos", ol: "centos", arch: "archlinux", "opensuse-leap": "opensuse", "opensuse-tumbleweed": "opensuse", sles: "opensuse" };
+  for (const id of [get("ID"), ...get("ID_LIKE").split(/\s+/)]) {
+    const mapped = aliases[id] ?? id;
+    if (PVE_CT_OSTYPES.includes(mapped)) return mapped;
+  }
+  return "unmanaged";
+}
+
+export function buildPveCtConf(info: VirtuaCtInfo): string {
+  const lines = [
+    `arch: ${info.arch === "x86_64" || info.arch === "linux64" ? "amd64" : info.arch}`,
+    `hostname: ${info.hostname}`,
+    `ostype: ${info.ostype ?? "unmanaged"}`,
+    ...(info.cpuCores ? [`cores: ${info.cpuCores}`] : []),
+    `memory: ${info.memoryMb}`,
+    `swap: ${info.swapMb}`,
+    `rootfs: virtua:subvol-rootfs,size=${info.rootfsSizeGb}G`,
+    `onboot: ${info.autostart ? 1 : 0}`,
+  ];
+  if (info.nesting) lines.push("features: nesting=1");
+  info.nics.forEach((nic, i) => {
+    const ip = nic.ipv4 ? `ip=${nic.ipv4}${i === 0 && nic.ipv4Gateway ? `,gw=${nic.ipv4Gateway}` : ""}` : "ip=dhcp";
+    lines.push(`net${i}: name=${nic.name ?? `eth${i}`},bridge=${nic.link ?? "vmbr0"}${nic.hwaddr ? `,hwaddr=${nic.hwaddr.toUpperCase()}` : ""},${ip},type=veth`);
+  });
+  if (info.nameservers.length) lines.push(`nameserver: ${info.nameservers.join(" ")}`);
+  return `${lines.join("\n")}\n`;
+}
+
+/** `Starting backup: [ns/x/]vm/web/2026-10-30T02:00:00Z` → snapshot ref */
+export function parseBackupStartLine(output: string): string | undefined {
+  return /Starting backup:\s*(?:\S*\/)?((?:vm|ct)\/[^/\s]+\/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/.exec(output)?.[1];
+}
+
+export interface PruneKeep {
+  keepLast?: number;
+  keepDaily?: number;
+  keepWeekly?: number;
+  keepMonthly?: number;
+}
+
+export function pruneArgs(keep: PruneKeep): string[] {
+  const args: string[] = [];
+  const add = (flag: string, v?: number) => {
+    if (typeof v === "number" && Number.isInteger(v) && v > 0 && v <= 1000) args.push(flag, String(v));
+  };
+  add("--keep-last", keep.keepLast);
+  add("--keep-daily", keep.keepDaily);
+  add("--keep-weekly", keep.keepWeekly);
+  add("--keep-monthly", keep.keepMonthly);
+  return args;
 }
