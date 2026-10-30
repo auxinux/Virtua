@@ -18,6 +18,12 @@ LOG_FILE="${LOG_FILE:-/var/log/auxinux-depot-sync.log}"
 LOCK_FILE="${LOCK_FILE:-/run/auxinux-depot-sync.lock}"
 
 ARCHES="${ARCHES:-amd64}"
+# Architectures PAR DISTRIBUTION (2026-10-25, AuxiNux OS Edition ARM): Debian
+# porte arm64, Ubuntu NON -- chez Ubuntu, arm64 n est pas sur archive.ubuntu.com
+# mais sur ports.ubuntu.com, et l ajouter a ARCHES (partage) casserait sa
+# synchronisation. Par defaut, les deux suivent ARCHES comme avant.
+DEBIAN_ARCHES="${DEBIAN_ARCHES:-${ARCHES}}"
+UBUNTU_ARCHES="${UBUNTU_ARCHES:-${ARCHES}}"
 DEBIAN_SUITES="${DEBIAN_SUITES:-trixie,trixie-updates}"
 DEBIAN_SECURITY_SUITES="${DEBIAN_SECURITY_SUITES:-trixie-security}"
 DEBIAN_SECTIONS="${DEBIAN_SECTIONS:-main,contrib,non-free,non-free-firmware}"
@@ -44,6 +50,8 @@ PROXMOX_PBS_CLIENT="${PROXMOX_PBS_CLIENT:-1}"
 PROXMOX_HOST="${PROXMOX_HOST:-download.proxmox.com}"
 PROXMOX_ROOT="${PROXMOX_ROOT:-debian/pbs-client}"
 PROXMOX_SUITES="${PROXMOX_SUITES:-trixie}"
+# Virtua nodes are amd64 only.
+PROXMOX_ARCHES="${PROXMOX_ARCHES:-amd64}"
 PROXMOX_KEYRING="${PROXMOX_KEYRING:-/usr/share/keyrings/proxmox-archive-keyring-trixie.gpg}"
 PROXMOX_KEYRING_URL="${PROXMOX_KEYRING_URL:-https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg}"
 PROXMOX_KEYRING_SHA256="136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45"
@@ -57,7 +65,6 @@ UBUNTU_KEYRING="${UBUNTU_KEYRING:-/usr/share/keyrings/ubuntu-archive-keyring.gpg
 
 BASE_OPTS=(
   --method="${METHOD}"
-  --arch="${ARCHES}"
   --nosource
   --diff=use
   --rsync-extra=none
@@ -122,6 +129,7 @@ sync_proxmox_pbs_client() {
   ensure_proxmox_keyring || return 1
   install -d -m 0755 "${DEPOT_ROOT}/PROXMOX"
   run_debmirror "Proxmox pbs-client ${PROXMOX_SUITES}" "${DEPOT_ROOT}/PROXMOX" \
+    --arch="${PROXMOX_ARCHES}" \
     --host="${PROXMOX_HOST}" \
     --root="${PROXMOX_ROOT}" \
     --dist="${PROXMOX_SUITES}" \
@@ -235,9 +243,10 @@ main() {
   fi
 
   {
-    info "Mirror sync started: root=${DEPOT_ROOT}, arches=${ARCHES}"
+    info "Mirror sync started: root=${DEPOT_ROOT}, debian=${DEBIAN_ARCHES}, ubuntu=${UBUNTU_ARCHES}"
 
     run_debmirror "Debian ${DEBIAN_SUITES}" "${DEPOT_ROOT}/DEBIAN" \
+      --arch="${DEBIAN_ARCHES}" \
       --host="${DEBIAN_HOST}" \
       --root="${DEBIAN_ROOT}" \
       --dist="${DEBIAN_SUITES}" \
@@ -245,6 +254,7 @@ main() {
       --keyring="${DEBIAN_KEYRING}"
 
     run_debmirror "Debian security ${DEBIAN_SECURITY_SUITES}" "${DEPOT_ROOT}/DEBIAN" \
+      --arch="${DEBIAN_ARCHES}" \
       --host="${DEBIAN_SECURITY_HOST}" \
       --root="${DEBIAN_SECURITY_ROOT}" \
       --dist="${DEBIAN_SECURITY_SUITES}" \
@@ -257,6 +267,7 @@ main() {
       "${DEPOT_ROOT}/DEBIAN" "${DEBIAN_SECURITY_SUITES}"
 
     run_debmirror "Ubuntu ${UBUNTU_SUITES}" "${DEPOT_ROOT}/UBUNTU" \
+      --arch="${UBUNTU_ARCHES}" \
       --host="${UBUNTU_HOST}" \
       --root="${UBUNTU_ROOT}" \
       --dist="${UBUNTU_SUITES}" \
@@ -264,6 +275,7 @@ main() {
       --keyring="${UBUNTU_KEYRING}"
 
     run_debmirror "Ubuntu security ${UBUNTU_SECURITY_SUITES}" "${DEPOT_ROOT}/UBUNTU" \
+      --arch="${UBUNTU_ARCHES}" \
       --host="${UBUNTU_SECURITY_HOST}" \
       --root="${UBUNTU_SECURITY_ROOT}" \
       --dist="${UBUNTU_SECURITY_SUITES}" \
