@@ -127,7 +127,10 @@ export default function PbsBackups({ pools }: { pools: StoragePool[] }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold text-text-100">Proxmox Backup Server</h2>
+          <h2 className="text-lg font-semibold text-text-100">
+            Proxmox Backup Server
+            <span className="ml-2 align-middle inline-flex px-2 py-0.5 rounded text-xs font-semibold bg-amber-500/15 text-amber-300">Beta</span>
+          </h2>
           <p className="text-sm text-text-400">Restore Proxmox VE virtual machines and containers straight from a PBS datastore.</p>
         </div>
         <button onClick={() => setEditing("new")} className="btn-secondary">Add PBS</button>
