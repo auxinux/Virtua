@@ -12,6 +12,24 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.7",
+      items: fr
+        ? [
+            "Nouveau (bêta) : restauration depuis un Proxmox Backup Server. Dans Stockage → Backups, un administrateur connecte un ou plusieurs PBS (jeton d'API, empreinte du certificat, namespace), parcourt les sauvegardes de VM et de conteneurs Proxmox VE et les restaure comme machines Virtua. Pratique pour un plan de secours pendant une migration Proxmox.",
+            "VM restaurées depuis PBS : CPU, RAM, BIOS/UEFI et Secure Boot, entrées de démarrage UEFI, TPM (neuf), tous les disques en qcow2, cartes réseau avec leurs adresses MAC, ordre de démarrage et UUID d'origine (activation Windows). Chaque pont Proxmox (vmbr0…) est associé à un pont de l'hôte.",
+            "Conteneurs restaurés depuis PBS : CPU, RAM, swap, réseau (IP fixe ou DHCP), DNS et nesting. Un conteneur non privilégié chez Proxmox tourne en privilégié dans Virtua.",
+            "Ce qui ne peut pas être repris (passthrough PCI/USB, tags VLAN, contenu du TPM, points de montage hors sauvegarde) est signalé avant la restauration. Les sauvegardes PBS chiffrées ne sont pas encore prises en charge.",
+            "Le client proxmox-backup-client s'installe d'un clic depuis le dépôt AuxiNux, qui garde une copie à jour du dépôt officiel Proxmox ; il suit ensuite les mises à jour apt normales du nœud.",
+          ]
+        : [
+            "New (beta): restore from a Proxmox Backup Server. In Storage → Backups, an administrator connects one or more PBS (API token, certificate fingerprint, namespace), browses Proxmox VE VM and container backups and restores them as Virtua guests. Handy as a fallback during a Proxmox migration.",
+            "VMs restored from PBS keep CPU, RAM, BIOS/UEFI and Secure Boot, UEFI boot entries, a (fresh) TPM, every disk as qcow2, NICs with their MAC addresses, boot order and the original UUID (Windows activation). Each Proxmox bridge (vmbr0…) is mapped to a host bridge.",
+            "Containers restored from PBS keep CPU, RAM, swap, network (static IP or DHCP), DNS and nesting. An unprivileged Proxmox container runs privileged in Virtua.",
+            "What cannot be carried over (PCI/USB passthrough, VLAN tags, TPM contents, mount points outside the backup) is listed before restoring. Encrypted PBS backups are not supported yet.",
+            "proxmox-backup-client installs in one click from the AuxiNux depot, which keeps an up-to-date copy of Proxmox's official repository; it then follows the node's regular apt updates.",
+          ],
+    },
+    {
       v: "0.8.6",
       items: fr
         ? [
