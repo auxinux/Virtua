@@ -22,6 +22,7 @@ interface Settings {
   "repo.templates"?: string;
   "repo.kernel"?: string;
   "repo.generic"?: string;
+  "repo.proxmox"?: string;
   // Reprise après panne (valeurs stockées en texte comme le reste des réglages)
   "crash.autoRestartDefault"?: string;
   "crash.maxAttempts"?: string;
@@ -33,6 +34,7 @@ const REPO_PLACEHOLDERS: Record<string, string> = {
   "repo.templates": "https://dep.auxinux.ca/TEMPLATES/",
   "repo.kernel": "https://dep.auxinux.ca/VIRTUA/KERNEL/",
   "repo.generic": "https://dep.auxinux.ca/VIRTUA/",
+  "repo.proxmox": "https://dep.auxinux.ca/PROXMOX/",
 };
 
 interface VdmManagerStatus {
@@ -551,6 +553,7 @@ export default function SettingsPage() {
           { key: "repo.templates" as const, label: "Dépôt VIRTUA TEMPLATES (ISO + VM)" },
           { key: "repo.kernel" as const, label: "Dépôt VIRTUA KERNEL" },
           { key: "repo.generic" as const, label: "Dépôt VIRTUA GENERIC" },
+          { key: "repo.proxmox" as const, label: "Dépôt PROXMOX (client PBS)" },
         ]).map((entry) => (
           <div key={entry.key}>
             <label className="label">{entry.label}</label>

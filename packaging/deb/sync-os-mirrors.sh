@@ -37,6 +37,17 @@ UBUNTU_ROOT="${UBUNTU_ROOT:-ubuntu}"
 UBUNTU_SECURITY_HOST="${UBUNTU_SECURITY_HOST:-security.ubuntu.com}"
 UBUNTU_SECURITY_ROOT="${UBUNTU_SECURITY_ROOT:-ubuntu}"
 
+# Proxmox pbs-client repository (proxmox-backup-client, used by Virtua to
+# restore from a Proxmox Backup Server). Packages keep Proxmox's signature;
+# Virtua nodes verify them with the same keyring (embedded in the runner).
+PROXMOX_PBS_CLIENT="${PROXMOX_PBS_CLIENT:-1}"
+PROXMOX_HOST="${PROXMOX_HOST:-download.proxmox.com}"
+PROXMOX_ROOT="${PROXMOX_ROOT:-debian/pbs-client}"
+PROXMOX_SUITES="${PROXMOX_SUITES:-trixie}"
+PROXMOX_KEYRING="${PROXMOX_KEYRING:-/usr/share/keyrings/proxmox-archive-keyring-trixie.gpg}"
+PROXMOX_KEYRING_URL="${PROXMOX_KEYRING_URL:-https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg}"
+PROXMOX_KEYRING_SHA256="136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45"
+
 METHOD="${METHOD:-http}"
 TIMEOUT="${TIMEOUT:-900}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -87,6 +98,38 @@ install_deps() {
     apt-get update
     apt-get install -y "${missing[@]}"
   fi
+}
+
+ensure_proxmox_keyring() {
+  if [[ -f "${PROXMOX_KEYRING}" ]] && echo "${PROXMOX_KEYRING_SHA256}  ${PROXMOX_KEYRING}" | sha256sum -c --status; then
+    return 0
+  fi
+  info "Fetching Proxmox archive keyring"
+  local tmp
+  tmp="$(mktemp)"
+  curl -fsSL --retry 3 --connect-timeout 20 -o "${tmp}" "${PROXMOX_KEYRING_URL}"
+  if ! echo "${PROXMOX_KEYRING_SHA256}  ${tmp}" | sha256sum -c --status; then
+    rm -f "${tmp}"
+    info "ERROR: Proxmox keyring checksum mismatch — refusing to use it"
+    return 1
+  fi
+  install -m 0644 "${tmp}" "${PROXMOX_KEYRING}"
+  rm -f "${tmp}"
+}
+
+sync_proxmox_pbs_client() {
+  [[ "${PROXMOX_PBS_CLIENT}" == "1" ]] || return 0
+  ensure_proxmox_keyring || return 1
+  install -d -m 0755 "${DEPOT_ROOT}/PROXMOX"
+  run_debmirror "Proxmox pbs-client ${PROXMOX_SUITES}" "${DEPOT_ROOT}/PROXMOX" \
+    --host="${PROXMOX_HOST}" \
+    --root="${PROXMOX_ROOT}" \
+    --dist="${PROXMOX_SUITES}" \
+    --section=main \
+    --keyring="${PROXMOX_KEYRING}" || return 1
+  # Published next to the packages for manual setups (apt Signed-By).
+  install -m 0644 "${PROXMOX_KEYRING}" "${DEPOT_ROOT}/PROXMOX/proxmox-archive-keyring-trixie.gpg"
+  chmod -R a+rX "${DEPOT_ROOT}/PROXMOX"
 }
 
 run_debmirror() {
@@ -231,6 +274,11 @@ main() {
       "${DEPOT_ROOT}/UBUNTU" "${UBUNTU_SUITES}"
     sync_i18n_from_release "Ubuntu security" "${UBUNTU_SECURITY_HOST}" "${UBUNTU_SECURITY_ROOT}" \
       "${DEPOT_ROOT}/UBUNTU" "${UBUNTU_SECURITY_SUITES}"
+
+    # A Proxmox outage must not fail the Debian/Ubuntu sync.
+    if ! sync_proxmox_pbs_client; then
+      info "WARNING: Proxmox pbs-client mirror sync failed; previous copy kept"
+    fi
 
     chmod -R a+rX "${DEPOT_ROOT}/DEBIAN" "${DEPOT_ROOT}/UBUNTU"
     info "Mirror sync completed"

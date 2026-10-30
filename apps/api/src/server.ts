@@ -135,6 +135,8 @@ const REPO_DEFAULTS = {
   templates: "https://dep.auxinux.ca/TEMPLATES/",
   kernel: "https://dep.auxinux.ca/VIRTUA/KERNEL/",
   generic: "https://dep.auxinux.ca/VIRTUA/",
+  // Mirror of Proxmox's pbs-client repository (proxmox-backup-client).
+  proxmox: "https://dep.auxinux.ca/PROXMOX/",
 } as const;
 type RepoKind = keyof typeof REPO_DEFAULTS;
 function getRepoUrl(kind: RepoKind): string {
@@ -10403,6 +10405,19 @@ async function validatePbsConnectionOnRunner(conn: PbsConnectionParams) {
 app.get("/api/pbs/status", async (req, reply) => {
   requireAdmin(req, reply);
   return callRunner("pbs_status");
+});
+
+app.post("/api/pbs/install-client", async (req, reply) => {
+  requireAdmin(req, reply);
+  try {
+    const result = await callRunner<{ installed: boolean; version: string }>("pbs_install_client", { repoUrl: getRepoUrl("proxmox") }, 15 * 60_000);
+    securityLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.client.install", resourceType: "host", resourceName: getLocalNodeName(), result: "success", details: result.version });
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Installation failed";
+    securityLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.client.install", resourceType: "host", resourceName: getLocalNodeName(), result: "error", details: message });
+    return reply.status(500).send({ error: message });
+  }
 });
 
 app.get("/api/pbs/remotes", async (req, reply) => {

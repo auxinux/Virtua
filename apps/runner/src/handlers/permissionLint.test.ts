@@ -21,6 +21,7 @@ const REVIEWED: Array<{ file: string; command: string; why: string }> = [
   { file: "packaging/deb/debian/postinst", command: 'find "${INSTALL_DIR}/INSTALL" -name "*.sh"', why: "installer scripts shipped in the package" },
   { file: "packaging/deb/setup-depot-server.sh", command: 'chmod -R a+rX "${DEPOT_ROOT}"', why: "APT depot server, not a Virtua node" },
   { file: "packaging/deb/sync-os-mirrors.sh", command: 'chmod -R a+rX "${DEPOT_ROOT}/DEBIAN" "${DEPOT_ROOT}/UBUNTU"', why: "APT depot mirrors, not a Virtua node" },
+  { file: "packaging/deb/sync-os-mirrors.sh", command: 'chmod -R a+rX "${DEPOT_ROOT}/PROXMOX"', why: "APT depot mirror (Proxmox pbs-client), not a Virtua node" },
 ];
 
 const RISKY = [

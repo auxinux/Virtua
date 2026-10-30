@@ -109,6 +109,11 @@ export default function PbsBackups({ pools }: { pools: StoragePool[] }) {
     return list;
   }, [snapshots.data, typeFilter, latestOnly, search]);
 
+  const installClient = useMutation({
+    mutationFn: () => apiPost("/api/pbs/install-client"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pbs"] }),
+  });
+
   const deleteRemote = useMutation({
     mutationFn: (id: number) => apiDelete(`/api/pbs/remotes/${id}`),
     onSuccess: () => {
@@ -129,8 +134,15 @@ export default function PbsBackups({ pools }: { pools: StoragePool[] }) {
       </div>
 
       {status && !status.installed && (
-        <div className="card p-3 text-sm text-amber-300 border border-amber-500/30">
-          <code>proxmox-backup-client</code> is not installed on this node. Install it, then reload this page.
+        <div className="card p-3 text-sm text-amber-300 border border-amber-500/30 flex items-center justify-between gap-3">
+          <div>
+            <code>proxmox-backup-client</code> is needed to read PBS backups and is not installed on this node.
+            It comes from the AuxiNux depot and is then kept up to date by the node's regular apt updates.
+            {installClient.error && <div className="mt-1 text-red-400">{(installClient.error as Error).message}</div>}
+          </div>
+          <button onClick={() => installClient.mutate()} disabled={installClient.isPending} className="btn-primary btn-sm shrink-0">
+            {installClient.isPending ? "Installing..." : "Install"}
+          </button>
         </div>
       )}
 
