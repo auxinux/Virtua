@@ -499,6 +499,23 @@ function migrate(db: Database.Database) {
   `);
   db.exec("CREATE INDEX IF NOT EXISTS idx_mfa_codes_user_purpose ON mfa_codes(user_id, purpose)");
 
+  // Proxmox Backup Server remotes (restore source). The secret is a PBS
+  // password or API token secret; it never leaves the API (not returned).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pbs_remotes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      server TEXT NOT NULL,
+      port INTEGER NOT NULL DEFAULT 8007,
+      datastore TEXT NOT NULL,
+      namespace TEXT,
+      auth_id TEXT NOT NULL,
+      secret TEXT NOT NULL,
+      fingerprint TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   // Index used by pruneAuditLogs() and the audit log query endpoint.
   db.exec("CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)");
 

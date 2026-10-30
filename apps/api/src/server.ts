@@ -10318,6 +10318,235 @@ app.post("/api/backups/:id/restore", async (req, reply) => {
   return sanitizeTask(task);
 });
 
+// ── Proxmox Backup Server (restore source) ─────────────────────────────────
+// Admin-only: a PBS remote can restore whole machines onto this node.
+
+type PbsRemoteRow = {
+  id: number;
+  name: string;
+  server: string;
+  port: number;
+  datastore: string;
+  namespace: string | null;
+  auth_id: string;
+  secret: string;
+  fingerprint: string | null;
+  created_at: string;
+};
+
+type PbsConnectionParams = {
+  server: string;
+  port: number;
+  datastore: string;
+  namespace?: string;
+  authId: string;
+  secret: string;
+  fingerprint?: string;
+};
+
+const PBS_LIST_TIMEOUT_MS = 3 * 60_000;
+
+function mapPbsRemote(row: PbsRemoteRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    server: row.server,
+    port: row.port,
+    datastore: row.datastore,
+    namespace: row.namespace ?? "",
+    authId: row.auth_id,
+    fingerprint: row.fingerprint ?? "",
+    createdAt: row.created_at,
+  };
+}
+
+function pbsConnectionFromRow(row: PbsRemoteRow): PbsConnectionParams {
+  return {
+    server: row.server,
+    port: row.port,
+    datastore: row.datastore,
+    namespace: row.namespace ?? undefined,
+    authId: row.auth_id,
+    secret: row.secret,
+    fingerprint: row.fingerprint ?? undefined,
+  };
+}
+
+function getPbsRemote(id: string): PbsRemoteRow {
+  const row = db.prepare("SELECT * FROM pbs_remotes WHERE id = ?").get(Number(id)) as PbsRemoteRow | undefined;
+  if (!row) throw Object.assign(new Error("PBS remote not found"), { statusCode: 404 });
+  return row;
+}
+
+/** Body → connection; an omitted secret on an existing remote keeps the stored one. */
+function pbsConnectionFromBody(body: Record<string, unknown>, existing?: PbsRemoteRow): PbsConnectionParams {
+  const secret = typeof body.secret === "string" && body.secret.length > 0 ? body.secret : existing?.secret ?? "";
+  return {
+    server: String(body.server ?? "").trim(),
+    port: Number(body.port ?? 8007) || 8007,
+    datastore: String(body.datastore ?? "").trim(),
+    namespace: String(body.namespace ?? "").trim() || undefined,
+    authId: String(body.authId ?? "").trim(),
+    secret,
+    fingerprint: String(body.fingerprint ?? "").trim() || undefined,
+  };
+}
+
+async function validatePbsConnectionOnRunner(conn: PbsConnectionParams) {
+  try {
+    return await callRunner<Omit<PbsConnectionParams, "secret">>("pbs_validate", { connection: conn });
+  } catch (error) {
+    throw Object.assign(new Error(error instanceof Error ? error.message : "Invalid PBS settings"), { statusCode: 400 });
+  }
+}
+
+app.get("/api/pbs/status", async (req, reply) => {
+  requireAdmin(req, reply);
+  return callRunner("pbs_status");
+});
+
+app.get("/api/pbs/remotes", async (req, reply) => {
+  requireAdmin(req, reply);
+  return (db.prepare("SELECT * FROM pbs_remotes ORDER BY name").all() as PbsRemoteRow[]).map(mapPbsRemote);
+});
+
+app.post("/api/pbs/test", async (req, reply) => {
+  requireAdmin(req, reply);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const existing = body.id !== undefined && body.id !== null && body.id !== "" ? getPbsRemote(String(body.id)) : undefined;
+  const conn = pbsConnectionFromBody(body, existing);
+  await validatePbsConnectionOnRunner(conn);
+  try {
+    const result = await callRunner<{ ok: boolean; error?: string; fingerprint?: string; snapshots: unknown[] }>(
+      "pbs_list_snapshots", { connection: conn }, PBS_LIST_TIMEOUT_MS,
+    );
+    return { ok: result.ok, error: result.error, fingerprint: result.fingerprint, snapshotCount: result.snapshots.length };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Connection failed" };
+  }
+});
+
+app.post("/api/pbs/remotes", async (req, reply) => {
+  requireAdmin(req, reply);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const name = String(body.name ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/.test(name)) return reply.status(400).send({ error: "Invalid remote name" });
+  const conn = await validatePbsConnectionOnRunner(pbsConnectionFromBody(body));
+  if (db.prepare("SELECT 1 FROM pbs_remotes WHERE name = ?").get(name)) return reply.status(409).send({ error: "A PBS remote with this name already exists" });
+  const result = db.prepare(`
+    INSERT INTO pbs_remotes (name, server, port, datastore, namespace, auth_id, secret, fingerprint)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, conn.server, conn.port ?? 8007, conn.datastore, conn.namespace ?? null, conn.authId, String(body.secret), conn.fingerprint ?? null);
+  securityLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.remote.create", resourceType: "pbs", resourceName: name, result: "success", details: `${conn.authId}@${conn.server}:${conn.datastore}` });
+  return mapPbsRemote(getPbsRemote(String(result.lastInsertRowid)));
+});
+
+app.put("/api/pbs/remotes/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const existing = getPbsRemote((req.params as { id: string }).id);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const merged = pbsConnectionFromBody(body, existing);
+  const conn = await validatePbsConnectionOnRunner(merged);
+  db.prepare(`
+    UPDATE pbs_remotes SET server = ?, port = ?, datastore = ?, namespace = ?, auth_id = ?, secret = ?, fingerprint = ? WHERE id = ?
+  `).run(conn.server, conn.port ?? 8007, conn.datastore, conn.namespace ?? null, conn.authId, merged.secret, conn.fingerprint ?? null, existing.id);
+  securityLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.remote.update", resourceType: "pbs", resourceName: existing.name, result: "success" });
+  return mapPbsRemote(getPbsRemote(String(existing.id)));
+});
+
+app.delete("/api/pbs/remotes/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const existing = getPbsRemote((req.params as { id: string }).id);
+  db.prepare("DELETE FROM pbs_remotes WHERE id = ?").run(existing.id);
+  securityLog(db, { userId: req.session.userId!, username: req.session.username, ip: getClientIp(req), action: "pbs.remote.delete", resourceType: "pbs", resourceName: existing.name, result: "success" });
+  return { ok: true };
+});
+
+app.get("/api/pbs/remotes/:id/snapshots", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemote((req.params as { id: string }).id);
+  const result = await callRunner<{ ok: boolean; error?: string; fingerprint?: string; snapshots: unknown[] }>(
+    "pbs_list_snapshots", { connection: pbsConnectionFromRow(remote) }, PBS_LIST_TIMEOUT_MS,
+  );
+  if (!result.ok) return reply.status(502).send({ error: result.error, fingerprint: result.fingerprint });
+  return result.snapshots;
+});
+
+app.get("/api/pbs/remotes/:id/inspect", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemote((req.params as { id: string }).id);
+  const { snapshot } = req.query as { snapshot?: string };
+  if (!snapshot) return reply.status(400).send({ error: "snapshot is required" });
+  return callRunner("pbs_inspect", { connection: pbsConnectionFromRow(remote), snapshot }, PBS_LIST_TIMEOUT_MS);
+});
+
+app.post("/api/pbs/remotes/:id/restore", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemote((req.params as { id: string }).id);
+  const payload = (req.body as Record<string, unknown> | undefined) ?? {};
+  const snapshot = String(payload.snapshot ?? "");
+  const name = String(payload.name ?? "").trim();
+  const kind = snapshot.startsWith("vm/") ? "vm" : snapshot.startsWith("ct/") ? "lxc" : null;
+  if (!kind) return reply.status(400).send({ error: "Invalid PBS snapshot" });
+  if (!name) return reply.status(400).send({ error: "Name is required" });
+
+  let storagePoolPath: string | undefined;
+  const poolName = String(payload.storagePool ?? "").trim();
+  if (poolName) {
+    const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(poolName) as { path: string } | undefined;
+    if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
+    storagePoolPath = pool.path;
+  }
+  if (kind === "vm" && !storagePoolPath) return reply.status(400).send({ error: "Storage pool is required" });
+
+  const params: Record<string, unknown> = {
+    connection: pbsConnectionFromRow(remote),
+    snapshot,
+    name,
+    storagePool: storagePoolPath,
+    bridge: payload.bridge,
+    bridgeMap: payload.bridgeMap,
+    autostart: payload.autostart === true,
+  };
+  if (typeof payload.vcpus === "number") params.vcpus = payload.vcpus;
+  if (typeof payload.cpuCores === "number") params.cpuCores = payload.cpuCores;
+  if (typeof payload.memoryMb === "number") params.memoryMb = payload.memoryMb;
+  if (kind === "vm") params.keepUuid = payload.keepUuid !== false;
+  if (kind === "lxc") {
+    params.rootArchive = payload.rootArchive;
+    params.totalBytes = payload.totalBytes;
+  }
+
+  const ip = getClientIp(req);
+  const task = createTask(req.session.userId!, req.session.username ?? "unknown", {
+    kind: kind === "vm" ? "vm-restore" : "lxc-restore",
+    action: kind === "vm" ? "vm.pbs.restore" : "lxc.pbs.restore",
+    label: `Restore ${snapshot} from PBS ${remote.name}`,
+    resourceType: kind,
+    resourceName: name,
+    message: "Restoring from Proxmox Backup Server",
+    detail: snapshot,
+  });
+  void runTrackedTask(task, ip, async ({ update }) => {
+    const result = await callRunner<{ ok: boolean; warnings?: string[] }>(
+      kind === "vm" ? "qemu_restore_pbs" : "lxc_restore_pbs",
+      params,
+      BACKUP_TIMEOUT_MS,
+      onBackupProgress(task.id),
+    );
+    if (kind === "vm") {
+      db.prepare("INSERT OR IGNORE INTO qemu_vms (vm_name, user_id, node_name) VALUES (?, ?, ?)").run(name, req.session.userId!, getLocalNodeName());
+    } else {
+      db.prepare("INSERT OR IGNORE INTO lxc_containers (container_name, user_id, description, node_name) VALUES (?, ?, ?, ?)").run(name, req.session.userId!, null, getLocalNodeName());
+    }
+    // One activity-log line per caveat (TPM, passthrough, VLAN…) so they stay visible.
+    for (const warning of result.warnings ?? []) update({ message: `Note: ${warning}` });
+    update({ progressPercent: 100, message: kind === "vm" ? "VM restored from PBS" : "Container restored from PBS", detail: snapshot });
+    return result;
+  });
+  return sanitizeTask(task);
+});
+
 // ── Audit Logs ─────────────────────────────────────────────────────────────
 app.get("/api/audit-logs", async (req, reply) => {
   requireAdmin(req, reply);

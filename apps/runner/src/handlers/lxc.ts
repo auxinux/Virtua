@@ -10,6 +10,8 @@ import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, de
 import type { ProgressEmitter } from "../runner.js";
 import { isExternalRootfs, buildBackupTarArgs, checkSnapshotRestorable } from "./lxcLayout.js";
 import { auditLxcRootfsPermissions } from "./lxcRootfsGuard.js";
+import { buildPveLxcConfig, ctNicIpv4, lxcIncludeCandidates, parsePveCtConfig, parseSnapshotRef, validatePbsConnection } from "./pbsConfig.js";
+import { readPbsBlob, restorePbsArchive } from "./pbsClient.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -123,6 +125,7 @@ export async function handleLxc(action: string, params: unknown, emit?: Progress
     case "lxc_snapshot_delete": return deleteSnapshot(p.name as string, p.snapName as string);
     case "lxc_backup": return backupContainer(p, emit);
     case "lxc_restore_backup": return restoreContainerBackup(p);
+    case "lxc_restore_pbs": return restoreContainerFromPbs(p, emit);
     case "lxc_usb_attach": return attachUsbDevice(p);
     case "lxc_usb_detach": return detachUsbDevice(p);
     case "lxc_gpu_attach": return attachGpuDevice(p);
@@ -2920,5 +2923,95 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
     return { ok: true, name };
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Restore a Proxmox CT from a PBS snapshot: the root.pxar archive is extracted
+ * as root with its ownership untouched. Proxmox stores unprivileged CT files
+ * with their in-container ids (0-based), which is exactly what Virtua's
+ * privileged containers expect.
+ */
+async function restoreContainerFromPbs(p: Record<string, unknown>, emit?: ProgressEmitter) {
+  const conn = validatePbsConnection(p.connection);
+  const snapshot = String(p.snapshot ?? "");
+  if (parseSnapshotRef(snapshot).type !== "ct") throw new Error("This PBS snapshot is not a container backup");
+  const name = String(p.name ?? "");
+  validateSafePart(name, "name");
+  const rootArchive = String(p.rootArchive ?? "root.pxar.didx");
+  if (!/^root\.m?pxar\.didx$/.test(rootArchive)) throw new Error("Invalid root archive name");
+  const defaultBridge = (p.bridge as string | undefined)?.trim() || "lxcbr0";
+  const bridgeMap: Record<string, string> = {};
+  for (const [from, to] of Object.entries((p.bridgeMap as Record<string, unknown> | undefined) ?? {})) {
+    if (typeof to === "string" && to.trim()) bridgeMap[from] = to.trim();
+  }
+  for (const bridge of [defaultBridge, ...Object.values(bridgeMap)]) {
+    if (!/^[a-zA-Z0-9_.-]{1,15}$/.test(bridge)) throw new Error(`Invalid bridge name: ${bridge}`);
+  }
+  const autostart = p.autostart === true;
+  const totalBytes = typeof p.totalBytes === "number" && p.totalBytes > 0 ? p.totalBytes : undefined;
+  const storagePoolPath = (p.storagePool as string | undefined)?.trim() || undefined;
+  if (storagePoolPath && !path.isAbsolute(storagePoolPath)) throw new Error("Invalid storagePool: must be an absolute path");
+
+  if (await hasUsableContainer(name)) throw new Error(`LXC container ${name} already exists`);
+  const containerDir = path.join(LXC_DIR, name);
+  // Same layout as lxc_create: config in /var/lib/lxc, rootfs optionally on a pool.
+  const rootfsPath = storagePoolPath ? path.join(storagePoolPath, name, "rootfs") : path.join(containerDir, "rootfs");
+  for (const dir of new Set([containerDir, path.dirname(rootfsPath)])) {
+    if (await fs.access(dir).then(() => true, () => false)) throw new Error(`${dir} already exists — pick another name`);
+  }
+
+  emit?.({ percent: 2, message: "Reading Proxmox configuration" });
+  const spec = parsePveCtConfig(await readPbsBlob(conn, snapshot, "pct.conf.blob"));
+  if (typeof p.cpuCores === "number") { spec.cores = p.cpuCores; spec.cpuLimit = undefined; }
+  if (typeof p.memoryMb === "number") spec.memoryMb = p.memoryMb;
+
+  const bridges = new Set([defaultBridge, ...spec.nics.map((n) => (n.bridge && bridgeMap[n.bridge]) || defaultBridge)]);
+  for (const bridge of bridges) await ensureHostBridgeReady(bridge);
+
+  try {
+    await fs.mkdir(containerDir, { recursive: true, mode: 0o750 });
+    await fs.mkdir(rootfsPath, { recursive: true });
+    emit?.({ percent: 5, message: "Extracting the container filesystem from PBS" });
+    let ticks = 0;
+    await restorePbsArchive(conn, snapshot, rootArchive, rootfsPath, {
+      extraArgs: ["--allow-existing-dirs"],
+      onTick: async () => {
+        // du walks the whole tree: only every ~15 s.
+        if (!totalBytes || ticks++ % 5 !== 0) return;
+        const { stdout } = await execFileAsync("du", ["-sb", rootfsPath]).catch(() => ({ stdout: "" }));
+        const current = parseInt(stdout, 10);
+        if (Number.isFinite(current)) emit?.({ percent: 5 + Math.min(85, (85 * current) / totalBytes), bytesCurrent: current, bytesTotal: totalBytes });
+      },
+    });
+
+    emit?.({ percent: 92, message: "Writing the container configuration" });
+    let include = "/usr/share/lxc/config/common.conf";
+    for (const candidate of lxcIncludeCandidates(spec.ostype)) {
+      if (await fs.access(candidate).then(() => true, () => false)) { include = candidate; break; }
+    }
+    const cfg = buildPveLxcConfig(spec, {
+      name,
+      rootfsPath,
+      include,
+      bridgeMap,
+      defaultBridge,
+      autostart,
+      generateMac: generateRandomMac,
+    });
+    await fs.writeFile(path.join(containerDir, "config"), cfg);
+    await writeContainerHostname(name, name);
+    const nic0 = spec.nics[0];
+    // ip=manual means the guest manages its own network — leave its files alone.
+    if (nic0 && nic0.ip && nic0.ip !== "manual") {
+      await configureContainerNetwork(name, ctNicIpv4(nic0), nic0.gw);
+    }
+    await writeContainerDns(name, spec.nameservers);
+    return { ok: true, name, warnings: spec.warnings, onboot: spec.onboot };
+  } catch (error) {
+    await fs.rm(containerDir, { recursive: true, force: true }).catch(() => {});
+    if (storagePoolPath) await fs.rm(path.dirname(rootfsPath), { recursive: true, force: true }).catch(() => {});
+    else await fs.rm(rootfsPath, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
 }

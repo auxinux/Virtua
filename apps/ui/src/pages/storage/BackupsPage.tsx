@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiDelete, apiGet, apiPost, apiUpload } from "../../api/client";
 import { ConfirmModal, Modal } from "../../components/ui/Modal";
 import { formatBytes, formatDate } from "../../utils/formatBytes";
+import { useAuth } from "../../utils/useAuth";
+import PbsBackups from "./PbsBackups";
 
 type BackupEntry = {
   id: string;
@@ -22,6 +24,7 @@ type StoragePool = { name: string };
 
 export default function BackupsPage() {
   const { t } = useTranslation();
+  const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const [filter, setFilter] = useState<"all" | "vm" | "lxc">("all");
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -110,6 +113,8 @@ export default function BackupsPage() {
           </tbody>
         </table>
       </div>
+
+      {isAdmin && <PbsBackups pools={pools} />}
 
       <UploadBackupModal
         open={uploadOpen}

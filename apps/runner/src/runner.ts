@@ -7,6 +7,7 @@ import { handleStorage } from "./handlers/storage";
 import { handleNetwork } from "./handlers/network";
 import { handleSystem } from "./handlers/system";
 import { handleVirtuaOs } from "./handlers/virtuaos";
+import { handlePbs } from "./handlers/pbs";
 
 const SOCK_PATH = process.env.AUXINUX_RUNNER_SOCK ?? "/run/auxinuxvirtual.sock";
 
@@ -40,6 +41,7 @@ async function dispatch(action: string, params: unknown, emit: ProgressEmitter):
   if (action.startsWith("network_")) return handleNetwork(action, params);
   if (action.startsWith("system_")) return handleSystem(action, params);
   if (action.startsWith("virtuaos_")) return handleVirtuaOs(action, params);
+  if (action.startsWith("pbs_")) return handlePbs(action, params);
   throw new Error(`Unknown action: ${action}`);
 }
 

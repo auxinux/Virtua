@@ -7,6 +7,8 @@ import { parseVirtuaConfig, isUnsafeArchivePath } from "@auxinux/shared";
 import { resolveCompressor, resolveCompressorForFilename, retargetArchiveExt, decompressorFor, runTarPipeline } from "./compression.js";
 import type { ProgressEmitter } from "../runner.js";
 import { assertOutsideLxcRootfs, isProtectedHostDir } from "./lxcRootfsGuard.js";
+import { buildPveVmXml, parsePveVmConfig, parseSnapshotRef, validatePbsConnection } from "./pbsConfig.js";
+import { readPbsBlob, restorePbsArchive } from "./pbsClient.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -265,6 +267,7 @@ export async function handleQemu(action: string, params: unknown, emit?: Progres
     case "qemu_snapshot_delete": return deleteSnapshot(p.name as string, p.snapName as string);
     case "qemu_backup": return backupVm(p, emit);
     case "qemu_restore_backup": return restoreVmBackup(p);
+    case "qemu_restore_pbs": return restoreVmFromPbs(p, emit);
     case "qemu_create_from_template": return createVmFromTemplate(p);
     case "qemu_repair_disk": return repairVmDisk(p);
     case "qemu_rename": return renameVm(p.name as string, p.newName as string);
@@ -3180,6 +3183,166 @@ async function restoreVmBackup(p: Record<string, unknown>) {
       await virsh("autostart", name);
     }
     return { ok: true, name, diskPath };
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// ── Proxmox Backup Server restore ─────────────────────────────────────────────
+
+const LIBVIRT_NVRAM_DIR = process.env.LIBVIRT_NVRAM_DIR ?? "/var/lib/libvirt/qemu/nvram";
+
+function validateBridgeMap(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [from, to] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof to === "string" && to.trim()) out[from] = validateBridge(to.trim());
+  }
+  return out;
+}
+
+/**
+ * Firmware for a VM coming from Proxmox. Proxmox "4m" EFI disks are OVMF 4M
+ * variable stores, so we pair them with the 4M code build — that lets the
+ * restored efidisk become the VM's NVRAM and keeps its boot entries.
+ */
+async function resolvePveUefiFirmware(arch: string, secureBoot: boolean): Promise<UefiFirmware> {
+  if (secureBoot) return resolveUefiFirmware(arch, true);
+  if (arch === "x86_64") {
+    const code = "/usr/share/OVMF/OVMF_CODE_4M.fd";
+    const vars = "/usr/share/OVMF/OVMF_VARS_4M.fd";
+    if (await fs.access(code).then(() => true, () => false) && await fs.access(vars).then(() => true, () => false)) {
+      return { loader: code, nvramTemplate: vars };
+    }
+  }
+  return resolveUefiFirmware(arch, false);
+}
+
+async function restoreVmFromPbs(p: Record<string, unknown>, emit?: ProgressEmitter) {
+  const conn = validatePbsConnection(p.connection);
+  const snapshot = String(p.snapshot ?? "");
+  if (parseSnapshotRef(snapshot).type !== "vm") throw new Error("This PBS snapshot is not a VM backup");
+  const name = validateVmName(String(p.name ?? ""));
+  const storagePool = validatePath(String(p.storagePool ?? ""), "storagePool");
+  const defaultBridge = validateBridge((p.bridge as string | undefined) ?? "virbr0");
+  const bridgeMap = validateBridgeMap(p.bridgeMap);
+  const autostart = p.autostart === true;
+  const keepUuid = p.keepUuid !== false;
+  const arch = "x86_64";
+
+  if (await domainExists(name)) throw new Error(`VM ${name} already exists`);
+
+  emit?.({ percent: 2, message: "Reading Proxmox configuration" });
+  const spec = parsePveVmConfig(await readPbsBlob(conn, snapshot, "qemu-server.conf.blob"));
+  if (typeof p.vcpus === "number") spec.vcpus = validatePositiveInt(p.vcpus, "vcpus", 1, 512);
+  if (typeof p.memoryMb === "number") spec.memoryMb = validatePositiveInt(p.memoryMb, "memoryMb", 64, 1024 * 1024);
+  const disks = spec.disks.filter((d) => d.inBackup);
+  if (disks.length === 0) throw new Error("This backup holds no restorable disk");
+  const warnings = [...spec.warnings];
+
+  for (const bridge of new Set([defaultBridge, ...spec.nics.map((n) => (n.bridge && bridgeMap[n.bridge]) || defaultBridge)])) {
+    await ensureVmBridgeReady(bridge);
+  }
+  await ensureLibvirtStorageDir(storagePool);
+
+  // The boot disk gets the usual <name>.qcow2; the others are suffixed by their Proxmox slot.
+  const primaryKey = spec.bootOrder.find((k) => disks.some((d) => d.key === k)) ?? disks[0].key;
+  const diskPaths: Record<string, string> = {};
+  for (const d of disks) {
+    diskPaths[d.key] = path.join(storagePool, d.key === primaryKey ? `${name}.qcow2` : `${name}-${d.key}.qcow2`);
+    if (await fs.access(diskPaths[d.key]).then(() => true, () => false)) {
+      throw new Error(`Disk file ${diskPaths[d.key]} already exists — pick another name`);
+    }
+  }
+
+  const created: string[] = [];
+  // Raw images are staged inside the destination pool, never /tmp (tmpfs).
+  const tempDir = await fs.mkdtemp(path.join(storagePool, ".auxinux-pbs-restore-"));
+  const totalBytes = disks.reduce((sum, d) => sum + (d.sizeBytes ?? 0), 0);
+  let doneBytes = 0;
+  try {
+    for (const d of disks) {
+      const rawPath = path.join(tempDir, `${d.key}.raw`);
+      emit?.({ message: `Downloading disk ${d.key} from PBS` });
+      await restorePbsArchive(conn, snapshot, `${d.archive}.fidx`, rawPath, {
+        onTick: async () => {
+          if (!totalBytes) return;
+          const st = await fs.stat(rawPath).catch(() => null);
+          // Allocated blocks, not the apparent size: the image may be pre-sized/sparse.
+          const current = doneBytes + (st ? Math.min(st.size, st.blocks * 512) : 0);
+          emit?.({ percent: 5 + (85 * current) / totalBytes, bytesCurrent: current, bytesTotal: totalBytes });
+        },
+      });
+      emit?.({ message: `Converting disk ${d.key} to qcow2` });
+      created.push(diskPaths[d.key]);
+      await execFileAsync("qemu-img", ["convert", "-f", "raw", "-O", "qcow2", rawPath, diskPaths[d.key]]);
+      await fs.rm(rawPath, { force: true });
+      await ensureLibvirtDiskAccess(diskPaths[d.key]);
+      doneBytes += d.sizeBytes ?? 0;
+      if (totalBytes) emit?.({ percent: 5 + (85 * doneBytes) / totalBytes, bytesCurrent: doneBytes, bytesTotal: totalBytes });
+    }
+
+    let firmware: { loader: string; nvramTemplate?: string; nvramPath?: string } | undefined;
+    if (spec.uefi) {
+      const fw = await resolvePveUefiFirmware(arch, spec.secureBoot);
+      let nvramPath: string | undefined;
+      if (spec.hasEfiDisk && spec.efiType === "4m" && fw.nvramTemplate) {
+        try {
+          emit?.({ percent: 92, message: "Restoring UEFI variables" });
+          const efiRaw = path.join(tempDir, "efidisk0.raw");
+          await restorePbsArchive(conn, snapshot, "drive-efidisk0.img.fidx", efiRaw);
+          // Proxmox storage rounds the efidisk up (LVM extents); pflash needs the exact size.
+          const templateSize = (await fs.stat(fw.nvramTemplate)).size;
+          if ((await fs.stat(efiRaw)).size < templateSize) throw new Error("EFI disk smaller than the OVMF variable store");
+          await fs.truncate(efiRaw, templateSize);
+          await fs.mkdir(LIBVIRT_NVRAM_DIR, { recursive: true });
+          nvramPath = path.join(LIBVIRT_NVRAM_DIR, `${name}_VARS.fd`);
+          await fs.copyFile(efiRaw, nvramPath);
+          created.push(nvramPath);
+        } catch (error) {
+          nvramPath = undefined;
+          warnings.push(`UEFI boot entries could not be restored (${(error as Error).message}); the firmware starts from a fresh variable store.`);
+        }
+      } else if (spec.hasEfiDisk) {
+        warnings.push("The Proxmox EFI disk uses the old 2M format; the firmware starts from a fresh variable store.");
+      }
+      firmware = { loader: fw.loader, nvramTemplate: fw.nvramTemplate, nvramPath };
+    }
+
+    // Keep the SMBIOS UUID (Windows activation, licences) unless it is already taken here.
+    let uuid: string | undefined;
+    if (keepUuid && spec.smbiosUuid) {
+      const taken = await virsh("domname", spec.smbiosUuid).then(() => true, () => false);
+      if (taken) warnings.push("The original VM UUID is already used on this host; a new one was generated.");
+      else uuid = spec.smbiosUuid;
+    }
+
+    emit?.({ percent: 96, message: "Defining the VM" });
+    let xml = buildPveVmXml(spec, {
+      name,
+      arch,
+      diskPaths,
+      bridgeMap,
+      defaultBridge,
+      firmware,
+      uuid,
+      cpuXml: buildCpuBlock(spec.vcpus),
+      displayXml: [
+        `    <graphics type="vnc" autoport="yes" listen="127.0.0.1"><listen type="address" address="127.0.0.1"/></graphics>`,
+        buildSpiceGraphicsBlock(),
+        buildSpiceAudioBlocks(),
+        buildVideoBlock(spec.video),
+      ].join("\n"),
+    });
+    xml = ensurePerformanceDefaults(ensureSerialConsole(xml));
+    const xmlPath = path.join(tempDir, `${name}.xml`);
+    await fs.writeFile(xmlPath, xml);
+    await virsh("define", xmlPath);
+    if (autostart) await virsh("autostart", name);
+    return { ok: true, name, diskPaths, warnings, onboot: spec.onboot };
+  } catch (error) {
+    for (const file of created) await fs.rm(file, { force: true }).catch(() => {});
+    throw error;
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
