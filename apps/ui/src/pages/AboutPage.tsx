@@ -12,6 +12,22 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.8",
+      items: fr
+        ? [
+            "Nouveau (bêta) : sauvegarde vers un Proxmox Backup Server. Sur l'onglet Backups d'une VM ou d'un conteneur, « Back up to PBS » envoie la machine vers le PBS choisi. Après la première sauvegarde, seuls les blocs modifiés sont envoyés (déduplication PBS).",
+            "Sauvegardes planifiées vers PBS (Stockage → Backups) : toutes les VM et/ou tous les conteneurs (y compris ceux créés plus tard) ou une sélection, jours et heure au choix, rétention (dernières, quotidiennes, hebdomadaires, mensuelles) appliquée après chaque sauvegarde. Une tâche manquée pendant un arrêt du serveur est rattrapée au redémarrage.",
+            "Une VM en marche reste en marche : ses disques sont figés sur des calques temporaires pendant l'envoi, comme pour le backup local à chaud. Un conteneur en marche est archivé à chaud.",
+            "Les sauvegardes sont au format Proxmox VE : elles se restaurent dans Virtua, mais aussi dans un vrai Proxmox VE.",
+          ]
+        : [
+            "New (beta): back up to a Proxmox Backup Server. On a VM or container Backups tab, \"Back up to PBS\" sends the guest to the chosen PBS. After the first backup, only changed chunks are sent (PBS deduplication).",
+            "Scheduled backups to PBS (Storage → Backups): all VMs and/or containers (including ones created later) or a selection, chosen days and time, retention (last, daily, weekly, monthly) applied after each backup. A run missed while the server was down catches up when it comes back.",
+            "A running VM keeps running: its disks are frozen on temporary overlays during the upload, like the local live backup. A running container is archived live.",
+            "Backups use the Proxmox VE format: they restore in Virtua, and in a real Proxmox VE too.",
+          ],
+    },
+    {
       v: "0.8.7",
       items: fr
         ? [
