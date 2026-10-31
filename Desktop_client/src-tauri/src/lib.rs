@@ -1,3 +1,4 @@
+mod appearance;
 mod companion;
 mod containers;
 mod docker;
@@ -4281,6 +4282,13 @@ pub fn run() {
         env::consts::ARCH
     ));
     tauri::Builder::default()
+        .setup(|app| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                fit_to_screen(&window);
+            }
+            Ok(())
+        })
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -4292,6 +4300,7 @@ pub fn run() {
             load_desktop_setting,
             clear_desktop_setting,
             runtime_platform,
+            appearance::desktop_appearance,
             local_host_metrics,
             local_qemu_diagnostics,
             local_load_storage_config,
@@ -4337,6 +4346,27 @@ pub fn run() {
             // On Windows this is almost always a missing WebView2 runtime.
             panic!("AuxiNux Virtua Desktop n'a pas pu demarrer: {error}");
         });
+}
+
+/// Laptop screens (1366×768, 1280×800…) are smaller than the default window
+/// plus the taskbar: the window opened partly off-screen with its bottom under
+/// the panel. Below 1440×900 logical pixels it opens maximized instead.
+fn should_maximize(logical_width: f64, logical_height: f64) -> bool {
+    logical_width < 1440.0 || logical_height < 900.0
+}
+
+fn fit_to_screen(window: &tauri::WebviewWindow) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else { return };
+    let scale = monitor.scale_factor().max(1.0);
+    let size = monitor.size();
+    if should_maximize(f64::from(size.width) / scale, f64::from(size.height) / scale) {
+        let _ = window.maximize();
+    }
 }
 
 #[cfg(test)]
@@ -4389,6 +4419,15 @@ mod local_mode_tests {
             lines.push(serde_json::to_string(&command_args(&command)).unwrap());
         }
         std::fs::write(out, lines.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn small_screens_open_maximized() {
+        assert!(should_maximize(1366.0, 768.0));
+        assert!(should_maximize(1280.0, 800.0));
+        assert!(should_maximize(1920.0, 1080.0 / 1.25 - 1.0));
+        assert!(!should_maximize(1920.0, 1080.0));
+        assert!(!should_maximize(2560.0, 1440.0));
     }
 
     #[test]

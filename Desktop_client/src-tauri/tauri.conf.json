@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AuxiNux Virtua Desktop Client",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "identifier": "ca.auxinux.virtua.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "AuxiNux Virtua - Desktop Client",
-        "width": 1320,
-        "height": 860,
-        "minWidth": 1100,
-        "minHeight": 720,
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 520,
         "center": true,
         "resizable": true,
         "decorations": true
@@ -54,7 +54,8 @@
           "qemu-utils",
           "ovmf",
           "swtpm",
-          "freerdp3-x11"
+          "freerdp3-x11",
+          "libglib2.0-bin"
         ]
       }
     },

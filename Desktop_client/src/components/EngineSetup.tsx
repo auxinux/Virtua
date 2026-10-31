@@ -60,7 +60,7 @@ export function EngineSetup({ requiredOnly = false, onReady }: { requiredOnly?: 
     {requiredOnly && <p className="text-sm text-virtua-muted">QEMU est nécessaire pour créer et exécuter vos VM locales. Docker et LXC pourront être activés ensuite, à votre demande.</p>}
     {error && <div role="alert" className="whitespace-pre-wrap rounded border border-virtua-red/50 bg-virtua-red/10 p-3 text-sm text-virtua-red">{error}</div>}
     {message && <p role="status" className="flex items-center gap-2 text-sm text-virtua-accent">{busy && <Loader2 className="h-4 w-4 shrink-0 animate-spin" />}{message}</p>}
-    {overview?.engines.filter(e => !requiredOnly || e.id === "qemu").map(engine => <div key={engine.id} className="rounded border border-virtua-border bg-black/10 p-4">
+    {overview?.engines.filter(e => !requiredOnly || e.id === "qemu").map(engine => <div key={engine.id} className="rounded border border-virtua-border bg-virtua-shade/10 p-4">
       <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="font-medium">{names[engine.id]}</h3><span className={`text-xs ${engine.state === "ready" ? "text-virtua-green" : "text-virtua-yellow"}`}>{stateNames[engine.state]}</span></div>
       <p className="mt-2 text-sm text-virtua-muted">{engine.detail}</p>
       {engine.id === "lxc" && overview.os !== "linux" && <p className="mt-2 text-xs text-virtua-muted">Une seule VM Debian 13 pour tous vos LXC, avec le noyau Debian standard et l’architecture du poste. Les disques sont conservés à l’arrêt. Les IP des conteneurs restent internes à cette VM.</p>}
@@ -73,7 +73,7 @@ export function EngineSetup({ requiredOnly = false, onReady }: { requiredOnly?: 
         </>}
       </div>
     </div>)}
-    {logs !== null && <div><button onClick={() => setLogs(null)} className="virtua-button mb-2">Fermer les journaux</button><pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-3 text-xs">{logs || "Aucun journal disponible."}</pre></div>}
+    {logs !== null && <div><button onClick={() => setLogs(null)} className="virtua-button mb-2">Fermer les journaux</button><pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-virtua-shade/30 p-3 text-xs">{logs || "Aucun journal disponible."}</pre></div>}
     {requiredOnly && ready && <button disabled={locked} onClick={onReady} className="virtua-button-primary w-full justify-center">Ouvrir le mode local</button>}
     {overview?.host?.accelerationIssue && <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded border border-virtua-yellow/40 bg-virtua-yellow/10 p-3 text-xs text-virtua-yellow">
       <span>{overview.host.accelerationIssue}</span>

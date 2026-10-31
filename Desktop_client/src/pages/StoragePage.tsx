@@ -70,7 +70,7 @@ function FilesTable({
   pending: string | null;
 }) {
   return (
-    <div className="overflow-hidden rounded border border-virtua-border bg-black/10">
+    <div className="overflow-hidden rounded border border-virtua-border bg-virtua-shade/10">
       <div className="grid grid-cols-[1fr_7rem_10rem_7rem] items-center gap-3 border-b border-virtua-border px-3 py-2 text-xs uppercase tracking-wide text-virtua-muted">
         <span>Nom</span>
         <span>Taille</span>
@@ -111,7 +111,7 @@ function FilesTable({
 
 function DockerTable({ images }: { images: LocalDockerImage[] }) {
   return (
-    <div className="overflow-hidden rounded border border-virtua-border bg-black/10">
+    <div className="overflow-hidden rounded border border-virtua-border bg-virtua-shade/10">
       <div className="grid grid-cols-[1fr_10rem_8rem] items-center gap-3 border-b border-virtua-border px-3 py-2 text-xs uppercase tracking-wide text-virtua-muted">
         <span>Image</span>
         <span>ID</span>
@@ -344,7 +344,7 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
       return (
         <div className="space-y-4">
           <FilesTable files={inventory?.templates ?? []} kind="template" resources={resources} onDelete={deleteFile} pending={pending} />
-          <div className="rounded border border-virtua-border bg-black/10 p-4">
+          <div className="rounded border border-virtua-border bg-virtua-shade/10 p-4">
             <div className="mb-3 flex items-center gap-2">
               <Archive className="h-4 w-4 text-virtua-accent" />
               <h3 className="text-sm font-semibold">Creer un template depuis une VM arretee</h3>
@@ -378,7 +378,7 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
     if (activeTab === "docker") return <DockerTable images={inventory?.dockerImages ?? []} />;
     return (
       <div className="grid gap-4 xl:grid-cols-[22rem_1fr]">
-        <div className="rounded border border-virtua-border bg-black/10 p-4">
+        <div className="rounded border border-virtua-border bg-virtua-shade/10 p-4">
           <div className="mb-4 flex items-center gap-2">
             <FileArchive className="h-4 w-4 text-virtua-accent" />
             <h2 className="text-sm font-semibold">Depot AuxiNux Templates</h2>
@@ -393,7 +393,7 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
               <option value="amd64">AMD64</option>
             </select>
           </div>
-          <label className="mt-3 flex h-10 items-center gap-2 rounded border border-virtua-border bg-black/20 px-3">
+          <label className="mt-3 flex h-10 items-center gap-2 rounded border border-virtua-border bg-virtua-shade/20 px-3">
             <Search className="h-4 w-4 text-virtua-muted" />
             <input className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-virtua-muted" placeholder="Rechercher" value={query} onChange={(event) => setQuery(event.target.value)} />
           </label>
@@ -403,7 +403,7 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
           </button>
         </div>
 
-        <div className="max-h-[38rem] overflow-auto divide-y divide-virtua-border rounded border border-virtua-border bg-black/10">
+        <div className="max-h-[38rem] overflow-auto divide-y divide-virtua-border rounded border border-virtua-border bg-virtua-shade/10">
           {filteredRemote.map((item) => {
             const isLocal = downloadedRemoteUrls.has(item.url) || remoteItemExists(item, inventory);
             const progress = downloadProgress[item.url];
@@ -419,10 +419,10 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
                   {item.description ? <p className="mt-1 max-w-3xl text-sm text-virtua-muted">{item.description}</p> : null}
                   {item.category === "VM" && (item.cpu || item.ram || item.disk) ? (
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                      {item.cpu ? <span className="rounded border border-virtua-border bg-black/20 px-2 py-1 text-virtua-muted">CPU {item.cpu}</span> : null}
-                      {item.ram ? <span className="rounded border border-virtua-border bg-black/20 px-2 py-1 text-virtua-muted">RAM {item.ram} MiB</span> : null}
-                      {item.disk ? <span className="max-w-xs truncate rounded border border-virtua-border bg-black/20 px-2 py-1 text-virtua-muted">DISK {item.disk}</span> : null}
-                      <span className="rounded border border-virtua-border bg-black/20 px-2 py-1 text-virtua-muted">ARCH {item.architecture}</span>
+                      {item.cpu ? <span className="rounded border border-virtua-border bg-virtua-shade/20 px-2 py-1 text-virtua-muted">CPU {item.cpu}</span> : null}
+                      {item.ram ? <span className="rounded border border-virtua-border bg-virtua-shade/20 px-2 py-1 text-virtua-muted">RAM {item.ram} MiB</span> : null}
+                      {item.disk ? <span className="max-w-xs truncate rounded border border-virtua-border bg-virtua-shade/20 px-2 py-1 text-virtua-muted">DISK {item.disk}</span> : null}
+                      <span className="rounded border border-virtua-border bg-virtua-shade/20 px-2 py-1 text-virtua-muted">ARCH {item.architecture}</span>
                     </div>
                   ) : null}
                   {progress ? (
@@ -485,10 +485,10 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
               key={tab.id}
               type="button"
               onClick={() => setActiveTab(tab.id)}
-              className={`inline-flex h-9 items-center gap-2 rounded px-3 text-sm ${activeTab === tab.id ? "bg-virtua-accent text-white" : "bg-black/20 text-virtua-muted hover:text-virtua-text"}`}
+              className={`inline-flex h-9 items-center gap-2 rounded px-3 text-sm ${activeTab === tab.id ? "bg-virtua-accent text-virtua-onAccent" : "bg-virtua-shade/20 text-virtua-muted hover:text-virtua-text"}`}
             >
               {tab.label}
-              <span className="rounded bg-black/25 px-1.5 py-0.5 text-[11px]">{tab.count}</span>
+              <span className="rounded bg-virtua-shade/25 px-1.5 py-0.5 text-[11px]">{tab.count}</span>
             </button>
           ))}
         </div>

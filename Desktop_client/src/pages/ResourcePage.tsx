@@ -92,7 +92,7 @@ function StopChoiceDialog({
         <div className="mt-4 space-y-2">
           <button
             onClick={() => onChoose(local ? "shutdown" : "stop")}
-            className="w-full rounded border border-virtua-border bg-black/15 px-3 py-3 text-left hover:bg-virtua-panelHover"
+            className="w-full rounded border border-virtua-border bg-virtua-shade/15 px-3 py-3 text-left hover:bg-virtua-panelHover"
           >
             <span className="block text-sm font-medium">Envoyer un signal a l'OS</span>
             <span className="mt-1 block text-xs text-virtua-muted">Demande un arret propre a l'OS invite.</span>
@@ -328,7 +328,7 @@ function CreateResourceDialog({
                 </p>
               </div>
             </div>
-            <div className="mt-4 rounded border border-virtua-border bg-black/20 px-3 py-2 text-sm leading-6 text-virtua-muted">
+            <div className="mt-4 rounded border border-virtua-border bg-virtua-shade/20 px-3 py-2 text-sm leading-6 text-virtua-muted">
               Cette operation peut prendre un moment selon la taille du disque et le stockage choisi.
             </div>
           </div>
@@ -359,18 +359,18 @@ function CreateResourceDialog({
             </select>
           </label>
           {usageMode === "cloud" && form.type === "vm" && selectedImage ? (
-            <div className="rounded border border-virtua-border bg-black/15 p-3 text-sm sm:col-span-2">
+            <div className="rounded border border-virtua-border bg-virtua-shade/15 p-3 text-sm sm:col-span-2">
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <span className="font-medium">{selectedImage.label ?? selectedImage.name}</span>
                 <span className="rounded border border-virtua-border px-2 py-0.5 text-xs uppercase text-virtua-muted">{selectedImageKind || "image"}</span>
               </div>
               {selectedImage.description ? <p className="mb-2 text-virtua-muted">{selectedImage.description}</p> : null}
               <div className="flex flex-wrap gap-2 text-xs text-virtua-muted">
-                {selectedImage.architecture ? <span className="rounded bg-black/20 px-2 py-1">ARCH {selectedImage.architecture}</span> : null}
-                {selectedImage.cpu ? <span className="rounded bg-black/20 px-2 py-1">CPU {selectedImage.cpu}</span> : null}
-                {selectedImage.memory ?? selectedImage.ram ? <span className="rounded bg-black/20 px-2 py-1">RAM {selectedImage.memory ?? selectedImage.ram} MiB</span> : null}
-                {selectedImage.disk ? <span className="rounded bg-black/20 px-2 py-1">DISK {selectedImage.disk}</span> : null}
-                {selectedImage.size ? <span className="rounded bg-black/20 px-2 py-1">SIZE {selectedImage.size}</span> : null}
+                {selectedImage.architecture ? <span className="rounded bg-virtua-shade/20 px-2 py-1">ARCH {selectedImage.architecture}</span> : null}
+                {selectedImage.cpu ? <span className="rounded bg-virtua-shade/20 px-2 py-1">CPU {selectedImage.cpu}</span> : null}
+                {selectedImage.memory ?? selectedImage.ram ? <span className="rounded bg-virtua-shade/20 px-2 py-1">RAM {selectedImage.memory ?? selectedImage.ram} MiB</span> : null}
+                {selectedImage.disk ? <span className="rounded bg-virtua-shade/20 px-2 py-1">DISK {selectedImage.disk}</span> : null}
+                {selectedImage.size ? <span className="rounded bg-virtua-shade/20 px-2 py-1">SIZE {selectedImage.size}</span> : null}
               </div>
             </div>
           ) : null}
@@ -491,7 +491,7 @@ function CreateResourceDialog({
         </div>
 
         {usageMode === "local" && form.type === "vm" && form.guestOs === "windows" ? (
-          <div className="mt-4 rounded border border-virtua-border bg-black/15 px-3 py-2 text-xs leading-5 text-virtua-muted">
+          <div className="mt-4 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-2 text-xs leading-5 text-virtua-muted">
             Windows 11 comme sur un vrai PC : TPM 2.0 emule (swtpm, Mac et Linux) et Secure Boot avec les cles Microsoft 2011 et 2023. Prevoir 4 Gio de RAM et 64 Gio de disque.
             Le pilote reseau (NetKVM) et l'agent invite s'installent ensuite depuis le lecteur des pilotes VirtIO.
           </div>
@@ -503,7 +503,7 @@ function CreateResourceDialog({
           </div>
         ) : null}
 
-        <div className="mt-4 rounded border border-virtua-border bg-black/10 p-3">
+        <div className="mt-4 rounded border border-virtua-border bg-virtua-shade/10 p-3">
           <h3 className="mb-3 text-sm font-medium">Options {form.type.toUpperCase()}</h3>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {form.type === "vm" ? (
@@ -677,7 +677,7 @@ export function ResourcePage({
 
       <div className="overflow-hidden rounded border border-virtua-border bg-virtua-panel">
         <table className="w-full min-w-[900px] text-left text-sm">
-          <thead className="bg-black/20 text-xs uppercase tracking-wider text-virtua-muted">
+          <thead className="bg-virtua-shade/20 text-xs uppercase tracking-wider text-virtua-muted">
             <tr>
               <th className="px-4 py-3 font-medium">Nom</th>
               <th className="px-4 py-3 font-medium">Type</th>

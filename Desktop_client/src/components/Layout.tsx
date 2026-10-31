@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Boxes,
   CheckCircle2,
@@ -70,15 +70,17 @@ function NavItem({ to, labelKey, icon: Icon, isCollapsed }: (typeof cloudNavItem
       to={to}
       end={to === "/"}
       title={isCollapsed ? label : undefined}
+      // AuxiNux Shell / Windows 11 Settings navigation: 36 px rows, a soft
+      // highlight and an accent pill on the selected row.
       className={({ isActive }) =>
-        `flex h-10 items-center rounded px-3 text-sm transition-colors ${
+        `flex h-9 items-center rounded px-3 text-sm text-virtua-text transition-colors ${
           isActive
-            ? "bg-virtua-accentSoft text-white"
-            : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
+            ? "bg-virtua-panelHover font-medium shadow-[inset_3px_0_0_0_rgb(var(--v-accent))]"
+            : "hover:bg-virtua-panelHover"
         } ${isCollapsed ? "justify-center" : "gap-3"}`
       }
     >
-      <Icon className="h-5 w-5 shrink-0" />
+      <Icon className="h-[1.15rem] w-[1.15rem] shrink-0 text-virtua-muted" />
       {!isCollapsed && <span>{label}</span>}
     </NavLink>
   );
@@ -90,7 +92,7 @@ function NodeTree({ nodes, resources }: { nodes: VirtuaNode[]; resources: Virtua
       {nodes.map((node) => {
         const nodeResources = resources.filter((resource) => resource.node === node.name).slice(0, 4);
         return (
-          <div key={node.id} className="rounded border border-virtua-border/70 bg-black/10 p-2">
+          <div key={node.id} className="rounded border border-virtua-border/70 bg-virtua-shade/10 p-2">
             <div className="flex items-center gap-2 text-sm text-virtua-text">
               <Server className="h-4 w-4 text-virtua-muted" />
               <span className="min-w-0 flex-1 truncate">{node.name}</span>
@@ -119,6 +121,8 @@ function NodeTree({ nodes, resources }: { nodes: VirtuaNode[]; resources: Virtua
   );
 }
 
+const sidebarKey = "auxinux-virtua-desktop-sidebar";
+
 export function Layout({
   children,
   connection,
@@ -142,7 +146,31 @@ export function Layout({
   loadError?: string | null;
   usageMode?: UsageMode;
 }) {
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  // The sidebar folds by itself on narrow windows (a 1366 px laptop with the
+  // console open) unless the user chose explicitly; that choice is kept.
+  const [sidebarPreference, setSidebarPreference] = useState<boolean | null>(() => {
+    try {
+      const saved = localStorage.getItem(sidebarKey);
+      return saved === "collapsed" ? true : saved === "expanded" ? false : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isNarrow, setNarrow] = useState(() => window.innerWidth < 1200);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 1200);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const isSidebarCollapsed = sidebarPreference ?? isNarrow;
+  const setIsSidebarCollapsed = (collapsed: boolean) => {
+    setSidebarPreference(collapsed);
+    try {
+      localStorage.setItem(sidebarKey, collapsed ? "collapsed" : "expanded");
+    } catch {
+      /* Not persisted; still applied. */
+    }
+  };
   const { t, language, setLanguage } = useLanguage();
   const location = useLocation();
   const consolePrefs = useConsolePrefs();
@@ -160,28 +188,39 @@ export function Layout({
 
   return (
     <div className="flex h-screen min-h-0 bg-virtua-bg text-virtua-text">
-      <aside className={`${hideChrome ? "hidden" : "flex"} flex-col border-r border-virtua-border bg-[#090d12] transition-[width] duration-300 ${isSidebarCollapsed ? "w-16 min-w-[4rem]" : "w-72 min-w-[18rem]"}`}>
-        <div className={`border-b border-virtua-border ${isSidebarCollapsed ? "px-2 py-4 flex justify-center" : "px-4 py-4"}`}>
+      <aside className={`${hideChrome ? "hidden" : "flex"} flex-col border-r border-virtua-border bg-virtua-sidebar transition-[width] duration-200 ${isSidebarCollapsed ? "w-14 min-w-[3.5rem]" : "w-60 min-w-[15rem]"}`}>
+        <div className={`flex h-14 shrink-0 items-center ${isSidebarCollapsed ? "justify-center px-2" : "px-4"}`}>
           {isSidebarCollapsed ? (
              <img src="/brand/auxinux-virtua-mark.svg" alt="Virtua" className="h-8 w-8" draggable={false} onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           ) : (
-            <img
-              src="/brand/auxinux-virtua-logo.svg"
-              alt="AuxiNux Virtua - Desktop Client"
-              className="h-auto w-56"
-              draggable={false}
-            />
+            <>
+              {/* The raster logo has light lettering: Virtua classique only. AuxiNux
+                  themes show the app the way AuxiNux Shell apps do, icon + name. */}
+              <img
+                src="/brand/auxinux-virtua-logo.svg"
+                alt="AuxiNux Virtua - Desktop Client"
+                className="brand-classic h-auto w-40"
+                draggable={false}
+              />
+              <div className="brand-auxinux items-center gap-2.5">
+                <img src="/brand/auxinux-virtua-mark.svg" alt="" className="h-7 w-7" draggable={false} />
+                <div className="leading-tight">
+                  <p className="text-sm font-semibold">Virtua Desktop</p>
+                  <p className="text-[0.7rem] text-virtua-muted">AuxiNux</p>
+                </div>
+              </div>
+            </>
           )}
         </div>
 
-        <nav className="space-y-1 px-2 py-3">
+        <nav className="min-h-0 space-y-0.5 overflow-y-auto px-2 py-1">
           {navItems.map((item) => (
             <NavItem key={item.to} {...item} isCollapsed={isSidebarCollapsed} />
           ))}
         </nav>
 
         {!isSidebarCollapsed && (
-          <div className="min-h-0 flex-1 overflow-auto border-t border-virtua-border px-3 py-3">
+          <div className="mt-2 hidden min-h-0 flex-1 overflow-auto border-t border-virtua-border px-3 py-3 [@media(min-height:820px)]:block">
             <div className="mb-2 flex items-center justify-between">
               <p className="text-xs font-semibold uppercase tracking-wider text-virtua-muted">{t("layout.nodes")}</p>
               <span className="text-xs text-virtua-muted">{nodes.length}</span>
@@ -190,25 +229,26 @@ export function Layout({
           </div>
         )}
 
-        {isSidebarCollapsed && <div className="min-h-0 flex-1" />}
+        {/* On short screens (768 px laptops) the node list gives way to the menu. */}
+        <div className={`min-h-0 flex-1 ${isSidebarCollapsed ? "" : "[@media(min-height:820px)]:hidden"}`} />
 
-        <div className={`border-t border-virtua-border ${isSidebarCollapsed ? "p-2 flex flex-col items-center gap-2" : "p-3"}`}>
+        <div className={`shrink-0 border-t border-virtua-border ${isSidebarCollapsed ? "p-2 flex flex-col items-center gap-2" : "p-2"}`}>
           {!isSidebarCollapsed && (
-            <div className="rounded border border-virtua-border bg-virtua-panel p-3 mb-2">
+            <div className="mb-2 hidden rounded border border-virtua-border bg-virtua-panel p-3 [@media(min-height:820px)]:block">
               <div className="mb-2 flex items-center gap-2">
                 <HardDrive className="h-4 w-4 text-virtua-muted" />
                 <p className="min-w-0 flex-1 truncate text-sm font-medium">{connection?.name ?? t("layout.no_connection")}</p>
               </div>
               <div className="flex items-center justify-between gap-2">
                 {connection ? <StatusBadge status={connection.status} /> : <StatusBadge status="offline" />}
-                <span className="rounded border border-virtua-border bg-black/20 px-2 py-1 text-[0.65rem] uppercase tracking-wider text-virtua-muted">{usageMode}</span>
+                <span className="rounded border border-virtua-border bg-virtua-shade/20 px-2 py-1 text-[0.65rem] uppercase tracking-wider text-virtua-muted">{usageMode}</span>
               </div>
             </div>
           )}
 
           <button
             onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-            className="flex h-10 w-full items-center justify-center rounded text-virtua-muted transition-colors hover:bg-virtua-panelHover hover:text-virtua-text"
+            className="flex h-9 w-full items-center justify-center rounded text-virtua-muted transition-colors hover:bg-virtua-panelHover hover:text-virtua-text"
             title={isSidebarCollapsed ? t("layout.expand") : t("layout.collapse")}
           >
             {isSidebarCollapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
@@ -217,13 +257,13 @@ export function Layout({
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className={`${hideChrome ? "hidden" : "flex"} h-12 items-center gap-3 border-b border-virtua-border bg-virtua-panel/80 px-5`}>
+        <header className={`${hideChrome ? "hidden" : "flex"} h-11 shrink-0 items-center gap-2 border-b border-virtua-border bg-virtua-panel/80 px-3 lg:gap-3 lg:px-4`}>
           <div className="min-w-0 flex-1 flex items-baseline gap-3">
             <p className="truncate text-sm font-medium">{headerTitle}</p>
             {headerSubtitle ? <p className="text-xs text-virtua-muted hidden md:block">{headerSubtitle}</p> : null}
           </div>
           {runningTasks.length > 0 && (
-            <div className="hidden items-center gap-2 rounded border border-virtua-border bg-black/15 px-3 py-1.5 text-xs text-virtua-muted lg:flex">
+            <div className="hidden items-center gap-2 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-1.5 text-xs text-virtua-muted lg:flex">
               <PlayCircle className="h-3.5 w-3.5 text-virtua-accent" />
               <span>{runningTasks.length} {t("layout.active_operations")}</span>
             </div>
@@ -232,16 +272,16 @@ export function Layout({
              <StatusBadge status={connection?.status ?? "offline"} />
           </div>
 
-          <div className="flex items-center gap-1 rounded bg-black/20 p-1">
+          <div className="flex items-center gap-1 rounded bg-virtua-shade/20 p-1">
             <button
               onClick={() => setLanguage("fr")}
-              className={`h-6 rounded px-2 text-[10px] font-bold transition-colors ${language === "fr" ? "bg-virtua-accent text-white" : "text-virtua-muted hover:text-virtua-text"}`}
+              className={`h-6 rounded px-2 text-[10px] font-bold transition-colors ${language === "fr" ? "bg-virtua-accent text-virtua-onAccent" : "text-virtua-muted hover:text-virtua-text"}`}
             >
               FR
             </button>
             <button
               onClick={() => setLanguage("en")}
-              className={`h-6 rounded px-2 text-[10px] font-bold transition-colors ${language === "en" ? "bg-virtua-accent text-white" : "text-virtua-muted hover:text-virtua-text"}`}
+              className={`h-6 rounded px-2 text-[10px] font-bold transition-colors ${language === "en" ? "bg-virtua-accent text-virtua-onAccent" : "text-virtua-muted hover:text-virtua-text"}`}
             >
               EN
             </button>
@@ -253,16 +293,16 @@ export function Layout({
               {usageMode === "local" ? "Cloud" : "Local"}
             </button>
           ) : null}
-          <div className="hidden items-center gap-2 rounded border border-virtua-border bg-black/15 px-3 py-1.5 text-xs lg:flex">
+          <div className="hidden items-center gap-2 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-1.5 text-xs lg:flex">
             <span className="text-virtua-text font-medium">{user?.displayName ?? user?.username}</span>
-            <span className="text-[10px] text-virtua-muted px-1.5 py-0.5 bg-black/30 rounded">{user?.role}</span>
+            <span className="text-[10px] text-virtua-muted px-1.5 py-0.5 bg-virtua-shade/30 rounded">{user?.role}</span>
           </div>
           <button onClick={onLogout} className="virtua-icon-button !h-8 !w-8" title={usageMode === "local" ? t("layout.back_choice") : t("layout.logout")}>
             <LogOut className="h-4 w-4" />
           </button>
         </header>
 
-        <main className={`min-h-0 flex-1 overflow-auto ${hideChrome ? "p-0" : "p-4"}`}>{children}</main>
+        <main className={`min-h-0 flex-1 overflow-auto ${hideChrome ? "p-0" : "p-3 lg:p-4"}`}>{children}</main>
       </div>
     </div>
   );

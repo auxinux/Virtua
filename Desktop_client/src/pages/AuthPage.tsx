@@ -65,18 +65,18 @@ export function AuthPage({
           ) : null}
         </div>
 
-        <div className="mb-4 grid grid-cols-2 gap-1 rounded bg-black/20 p-1">
+        <div className="mb-4 grid grid-cols-2 gap-1 rounded bg-virtua-shade/20 p-1">
           <button
             type="button"
             onClick={() => setMode("password")}
-            className={`h-9 rounded text-sm ${mode === "password" ? "bg-virtua-accent text-white" : "text-virtua-muted hover:bg-virtua-panelHover"}`}
+            className={`h-9 rounded text-sm ${mode === "password" ? "bg-virtua-accent text-virtua-onAccent" : "text-virtua-muted hover:bg-virtua-panelHover"}`}
           >
             Mot de passe
           </button>
           <button
             type="button"
             onClick={() => setMode("pairing")}
-            className={`h-9 rounded text-sm ${mode === "pairing" ? "bg-virtua-accent text-white" : "text-virtua-muted hover:bg-virtua-panelHover"}`}
+            className={`h-9 rounded text-sm ${mode === "pairing" ? "bg-virtua-accent text-virtua-onAccent" : "text-virtua-muted hover:bg-virtua-panelHover"}`}
           >
             Code pairing
           </button>
@@ -91,7 +91,7 @@ export function AuthPage({
               </label>
               <label className="grid gap-1.5">
                 <span className="text-xs font-medium text-virtua-muted">Mot de passe</span>
-                <div className="flex rounded border border-virtua-border bg-black/20 focus-within:border-virtua-accent">
+                <div className="flex rounded border border-virtua-border bg-virtua-shade/20 focus-within:border-virtua-accent">
                   <input
                     className="h-10 min-w-0 flex-1 bg-transparent px-3 text-sm text-virtua-text outline-none"
                     type={showPassword ? "text" : "password"}
@@ -118,7 +118,7 @@ export function AuthPage({
             </label>
           )}
 
-          <div className="rounded border border-virtua-border bg-black/10">
+          <div className="rounded border border-virtua-border bg-virtua-shade/10">
             <button
               type="button"
               onClick={() => setShowOptions((value) => !value)}

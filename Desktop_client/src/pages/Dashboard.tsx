@@ -79,14 +79,14 @@ export function Dashboard({
         <StatCard label={t("nav.docker")} value={dockerCount} detail={t("dash.dockers")} icon={Boxes} />
       </section>
 
-      <section className="grid gap-5 xl:grid-cols-[1fr_25rem]">
+      <section className="grid gap-4 2xl:grid-cols-[1fr_25rem]">
         <div className="rounded border border-virtua-border bg-virtua-panel">
           <div className="border-b border-virtua-border px-4 py-3">
             <h2 className="text-sm font-semibold">{localMode ? t("dash.local_node_state") : t("dash.node_state")}</h2>
           </div>
-          <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-3 p-3 md:grid-cols-2 xl:grid-cols-3">
             {nodes.map((node) => (
-              <div key={node.id} className="rounded border border-virtua-border bg-black/10 p-4">
+              <div key={node.id} className="rounded border border-virtua-border bg-virtua-shade/10 p-4">
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div>
                     <p className="font-medium">{node.name}</p>
@@ -129,7 +129,7 @@ export function Dashboard({
               <Link
                 key={resource.id}
                 to={`/console/${resource.id}`}
-                className="rounded border border-virtua-border bg-black/10 p-4 transition-colors hover:border-virtua-accent hover:bg-virtua-panelHover"
+                className="rounded border border-virtua-border bg-virtua-shade/10 p-4 transition-colors hover:border-virtua-accent hover:bg-virtua-panelHover"
               >
                 <div className="mb-3 flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -171,7 +171,7 @@ export function Dashboard({
                   <p className="min-w-0 truncate text-sm">{task.label}</p>
                   <StatusBadge status={task.status} />
                 </div>
-                <div className="mt-2 h-1.5 overflow-hidden rounded bg-black/25">
+                <div className="mt-2 h-1.5 overflow-hidden rounded bg-virtua-shade/25">
                   <div className="h-full rounded bg-virtua-accent" style={{ width: `${task.progress}%` }} />
                 </div>
                 <p className="mt-1 text-xs text-virtua-muted">{task.target}</p>

@@ -58,7 +58,7 @@ function StopChoiceDialog({
         <div className="mt-4 space-y-2">
           <button
             onClick={() => onChoose(local ? "shutdown" : "stop")}
-            className="w-full rounded border border-virtua-border bg-black/15 px-3 py-3 text-left hover:bg-virtua-panelHover"
+            className="w-full rounded border border-virtua-border bg-virtua-shade/15 px-3 py-3 text-left hover:bg-virtua-panelHover"
           >
             <span className="block text-sm font-medium">{t("console.stop_os")}</span>
             <span className="mt-1 block text-xs text-virtua-muted">
@@ -96,12 +96,12 @@ function ResourceListItem({ resource, onContextMenu }: { resource: VirtuaResourc
         `block rounded border p-3 transition-colors ${
           isActive
             ? "border-virtua-accent bg-virtua-accentSoft/65"
-            : "border-virtua-border bg-black/10 hover:bg-virtua-panelHover"
+            : "border-virtua-border bg-virtua-shade/10 hover:bg-virtua-panelHover"
         }`
       }
     >
       <div className="flex items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded bg-black/25 text-virtua-accent">
+        <div className="flex h-9 w-9 items-center justify-center rounded bg-virtua-shade/25 text-virtua-accent">
           <Icon className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
@@ -239,7 +239,7 @@ function ConsoleModeTabs({
             disabled={disabled}
             onClick={() => onMode(nextMode)}
             className={`h-7 rounded px-3 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-              mode === nextMode ? "bg-virtua-accent text-white" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
+              mode === nextMode ? "bg-virtua-accent text-virtua-onAccent" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
             }`}
           >
             {nextMode === "text" ? t("console.term_text") : t("console.term_graphical")}
@@ -452,7 +452,7 @@ export function ConsolePage({
       className={
         prefs.focus
           ? "relative flex h-full min-h-0 flex-col"
-          : `grid h-full min-h-[42rem] gap-4 ${showList ? "lg:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr]" : "grid-cols-[3rem_1fr]"}`
+          : `grid h-full min-h-[26rem] gap-3 ${showList ? "lg:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr]" : "grid-cols-[3rem_1fr]"}`
       }
     >
       {contextError ? (
@@ -479,7 +479,7 @@ export function ConsolePage({
             </button>
           </div>
 
-          <label className="flex h-9 items-center gap-2 rounded border border-virtua-border bg-black/20 px-2.5">
+          <label className="flex h-9 items-center gap-2 rounded border border-virtua-border bg-virtua-shade/20 px-2.5">
             <Search className="h-3.5 w-3.5 text-virtua-muted" />
             <input
               className="min-w-0 flex-1 bg-transparent text-xs text-virtua-text outline-none placeholder:text-virtua-muted"
@@ -489,13 +489,13 @@ export function ConsolePage({
             />
           </label>
 
-          <div className="mt-2 grid grid-cols-4 gap-1 rounded bg-black/20 p-1">
+          <div className="mt-2 grid grid-cols-4 gap-1 rounded bg-virtua-shade/20 p-1">
             {(["all", "vm", "lxc", "docker"] as const).map((nextKind) => (
               <button
                 key={nextKind}
                 onClick={() => setKind(nextKind)}
                 className={`h-7 rounded text-[10px] uppercase font-medium transition-colors ${
-                  kind === nextKind ? "bg-virtua-accent text-white" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
+                  kind === nextKind ? "bg-virtua-accent text-virtua-onAccent" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
                 }`}
               >
                 {kindLabels[nextKind]}
@@ -533,7 +533,7 @@ export function ConsolePage({
                   onContextMenu={(event) => openContextMenu(event, resource)}
                   className={({ isActive }) =>
                     `relative flex h-8 w-8 items-center justify-center rounded transition-colors ${
-                      isActive ? "bg-virtua-accentSoft text-white" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
+                      isActive ? "bg-virtua-accentSoft text-virtua-text" : "text-virtua-muted hover:bg-virtua-panelHover hover:text-virtua-text"
                     }`
                   }
                 >
@@ -557,21 +557,21 @@ export function ConsolePage({
         <>
         <ConsoleToolbar resource={selectedResource} runResourceAction={runResourceAction} onChanged={onChanged} extras={<ConsoleViewControls t={t} />} t={t} />
 
-        <div className="grid gap-2 border-b border-virtua-border bg-[#0b0f14] p-2 lg:grid-cols-[1fr_14rem]">
+        <div className="grid gap-2 border-b border-virtua-border bg-virtua-inset p-2 lg:grid-cols-[1fr_14rem]">
           <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
-            <div className="rounded bg-black/20 p-2">
+            <div className="rounded bg-virtua-shade/20 p-2">
               <p className="text-[10px] uppercase text-virtua-muted">{t("general.address")}</p>
               <p className="mt-0.5 font-mono text-xs">{selectedResource.ip ?? "n/a"}</p>
             </div>
-            <div className="rounded bg-black/20 p-2">
+            <div className="rounded bg-virtua-shade/20 p-2">
               <p className="text-[10px] uppercase text-virtua-muted">{t("general.owner")}</p>
               <p className="mt-0.5 text-xs">{selectedResource.owner ?? (selectedResource.permissions.canView ? t("general.authorized") : t("general.denied"))}</p>
             </div>
-            <div className="rounded bg-black/20 p-2">
+            <div className="rounded bg-virtua-shade/20 p-2">
               <p className="text-[10px] uppercase text-virtua-muted">{t("general.uptime")}</p>
               <p className="mt-0.5 text-xs">{selectedResource.uptime ?? selectedResource.state}</p>
             </div>
-            <div className="rounded bg-black/20 p-2">
+            <div className="rounded bg-virtua-shade/20 p-2">
               <p className="text-[10px] uppercase text-virtua-muted">{t("console.guest_agent")}</p>
               <p className="mt-0.5 text-xs">{guestAgentLabel(selectedResource, t)}</p>
             </div>
@@ -582,7 +582,7 @@ export function ConsolePage({
           </div>
         </div>
 
-        <div className="flex items-center gap-1 border-b border-virtua-border bg-[#0b0f14] px-2 py-1.5">
+        <div className="flex items-center gap-1 border-b border-virtua-border bg-virtua-inset px-2 py-1.5">
           <ConsoleModeTabs resource={selectedResource} mode={mode} onMode={setMode} t={t} />
         </div>
         </>

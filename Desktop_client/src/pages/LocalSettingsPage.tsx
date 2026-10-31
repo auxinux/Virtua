@@ -4,6 +4,7 @@ import { Cpu, FolderCog, FolderOpen, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { localVirtua } from "@/api/localVirtua";
 import { AboutPanel } from "@/components/AboutPanel";
+import { AppearancePanel } from "@/components/AppearancePanel";
 import type { LocalQemuDiagnostics, LocalStorageConfig } from "@/types";
 
 const storageFields: Array<[keyof LocalStorageConfig, string]> = [
@@ -82,9 +83,11 @@ export function LocalSettingsPage() {
       {error ? <div className="rounded border border-virtua-red/50 bg-virtua-red/15 px-3 py-2 text-sm text-virtua-red">{error}</div> : null}
       {info ? <div className="rounded border border-virtua-accent/40 bg-virtua-accentSoft/40 px-3 py-2 text-sm text-virtua-text">{info}</div> : null}
 
+      <AppearancePanel />
+
       <EngineSetup />
 
-      <div className="grid gap-5 lg:grid-cols-[24rem_1fr]">
+      <div className="grid gap-5 xl:grid-cols-[22rem_1fr]">
         <aside className="space-y-4">
           <div className="rounded border border-virtua-border bg-virtua-panel p-4">
             <div className="mb-4 flex items-center gap-2">
@@ -142,7 +145,7 @@ export function LocalSettingsPage() {
               ))}
             </div>
           ) : (
-            <div className="h-28 animate-pulse rounded bg-black/20" />
+            <div className="h-28 animate-pulse rounded bg-virtua-shade/20" />
           )}
         </section>
       </div>

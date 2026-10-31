@@ -11,7 +11,7 @@ export function MetricBar({ label, value }: { label: string; value: number }) {
         <span>{label}</span>
         <span>{value}%</span>
       </div>
-      <div className="h-2 overflow-hidden rounded bg-black/25">
+      <div className="h-2 overflow-hidden rounded bg-virtua-shade/25">
         <div className={`h-full rounded ${colorByValue(value)}`} style={{ width: `${Math.min(100, Math.max(0, value))}%` }} />
       </div>
     </div>

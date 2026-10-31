@@ -135,7 +135,8 @@ test("the VM configuration offers a second CD-ROM for drivers", async ({ page })
 test("console mode folds every bar and the action bar can hide itself", async ({ page }) => {
   await localDesktop(page, { vms: [{ ...degradedVm, state: "stopped", pid: null }] });
   await page.goto("/#/console/local-vm-1");
-  const logo = page.getByAltText("AuxiNux Virtua - Desktop Client");
+  // The sidebar brand (icon + name in the AuxiNux themes).
+  const logo = page.getByText("Virtua Desktop", { exact: true });
   await expect(logo).toBeVisible();
 
   await page.getByTitle("Mode console : replier toutes les barres").click();
@@ -234,4 +235,19 @@ test("a Windows VM not yet unified walks through the prerequisites", async ({ pa
   await page.getByPlaceholder("Mot de passe Windows").fill("secret");
   // No guest agent yet: nothing could be configured inside Windows.
   await expect(page.getByRole("button", { name: "Activer le mode Unifié" })).toBeDisabled();
+});
+
+test("the theme follows AuxiNux Shell and survives a backend without appearance", async ({ page }) => {
+  await localDesktop(page);
+  await page.goto("/#/settings");
+  // The mock answers null to desktop_appearance: the page still renders, AuxiNux palette.
+  await expect(page.getByRole("heading", { name: "Apparence" })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", /^auxinux-(light|dark)$/);
+  await page.getByRole("radio", { name: /Virtua classique/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "virtua");
+  await page.getByRole("radio", { name: /^Clair/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "auxinux-light");
+  // Light palette: darkened accent with readable text on it.
+  const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--v-accent").trim());
+  expect(accent).toBe("186 108 14");
 });

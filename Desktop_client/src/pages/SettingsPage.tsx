@@ -1,6 +1,7 @@
 import { Cpu, Lock, PlugZap, RefreshCw, ServerCog } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AboutPanel } from "@/components/AboutPanel";
+import { AppearancePanel } from "@/components/AppearancePanel";
 import { StatusBadge } from "@/components/StatusBadge";
 import { virtuaClient } from "@/api/virtuaClient";
 import type { VirtuaConnection } from "@/types";
@@ -76,7 +77,7 @@ export function SettingsPage({ connection }: { connection: VirtuaConnection | nu
 
           <div className="grid gap-2 sm:grid-cols-2">
             {rows.map(([label, value]) => (
-              <div key={label} className="rounded border border-virtua-border bg-black/15 p-3">
+              <div key={label} className="rounded border border-virtua-border bg-virtua-shade/15 p-3">
                 <p className="text-xs text-virtua-muted">{label}</p>
                 <p className="mt-1 break-all text-sm">{value}</p>
               </div>
@@ -146,6 +147,7 @@ export function SettingsPage({ connection }: { connection: VirtuaConnection | nu
               stocké dans le trousseau du système, et révocation immédiate depuis le serveur.
             </p>
           </div>
+          <AppearancePanel />
           <AboutPanel />
         </aside>
       </div>

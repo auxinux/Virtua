@@ -39,7 +39,7 @@ export function TasksPage({ tasks, onClear, onChanged }: { tasks: VirtuaTask[]; 
         {tasks.length === 0 ? (
           <div className="grid min-h-[22rem] place-items-center px-4 py-10 text-center">
             <div>
-              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded border border-virtua-border bg-black/20 text-virtua-muted">
+              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded border border-virtua-border bg-virtua-shade/20 text-virtua-muted">
                 <Clock className="h-5 w-5" />
               </div>
               <p className="font-medium">Aucune operation</p>
@@ -53,7 +53,7 @@ export function TasksPage({ tasks, onClear, onChanged }: { tasks: VirtuaTask[]; 
                 <div className="flex items-center gap-2">
                   <CheckCircle2 className={`h-4 w-4 ${task.status === "completed" ? "text-virtua-green" : "text-virtua-muted"}`} />
                   <p className="font-medium">{task.label}</p>
-                  <span className="rounded bg-black/25 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-virtua-muted">
+                  <span className="rounded bg-virtua-shade/25 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-virtua-muted">
                     {task.source === "server" ? "serveur" : "ce poste"}
                   </span>
                 </div>
@@ -61,7 +61,7 @@ export function TasksPage({ tasks, onClear, onChanged }: { tasks: VirtuaTask[]; 
               </div>
               <StatusBadge status={task.status} />
             </div>
-            <div className="mt-3 h-2 overflow-hidden rounded bg-black/25">
+            <div className="mt-3 h-2 overflow-hidden rounded bg-virtua-shade/25">
               <div className="h-full rounded bg-virtua-accent" style={{ width: `${task.progress}%` }} />
             </div>
           </div>

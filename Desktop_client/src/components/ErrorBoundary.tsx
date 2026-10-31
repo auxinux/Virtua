@@ -41,7 +41,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
             Le reste de l'application continue de fonctionner. Vous pouvez revenir en arriere ou
             recharger la fenetre.
           </p>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-3 text-xs">
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded bg-virtua-shade/30 p-3 text-xs">
             {error.message}
             {details ? `\n${details}` : ""}
           </pre>

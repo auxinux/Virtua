@@ -165,7 +165,7 @@ function VmCard({ vm, clientReady, onChanged, report }: { vm: UnifiedVm; clientR
                   disabled={!!busy || !clientReady}
                   onClick={() => void launch(app)}
                   title={app.path}
-                  className="flex items-center gap-3 rounded border border-virtua-border bg-black/10 p-3 text-left text-sm transition-colors hover:border-virtua-accent hover:bg-virtua-panelHover disabled:opacity-50"
+                  className="flex items-center gap-3 rounded border border-virtua-border bg-virtua-shade/10 p-3 text-left text-sm transition-colors hover:border-virtua-accent hover:bg-virtua-panelHover disabled:opacity-50"
                 >
                   {busy === `launch:${app.id}` ? <Loader2 className="h-8 w-8 shrink-0 animate-spin text-virtua-accent" /> : <AppIcon app={app} />}
                   <span className="min-w-0 flex-1 truncate">{app.name}</span>

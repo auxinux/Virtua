@@ -357,7 +357,7 @@ export function ResourceDetailPage({
     <div className="mx-auto max-w-6xl space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded border border-virtua-border bg-black/20 text-virtua-accent">
+          <div className="flex h-11 w-11 items-center justify-center rounded border border-virtua-border bg-virtua-shade/20 text-virtua-accent">
             <Icon className="h-5 w-5" />
           </div>
           <div className="min-w-0">
@@ -551,7 +551,7 @@ export function ResourceDetailPage({
                       </select>
                     </label>
                     {form.guestOs === "windows" ? (
-                      <label className="sm:col-span-2 flex items-center justify-between gap-3 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm">
+                      <label className="sm:col-span-2 flex items-center justify-between gap-3 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-2 text-sm">
                         <span>
                           <span className="block">Repli : contourner les exigences de Windows 11</span>
                           <span className="text-xs text-virtua-muted">Seulement si TPM 2.0 ou Secure Boot ne peuvent pas etre emules sur cet ordinateur (TPM sur un hote Windows, swtpm absent). Sinon Windows voit un vrai TPM et un vrai Secure Boot.</span>
@@ -583,14 +583,14 @@ export function ResourceDetailPage({
             </label>
             {resource.source === "local" && resource.kind === "vm" ? (
               <div className="sm:col-span-2 grid gap-2 border-t border-virtua-border pt-3 sm:grid-cols-2">
-                <label className="flex items-center justify-between gap-3 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm">
+                <label className="flex items-center justify-between gap-3 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-2 text-sm">
                   <span>
                     <span className="block">TPM 2.0</span>
                     <span className="text-xs text-virtua-muted">Etat applique au prochain demarrage.</span>
                   </span>
                   <input type="checkbox" disabled={!canModify} checked={form.tpm2} onChange={(event) => setForm((current) => ({ ...current, tpm2: event.target.checked }))} />
                 </label>
-                <label className="flex items-center justify-between gap-3 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm">
+                <label className="flex items-center justify-between gap-3 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-2 text-sm">
                   <span>
                     <span className="block">Secure Boot</span>
                     <span className="text-xs text-virtua-muted">Firmware UEFI avec les cles Microsoft 2011 et 2023, applique au prochain demarrage.</span>
@@ -633,7 +633,7 @@ export function ResourceDetailPage({
               ["Image", resource.image ?? "n/a"],
               ["Proprietaire", resource.owner ?? "local"],
             ].map(([label, value]) => (
-              <div key={label} className="rounded border border-virtua-border bg-black/15 p-3">
+              <div key={label} className="rounded border border-virtua-border bg-virtua-shade/15 p-3">
                 <p className="text-xs text-virtua-muted">{label}</p>
                 <p className="mt-1 truncate text-sm">{value}</p>
               </div>
@@ -703,7 +703,7 @@ export function ResourceDetailPage({
                 </button>
               </div>
               {canManageSnapshots ? (
-              <div className="mt-3 max-h-72 overflow-auto divide-y divide-virtua-border rounded border border-virtua-border bg-black/15">
+              <div className="mt-3 max-h-72 overflow-auto divide-y divide-virtua-border rounded border border-virtua-border bg-virtua-shade/15">
                 {snapshots.map((snapshot) => (
                   <div key={snapshot.id} className="p-3">
                     <div className="mb-2 min-w-0">
@@ -754,7 +754,7 @@ export function ResourceDetailPage({
                 ["Modifier", canModify],
                 ["Supprimer", canDelete],
               ].map(([label, allowed]) => (
-                <div key={String(label)} className="flex items-center justify-between rounded border border-virtua-border bg-black/15 px-2 py-2">
+                <div key={String(label)} className="flex items-center justify-between rounded border border-virtua-border bg-virtua-shade/15 px-2 py-2">
                   <span className="text-virtua-muted">{label}</span>
                   <span className={allowed ? "text-virtua-green" : "text-virtua-muted"}>{allowed ? "oui" : "non"}</span>
                 </div>
@@ -772,7 +772,7 @@ export function ResourceDetailPage({
               Supprimer {resource.name} ? Cette action peut detruire les donnees associees selon le type de machine.
             </p>
             {resource.source === "local" ? (
-              <label className="mt-4 flex items-center gap-2 rounded border border-virtua-border bg-black/15 px-3 py-2 text-sm text-virtua-muted">
+              <label className="mt-4 flex items-center gap-2 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-2 text-sm text-virtua-muted">
                 <input type="checkbox" checked={deleteDisks} onChange={(event) => setDeleteDisks(event.target.checked)} />
                 Supprimer aussi le disque qcow2 local
               </label>
