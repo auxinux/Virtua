@@ -17,6 +17,7 @@ const translations: Record<Language, Dictionary> = {
     "nav.settings": "Connexion",
     "nav.local_settings": "Configuration",
     "nav.storage": "Stockage",
+    "nav.unified": "Mode Unifié",
     "layout.nodes": "Noeuds",
     "layout.no_connection": "Aucune connexion",
     "layout.local_mode": "Virtua Local",
@@ -99,9 +100,9 @@ const translations: Record<Language, Dictionary> = {
     "auth.endpoint": "Adresse du serveur",
     "mode.title": "Comment voulez-vous utiliser Virtua ?",
     "mode.local": "Mode Local",
-    "mode.local_desc": "Gérer les machines virtuelles de cet ordinateur",
+    "mode.local_desc": "Gérer les VM, LXC et conteneurs Docker de cet ordinateur. Recommandé.",
     "mode.remote": "Mode Client",
-    "mode.remote_desc": "Se connecter à un serveur Virtua distant",
+    "mode.remote_desc": "Se connecter à un serveur Virtua ou à un VDM (Cloud)",
     "mode.not_avail": "Non disponible sur cet appareil",
 
     // Resources / Inventory
@@ -133,6 +134,7 @@ const translations: Record<Language, Dictionary> = {
     "nav.settings": "Connection",
     "nav.local_settings": "Configuration",
     "nav.storage": "Storage",
+    "nav.unified": "Unified mode",
     "layout.nodes": "Nodes",
     "layout.no_connection": "No connection",
     "layout.local_mode": "Virtua Local",
@@ -215,9 +217,9 @@ const translations: Record<Language, Dictionary> = {
     "auth.endpoint": "Server Address",
     "mode.title": "How do you want to use Virtua?",
     "mode.local": "Local Mode",
-    "mode.local_desc": "Manage virtual machines on this computer",
+    "mode.local_desc": "Manage the VMs, LXC and Docker containers of this computer. Recommended.",
     "mode.remote": "Client Mode",
-    "mode.remote_desc": "Connect to a remote Virtua server",
+    "mode.remote_desc": "Connect to a Virtua server or a VDM (Cloud)",
     "mode.not_avail": "Not available on this device",
 
     // Resources / Inventory

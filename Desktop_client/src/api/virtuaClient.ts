@@ -286,7 +286,25 @@ async function applyTokens(tokens: DesktopTokenResponse) {
   await secureStore.setRefreshToken(tokens.refreshToken);
 }
 
-async function refreshAccessToken() {
+let refreshInFlight: Promise<void> | null = null;
+
+/**
+ * One refresh at a time. The server revokes a refresh token as soon as it is
+ * used: two requests that found the access token expired together (the
+ * inventory and task polls do) refreshed twice with the same token, the
+ * second got a 401, and the client then erased the stored session — a
+ * random "Session expiree" after the access token lapsed.
+ */
+function refreshAccessToken() {
+  if (!refreshInFlight) {
+    refreshInFlight = performRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function performRefresh() {
   if (!refreshToken) refreshToken = await secureStore.getRefreshToken();
   if (!refreshToken) throw new Error("Aucune session desktop enregistree");
 
@@ -320,6 +338,7 @@ async function request<T>(path: string, options: RequestOptions = {}, retry = tr
   const headers: Record<string, string> = {};
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (options.auth !== false && accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const sentToken = accessToken;
 
   const response = await nativeFetch(`${endpoint}${path}`, {
     method: options.method ?? "GET",
@@ -328,7 +347,8 @@ async function request<T>(path: string, options: RequestOptions = {}, retry = tr
   });
 
   if (response.status === 401 && retry && options.auth !== false) {
-    await refreshAccessToken();
+    // Another request may already have rotated the token meanwhile.
+    if (sentToken === accessToken) await refreshAccessToken();
     return request<T>(path, options, false);
   }
 

@@ -3,7 +3,25 @@ use super::*;
 fn local_endpoint(value: &str) -> bool {
     value.starts_with("unix:///") || value.starts_with("npipe:////./pipe/")
 }
+/// `docker context inspect` costs a process spawn; the inventory refresh used
+/// to pay it before every `docker ps`. Thirty seconds is short enough to see
+/// a context switched in Docker Desktop on the next refreshes.
+static ENDPOINT: std::sync::Mutex<Option<(std::time::Instant, String)>> = std::sync::Mutex::new(None);
+
 pub fn endpoint() -> Result<String, String> {
+    if let Some((at, host)) = ENDPOINT.lock().ok().and_then(|cache| cache.clone()) {
+        if at.elapsed() < Duration::from_secs(30) {
+            return Ok(host);
+        }
+    }
+    let host = resolve_endpoint()?;
+    if let Ok(mut cache) = ENDPOINT.lock() {
+        *cache = Some((std::time::Instant::now(), host.clone()));
+    }
+    Ok(host)
+}
+
+fn resolve_endpoint() -> Result<String, String> {
     let context = env::var("DOCKER_CONTEXT").ok().filter(|s| !s.is_empty());
     if context.is_none() {
         if let Ok(host) = env::var("DOCKER_HOST") {
@@ -49,6 +67,9 @@ pub fn probe(args: &[&str]) -> Result<String, String> {
     platform::output(cmd, Duration::from_secs(8))
 }
 pub fn list() -> Vec<LocalContainerResource> {
+    if find_binary("docker").is_none() {
+        return vec![];
+    }
     let Ok(raw) = probe(&["ps", "-a", "--format", "json"]) else {
         return vec![];
     };

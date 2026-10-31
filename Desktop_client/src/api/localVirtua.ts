@@ -167,17 +167,28 @@ export function guessGuestOs(path: string): "windows" | "other" {
 }
 
 export const modeStore = {
+  /**
+   * Local is the default: Virtua Desktop manages this computer out of the
+   * box, a Virtua server is one click away. `unset` only after an explicit
+   * "back to mode selection".
+   */
   get(): "unset" | "local" | "cloud" {
-    const value = localStorage.getItem(modeKey);
-    return value === "local" || value === "cloud" ? value : "unset";
+    try {
+      const value = localStorage.getItem(modeKey);
+      if (value === "local" || value === "cloud" || value === "unset") return value;
+    } catch {
+      /* Storage unavailable: fall through to the default. */
+    }
+    return "local";
   },
 
   set(mode: "local" | "cloud") {
     localStorage.setItem(modeKey, mode);
   },
 
+  /** Show the Local / Cloud chooser on next start. */
   clear() {
-    localStorage.removeItem(modeKey);
+    localStorage.setItem(modeKey, "unset");
   },
 };
 

@@ -6,6 +6,10 @@ monorepo Virtua ni de la réécriture `NouvelGeneration`.
 
 ## Utilisation
 
+Virtua Desktop démarre en mode **Local** : il gère d’abord les machines de cet
+ordinateur. Le mode **Cloud** reste à un clic (assistant ou « Changer de mode »)
+et le choix est mémorisé.
+
 - **Cloud** : connexion par mot de passe ou pairing à un nœud Virtua
   (`https://hote:8441`) ou à un VDM (`http://hote:8440`), qui donne accès aux
   machines de tous ses nœuds. Ressources et consoles autorisées par le serveur.
@@ -19,6 +23,16 @@ monorepo Virtua ni de la réécriture `NouvelGeneration`.
   sur l’hôte. Sur Mac/Windows, une unique VM Debian 13 héberge les conteneurs.
   Elle utilise le noyau Debian standard et l’architecture du poste, jamais le
   noyau VirtuaOS AMD64 sur une machine ARM.
+
+- **Mode Unifié** : les applications d’une VM Windows (Pro/Entreprise/Éducation,
+  QEMU Guest Agent installé) s’ouvrent dans leurs propres fenêtres sur l’hôte,
+  via RDP RemoteApp : `mstsc` sur Windows, FreeRDP 3 sur Linux, FreeRDP +
+  XQuartz sur macOS. Lanceurs optionnels dans le menu des applications de
+  l’hôte (`--unified-launch <vm> <app>`). Voir [les notes 0.3.0](docs/RELEASE-0.3.0.md).
+
+Sur AuxiNux OS et Linux, les VM Windows profitent des « enlightenments »
+Hyper-V de KVM, d’un thread d’E/S disque et d’`io_uring` ; chaque option est
+abandonnée automatiquement si la version de QEMU la refuse.
 
 La VM Debian dispose de 2 vCPU, 2 Gio de mémoire et d’un disque qcow2 extensible
 jusqu’à 40 Gio. Elle est réutilisée entre les sessions. Sa préparation utilise
@@ -76,7 +90,8 @@ ou le service de secrets Linux. Ne pas exécuter l’interface entière en root.
 Les installations Linux peuvent nécessiter une reconnexion de session pour
 activer les groupes `docker` et `incus-admin`.
 
-Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.2.11](docs/RELEASE-0.2.11.md),
+Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.3.0](docs/RELEASE-0.3.0.md),
+[0.2.11](docs/RELEASE-0.2.11.md),
 [0.2.10](docs/RELEASE-0.2.10.md),
 [0.2.9](docs/RELEASE-0.2.9.md),
 [0.2.8](docs/RELEASE-0.2.8.md),

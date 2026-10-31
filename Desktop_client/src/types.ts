@@ -239,6 +239,7 @@ export interface LocalQemuDiagnostics {
   qemuSystemAmd64: LocalBinaryStatus;
   homebrew: LocalBinaryStatus;
   ready: boolean;
+  host?: { distro: string; auxinux: boolean; accelerationIssue?: string | null };
 }
 
 export interface LocalStorageConfig {

@@ -47,6 +47,10 @@ pub fn probe() -> Result<String, String> {
     )
 }
 pub fn list() -> Result<Vec<LocalContainerResource>, String> {
+    // No engine, no round-trip: most Linux hosts never enabled LXC.
+    if cfg!(target_os = "linux") && find_binary("incus").is_none() {
+        return Ok(vec![]);
+    }
     let raw = platform::output(
         command(&["list", "--format", "json", "type=container"])?,
         Duration::from_secs(8),
@@ -63,7 +67,7 @@ pub fn list() -> Result<Vec<LocalContainerResource>, String> {
                 name: name.into(),
                 image: config["image.description"].as_str().map(str::to_string),
                 state: normalize_container_state(v["status"].as_str().unwrap_or("stopped")),
-                ip: None,
+                ip: first_ipv4(&v["state"]["network"]),
                 ports: None,
                 cpu_usage: None,
                 memory_usage: None,
@@ -72,6 +76,21 @@ pub fn list() -> Result<Vec<LocalContainerResource>, String> {
         })
         .collect())
 }
+/// First global IPv4 of an Incus container (`state.network` of `incus list
+/// --format json`), skipping loopback.
+fn first_ipv4(network: &serde_json::Value) -> Option<String> {
+    let interfaces = network.as_object()?;
+    let mut names: Vec<&String> = interfaces.keys().filter(|name| name.as_str() != "lo").collect();
+    names.sort();
+    names.into_iter().find_map(|name| {
+        interfaces[name]["addresses"].as_array()?.iter().find_map(|address| {
+            (address["family"] == "inet" && address["scope"] == "global")
+                .then(|| address["address"].as_str().map(str::to_string))
+                .flatten()
+        })
+    })
+}
+
 pub fn create(payload: LocalCreateContainerPayload) -> Result<LocalContainerResource, String> {
     let name = safe_container_name(&payload.name)?;
     let image = payload.image.unwrap_or_else(|| "images:debian/13".into());

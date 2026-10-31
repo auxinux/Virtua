@@ -31,6 +31,7 @@ pub struct EngineOverview {
     pub accelerator: String,
     pub engines: Vec<EngineStatus>,
     pub busy: bool,
+    pub host: platform::HostProfile,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +89,7 @@ pub fn overview() -> Result<EngineOverview, String> {
         accelerator: d.accelerator.unwrap_or_else(|| "tcg".into()),
         engines: vec![qemu, docker, lxc_status()],
         busy: INSTALLING.load(Ordering::SeqCst),
+        host: d.host,
     })
 }
 fn lxc_status() -> EngineStatus {
@@ -219,6 +221,16 @@ fn mac_script(script: &str) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(500));
     }
 }
+/// Run an installation script with the OS's own administrator prompt
+/// (Terminal + sudo/Homebrew on macOS, pkexec on Linux).
+pub fn run_admin_script(script: &str) -> Result<(), String> {
+    match env::consts::OS {
+        "macos" => mac_script(&format!("{}\n{script}", brew_prefix())),
+        "linux" => linux_script(script),
+        _ => Err("Installation automatique non prise en charge sur ce système".into()),
+    }
+}
+
 fn linux_script(script: &str) -> Result<(), String> {
     let mut cmd = if platform::probe("id", &["-u"]).as_deref() == Ok("0") {
         platform::command("sh")
@@ -283,9 +295,28 @@ fn winget(id: &str) -> Result<(), String> {
 fn brew_prefix() -> &'static str {
     "if ! command -v brew >/dev/null 2>&1; then\n /usr/bin/curl --fail --location --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o \"${TMPDIR:-/tmp}/virtua-homebrew-install.sh\"\n /bin/bash \"${TMPDIR:-/tmp}/virtua-homebrew-install.sh\"\nfi\n"
 }
+/// Without access to /dev/kvm QEMU silently falls back to TCG, ten times
+/// slower: the `kvm` group is part of preparing QEMU on Linux.
+fn kvm_group_script() -> Result<String, String> {
+    let user = platform::probe("id", &["-un"])?;
+    Ok(format!(
+        "\nif [ -e /dev/kvm ] && getent group kvm >/dev/null; then usermod -aG kvm {}; fi",
+        platform::quote(&user)
+    ))
+}
+
 pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
     forget_diagnostics();
-    if qemu_diagnostics_blocking()?.ready {
+    let diagnostics = qemu_diagnostics_blocking()?;
+    if diagnostics.ready {
+        if cfg!(target_os = "linux")
+            && diagnostics.host.acceleration_issue.as_deref().is_some_and(|issue| issue.contains("kvm"))
+            && Path::new("/dev/kvm").exists()
+        {
+            progress(app, "qemu", "Accès à l’accélération KVM : ajout de votre compte au groupe kvm.");
+            linux_script(kvm_group_script()?.trim_start())?;
+            return Err("Votre compte a été ajouté au groupe kvm. Fermez votre session puis reconnectez-vous pour activer l’accélération matérielle.".into());
+        }
         return Ok(());
     }
     progress(
@@ -296,7 +327,7 @@ pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
     match env::consts::OS {
         "macos" => mac_script(&format!("{}\nbrew install qemu swtpm", brew_prefix()))?,
         "windows" => winget("SoftwareFreedomConservancy.QEMU")?,
-        "linux" => linux_script(if find_binary("apt-get").is_some() {
+        "linux" => linux_script(&format!("{}{}", if find_binary("apt-get").is_some() {
             "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 qemu-system-arm qemu-utils qemu-efi-aarch64 ovmf swtpm"
         } else if find_binary("dnf").is_some() {
             "dnf install -y qemu-system-x86 qemu-system-aarch64 qemu-img edk2-aarch64 edk2-ovmf swtpm"
@@ -306,7 +337,7 @@ pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
             "pacman -S --needed --noconfirm qemu-full edk2-aarch64 edk2-ovmf swtpm"
         } else {
             return Err("Distribution non prise en charge par l’installation automatique. Installez QEMU via votre gestionnaire de paquets, puis actualisez.".into());
-        })?,
+        }, kvm_group_script()?))?,
         _ => return Err("Système non pris en charge".into()),
     }
     platform::refresh_path_from_registry();

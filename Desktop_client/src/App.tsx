@@ -15,6 +15,7 @@ import { LocalSettingsPage } from "@/pages/LocalSettingsPage";
 import { StoragePage } from "@/pages/StoragePage";
 import { TasksPage } from "@/pages/TasksPage";
 import { UsageModePage } from "@/pages/UsageModePage";
+import { UnifiedPage } from "@/pages/UnifiedPage";
 import type { UsageMode, VirtuaConnection, VirtuaNode, VirtuaResource, VirtuaTask, VirtuaUser } from "@/types";
 
 const engineLabels = { qemu: "QEMU", lxc: "LXC (Incus)", docker: "Docker" } as const;
@@ -46,6 +47,18 @@ function nodesFromResources(resources: VirtuaResource[]): VirtuaNode[] {
   }));
 }
 
+/**
+ * A poll that returns what is already on screen must not re-render every
+ * page: with a few dozen resources that was most of the UI's idle CPU.
+ */
+function sameJson<T>(previous: T, next: T) {
+  return previous === next || JSON.stringify(previous) === JSON.stringify(next);
+}
+
+function keepIfSame<T>(next: T) {
+  return (previous: T) => (sameJson(previous, next) ? previous : next);
+}
+
 export default function App() {
   const [usageMode, setUsageMode] = useState<"unset" | UsageMode>(() => modeStore.get());
   const [user, setUser] = useState<VirtuaUser | null>(null);
@@ -60,6 +73,8 @@ export default function App() {
   const [isAuthenticated, setAuthenticated] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const isRefreshingRef = useRef(false);
+  /** Consecutive failed cloud refreshes, for the polling back-off. */
+  const failuresRef = useRef(0);
 
   async function loadCloudData({ restore = true }: { restore?: boolean } = {}) {
     setLoading(true);
@@ -109,15 +124,14 @@ export default function App() {
     setLoading(true);
     setLoadError(null);
     try {
-      const check = await localVirtua.diagnostics();
-      if (!check.ready) { setNeedsLocalSetup(true); setAuthenticated(false); return; }
+      const diagnostics = await localVirtua.diagnostics();
+      if (!diagnostics.ready) { setNeedsLocalSetup(true); setAuthenticated(false); return; }
       setNeedsLocalSetup(false);
-      const [diagnostics, nextResources, nextTasks] = await Promise.all([
-        localVirtua.diagnostics(),
+      const [nextResources, metrics] = await Promise.all([
         localVirtua.listResources(),
-        Promise.resolve(localVirtua.listTasks()),
+        localVirtua.hostMetrics().catch(() => null),
       ]);
-      const metrics = await localVirtua.hostMetrics().catch(() => null);
+      const nextTasks = localVirtua.listTasks();
       setHostArch(diagnostics.hostArch);
       setUser(localVirtua.getUser());
       setConnection(localVirtua.getConnection());
@@ -204,15 +218,15 @@ export default function App() {
     if (!silent) setLoadError(null);
     try {
       if (usageMode === "local") {
-        const [diagnostics, nextResources, metrics] = await Promise.all([
-          localVirtua.diagnostics(),
+        // The host architecture cannot change while the app runs: it was
+        // loaded once with the local mode.
+        const [nextResources, metrics] = await Promise.all([
           localVirtua.listResources(),
           localVirtua.hostMetrics().catch(() => null),
         ]);
-        setHostArch(diagnostics.hostArch);
-        setNodes(localVirtua.nodesFromResources(nextResources, metrics));
-        setResources(nextResources);
-        setTasks(localVirtua.listTasks());
+        setNodes(keepIfSame(localVirtua.nodesFromResources(nextResources, metrics)));
+        setResources(keepIfSame(nextResources));
+        setTasks(keepIfSame(localVirtua.listTasks()));
         setConnection((current) => current ? { ...current, lastSync: new Date().toISOString() } : current);
         return;
       }
@@ -220,11 +234,13 @@ export default function App() {
         virtuaClient.listAccessibleResources(),
         virtuaClient.listTasks(),
       ]);
-      setNodes(nodesFromResources(nextResources));
-      setResources(nextResources);
-      setTasks(nextTasks);
+      setNodes(keepIfSame(nodesFromResources(nextResources)));
+      setResources(keepIfSame(nextResources));
+      setTasks(keepIfSame(nextTasks));
       setConnection((current) => current ? { ...current, lastSync: new Date().toISOString() } : current);
+      failuresRef.current = 0;
     } catch (error) {
+      failuresRef.current += 1;
       if (!silent) setLoadError(error instanceof Error ? error.message : "Inventaire impossible a charger");
     } finally {
       isRefreshingRef.current = false;
@@ -235,18 +251,40 @@ export default function App() {
     if (!isAuthenticated) return;
     let disposed = false;
     let timer = 0;
-    const period = usageMode === "local" ? 7000 : 3000;
+    // Fast while the user looks at the window, slower in the background, and
+    // backing off while a server is unreachable (up to one minute) instead of
+    // hammering it — and a VDM with many nodes — every three seconds.
+    const period = () => {
+      if (usageMode === "local") return document.hasFocus() ? 5000 : 15000;
+      const base = document.hasFocus() ? 3000 : 15000;
+      return Math.min(60000, base * 2 ** Math.min(failuresRef.current, 4));
+    };
     // A chained timeout (rather than setInterval) cannot pile refreshes up when
     // one poll takes longer than the period — a slow host used to queue them
     // until the UI stopped responding.
+    let running = false;
     const tick = async () => {
-      if (!document.hidden) await refreshInventory({ silent: true });
-      if (!disposed) timer = window.setTimeout(() => void tick(), period);
+      running = true;
+      try {
+        if (!document.hidden) await refreshInventory({ silent: true });
+      } finally {
+        running = false;
+      }
+      if (!disposed) timer = window.setTimeout(() => void tick(), period());
     };
-    timer = window.setTimeout(() => void tick(), period);
+    timer = window.setTimeout(() => void tick(), period());
+    // Coming back to the window refreshes at once rather than at the end of a
+    // background period (a poll in flight already does).
+    const onFocus = () => {
+      if (running) return;
+      window.clearTimeout(timer);
+      void tick();
+    };
+    window.addEventListener("focus", onFocus);
     return () => {
       disposed = true;
       window.clearTimeout(timer);
+      window.removeEventListener("focus", onFocus);
     };
   }, [isAuthenticated, refreshInventory, usageMode]);
 
@@ -299,7 +337,7 @@ export default function App() {
     return <div className="min-h-screen bg-virtua-bg p-8 text-virtua-text"><div className="mx-auto max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Virtua Desktop {__APP_VERSION__}</h1>
       <EngineSetup requiredOnly onReady={() => void loadLocalData()} />
-      <button className="virtua-button" onClick={backToModeSelection}>Retour au choix Local / Cloud</button>
+      <button className="virtua-button" onClick={() => selectMode("cloud")}>Se connecter plutôt à un serveur Virtua (Cloud)</button>
     </div></div>;
   }
 
@@ -323,6 +361,7 @@ export default function App() {
         <Route path="/storage" element={usageMode === "local" ? <StoragePage resources={resources} hostArch={hostArch} onChanged={() => refreshInventory()} /> : <ResourcePage kind="all" resources={resources} user={user} onChanged={() => refreshInventory()} />} />
         <Route path="/tasks" element={<TasksPage tasks={tasks} onClear={() => usageMode === "local" ? localVirtua.clearTasks() : virtuaClient.clearTasks()} onChanged={() => usageMode === "local" ? setTasks(localVirtua.listTasks()) : void virtuaClient.listTasks().then(setTasks)} />} />
         <Route path="/settings" element={usageMode === "local" ? <LocalSettingsPage /> : <SettingsPage connection={connection} />} />
+        {usageMode === "local" ? <Route path="/unified" element={<UnifiedPage onChanged={() => refreshInventory()} />} /> : null}
       </Routes>
     </Layout>
   );

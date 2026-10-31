@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 
-type Overrides = { vms?: unknown[]; dockerReady?: boolean };
+type Overrides = { vms?: unknown[]; dockerReady?: boolean; unifiedVms?: unknown[] };
 
 /**
  * Boots the app straight into local mode with QEMU already available, so each
@@ -60,6 +60,11 @@ async function localDesktop(page: Page, overrides: Overrides = {}) {
             iso: [], templates: [], disks: [], snapshots: [], exports: [], dockerImages: [],
           };
           case "local_list_snapshots": return [];
+          case "local_unified_overview": return {
+            client: { available: true, kind: "freerdp3", detail: "FreeRDP 3 (RemoteApp).", installable: false },
+            vms: (options as any).unifiedVms ?? [],
+          };
+          case "local_unified_launch": return null;
           case "plugin:event|listen": return 1;
           default: return null;
         }
@@ -192,4 +197,41 @@ test("creating a Docker container offers to install the missing engine", async (
   await expect
     .poll(() => page.evaluate(() => (window as any).testCalls.map((c: any) => c.cmd)))
     .toContain("local_create_container");
+});
+
+test("the Unified mode lists Windows apps and opens one in its own window", async ({ page }) => {
+  const icon = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  await localDesktop(page, {
+    unifiedVms: [{
+      id: "win-1", name: "Windows 11", state: "running", architecture: "amd64", enabled: true, user: "alex",
+      agent: true, rdpReady: true, needsRestart: false, integrated: false,
+      apps: [
+        { id: "a1", name: "Excel", path: "C:\\Office\\EXCEL.EXE", args: "", icon },
+        { id: "a2", name: "Paint", path: "C:\\Windows\\mspaint.exe", args: "", icon: null },
+      ],
+    }],
+  });
+  await page.goto("/#/unified");
+  await expect(page.getByRole("heading", { name: "Mode Unifié" })).toBeVisible();
+  await expect(page.getByText("mode Unifié actif (alex)")).toBeVisible();
+  await page.getByRole("button", { name: /Excel/ }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_unified_launch").map((c: any) => c.args)))
+    .toEqual([{ id: "win-1", appId: "a1" }]);
+  await expect(page.getByRole("status")).toContainText("Excel");
+});
+
+test("a Windows VM not yet unified walks through the prerequisites", async ({ page }) => {
+  await localDesktop(page, {
+    unifiedVms: [{
+      id: "win-1", name: "Windows 11", state: "running", architecture: "arm64", enabled: false, user: null,
+      agent: false, rdpReady: false, needsRestart: false, integrated: false, apps: [],
+    }],
+  });
+  await page.goto("/#/unified");
+  await expect(page.getByText(/virtio-win-guest-tools/)).toBeVisible();
+  await page.getByPlaceholder(/Compte Windows/).fill("alex");
+  await page.getByPlaceholder("Mot de passe Windows").fill("secret");
+  // No guest agent yet: nothing could be configured inside Windows.
+  await expect(page.getByRole("button", { name: "Activer le mode Unifié" })).toBeDisabled();
 });

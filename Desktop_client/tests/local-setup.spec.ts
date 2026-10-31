@@ -27,10 +27,10 @@ async function desktop(page: Page, os = "macos", ready = false) {
     };
   }, { os, ready });
 }
-test("first local launch prepares QEMU before opening the dashboard", async ({ page }) => {
+test("first launch goes straight to local mode and prepares QEMU before the dashboard", async ({ page }) => {
   await desktop(page);
   await page.goto("/");
-  await page.getByRole("button", { name: /local/i }).click();
+  // Local is the default: no Local / Cloud chooser on a fresh install.
   await expect(page.getByRole("heading", { name: "Préparer cet ordinateur" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Ouvrir le mode local" })).toHaveCount(0);
   await page.getByRole("button", { name: "Installer et préparer" }).click();
@@ -39,17 +39,29 @@ test("first local launch prepares QEMU before opening the dashboard", async ({ p
   await expect(page.getByRole("link", { name: "LXC", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Docker", exact: true })).toBeVisible();
 });
-test("cloud login never installs or probes local engines", async ({ page }) => {
+test("switching to cloud from the local setup installs nothing and stops probing", async ({ page }) => {
   await desktop(page);
   await page.goto("/");
-  await page.getByRole("button", { name: /cloud|distant/i }).click();
+  await expect(page.getByRole("heading", { name: "Préparer cet ordinateur" })).toBeVisible();
+  const before = await page.evaluate(() => (window as any).testCalls.filter((c: string) => c.startsWith("local_")).length);
+  await page.getByRole("button", { name: /serveur Virtua \(Cloud\)/ }).click();
+  await expect(page.locator('input[type="password"]')).toBeVisible();
+  await page.waitForTimeout(300);
+  const calls: string[] = await page.evaluate(() => (window as any).testCalls);
+  expect(calls).not.toContain("local_prepare_engine");
+  expect(calls.filter((c) => c.startsWith("local_")).length).toBe(before);
+});
+
+test("a saved cloud choice is kept across launches", async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem("auxinux-virtua-desktop-mode", "cloud"));
+  await desktop(page);
+  await page.goto("/");
   await expect(page.locator('input[type="password"]')).toBeVisible();
   expect(await page.evaluate(() => (window as any).testCalls.filter((c: string) => c.startsWith("local_")))).toEqual([]);
 });
 test("optional setup failure remains recoverable and Linux does not offer a Debian VM", async ({ page }) => {
   await desktop(page, "linux", true);
   await page.goto("/");
-  await page.getByRole("button", { name: /local/i }).click();
   await page.getByRole("link", { name: "Configuration", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Moteurs locaux" })).toBeVisible();
   await page.getByRole("button", { name: "Installer et préparer" }).first().click();

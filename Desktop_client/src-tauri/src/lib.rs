@@ -5,6 +5,7 @@ mod engines;
 mod firmware;
 use firmware::UefiFirmware;
 mod platform;
+mod unified;
 
 const KEYCHAIN_SERVICE: &str = "ca.auxinux.virtua.desktop";
 const REFRESH_TOKEN_ACCOUNT: &str = "desktop-refresh-token";
@@ -46,6 +47,7 @@ struct LocalQemuDiagnostics {
     qemu_system_amd64: LocalBinaryStatus,
     homebrew: LocalBinaryStatus,
     ready: bool,
+    host: platform::HostProfile,
 }
 
 #[derive(Debug, Serialize)]
@@ -330,6 +332,17 @@ struct LocalVm {
     /// the UI can explain a degraded VM instead of leaving the user guessing.
     #[serde(default)]
     startup_notes: Option<String>,
+    /// Loopback port forwarded to the guest's RDP (3389) while it runs, for
+    /// the Unified mode. Windows guests on the NAT network only.
+    #[serde(default)]
+    rdp_port: Option<u16>,
+    /// Unified mode: Windows apps of this VM open as host windows (RemoteApp).
+    #[serde(default)]
+    unified: bool,
+    /// Windows account the Unified mode logs on with; its password lives in
+    /// the OS keychain, never in the inventory.
+    #[serde(default)]
+    unified_user: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -375,6 +388,8 @@ struct LocalUpdateVmPayload {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimePlatform {
+    distro: String,
+    auxinux: bool,
     os: String,
     arch: String,
     mobile: bool,
@@ -572,11 +587,59 @@ fn append_gpu_args(command: &mut Command, architecture: &str, gpu_model: &str) {
     command.arg("-device").arg(device);
 }
 
-fn append_disk_args(command: &mut Command, architecture: &str, disk_path: &str, disk_bus: &str) {
+/// Host-specific disk I/O settings of a tuned launch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DiskTuning {
+    /// virtio-blk served by a dedicated I/O thread instead of the QEMU main
+    /// loop (which also runs the console, QMP and the network).
+    iothread: bool,
+    /// `aio=` backend; `None` keeps QEMU's default (threads).
+    aio: Option<&'static str>,
+}
+
+impl DiskTuning {
+    fn for_launch(plan: &LaunchPlan) -> Self {
+        Self::for_host(env::consts::OS, &plan.accelerator, plan.tuned)
+    }
+
+    fn for_host(os: &str, accelerator: &str, tuned: bool) -> Self {
+        if !tuned {
+            return Self::default();
+        }
+        match os {
+            // io_uring: fewer syscalls and no thread pool per request; the
+            // AuxiNux and Debian 13 QEMU builds have it.
+            "linux" if accelerator == "kvm" => Self { iothread: true, aio: Some("io_uring") },
+            "linux" | "macos" => Self { iothread: true, aio: None },
+            // QEMU's Windows I/O threads are less proven: keep the defaults.
+            _ => Self::default(),
+        }
+    }
+
+    fn drive_options(&self) -> String {
+        // detect-zeroes turns guest zero-fills (Windows formats, `fstrim`) into
+        // holes in the qcow2 instead of gigabytes of written zeroes.
+        let mut options = "cache=writeback,discard=unmap,detect-zeroes=unmap".to_string();
+        if let Some(aio) = self.aio {
+            options.push_str(",aio=");
+            options.push_str(aio);
+        }
+        options
+    }
+}
+
+fn append_disk_args(
+    command: &mut Command,
+    architecture: &str,
+    disk_path: &str,
+    disk_bus: &str,
+    tuning: &DiskTuning,
+) {
+    let options = tuning.drive_options();
     if disk_bus == "sata" || disk_bus == "nvme" {
         command.arg("-drive").arg(format!(
-            "file={},if=none,id=virtua-disk0,format=qcow2,cache=writeback,discard=unmap",
-            disk_path
+            "file={},if=none,id=virtua-disk0,format=qcow2,{}",
+            disk_path, options
         ));
         if disk_bus == "nvme" {
             command
@@ -591,22 +654,58 @@ fn append_disk_args(command: &mut Command, architecture: &str, disk_path: &str, 
         }
         return;
     }
+    let iothread = if tuning.iothread { ",iothread=virtua-io0" } else { "" };
     if architecture == "arm64" {
         // An explicit device so the disk can carry a boot index: the CD-ROMs
         // of an ARM64 VM are USB and need an order relative to it.
         command.arg("-drive").arg(format!(
-            "file={},if=none,id=virtua-disk0,format=qcow2,cache=writeback,discard=unmap",
-            disk_path
+            "file={},if=none,id=virtua-disk0,format=qcow2,{}",
+            disk_path, options
         ));
         command
             .arg("-device")
-            .arg("virtio-blk-pci,drive=virtua-disk0,bootindex=1");
+            .arg(format!("virtio-blk-pci,drive=virtua-disk0{},bootindex=1", iothread));
+        return;
+    }
+    if tuning.iothread {
+        // Same device as `if=virtio` (no boot index: x86 keeps `-boot order`),
+        // spelled out so it can be bound to the I/O thread.
+        command.arg("-drive").arg(format!(
+            "file={},if=none,id=virtua-disk0,format=qcow2,{}",
+            disk_path, options
+        ));
+        command
+            .arg("-device")
+            .arg(format!("virtio-blk-pci,drive=virtua-disk0{}", iothread));
         return;
     }
     command.arg("-drive").arg(format!(
-        "file={},if=virtio,format=qcow2,cache=writeback,discard=unmap",
-        disk_path
+        "file={},if=virtio,format=qcow2,{}",
+        disk_path, options
     ));
+}
+
+/// Devices only a tuned launch adds: none is needed to boot, all of them
+/// make the guest faster or lighter on the host.
+fn append_tuned_devices(command: &mut Command, vm: &LocalVm, plan: &LaunchPlan) {
+    // Entropy from the host: first boots (SSH keys, TLS, Windows setup) no
+    // longer stall waiting for randomness.
+    // `rng-builtin` (QEMU 5.1+) needs no /dev/urandom, so Windows hosts too.
+    command.args(["-object", "rng-builtin,id=virtua-rng"]);
+    command.args(["-device", "virtio-rng-pci,rng=virtua-rng"]);
+    if env::consts::OS == "linux" && plan.accelerator == "kvm" {
+        // The guest hands freed RAM back to the host: a Windows VM no longer
+        // holds on to its whole budget after a peak.
+        command.args(["-device", "virtio-balloon-pci,free-page-reporting=on"]);
+    }
+    if vm.guest_os == "windows" && vm.architecture != "arm64" {
+        // Windows keeps its RTC in local time; slew catches up lost ticks
+        // after a host stall instead of jumping the guest clock.
+        command.args(["-rtc", "base=localtime,driftfix=slew"]);
+        if plan.accelerator == "kvm" {
+            command.args(["-global", "kvm-pit.lost_tick_policy=delay"]);
+        }
+    }
 }
 
 fn validate_qemu_path(path: &str, label: &str) -> Result<(), String> {
@@ -678,6 +777,7 @@ fn append_network_args(
     mode: &str,
     model: &str,
     guest_os: &str,
+    rdp_forward: Option<&(String, u16)>,
 ) {
     let mode = normalize_network_mode(Some(mode.to_string()));
     if mode == "isolated" {
@@ -689,7 +789,12 @@ fn append_network_args(
         "vmnet-bridged" if env::consts::OS == "macos" => {
             "vmnet-bridged,id=net0,ifname=en0".to_string()
         }
-        _ => "user,id=net0".to_string(),
+        // Unified mode: the guest's RDP is reachable on loopback only, never
+        // from the network the host is on.
+        _ => match rdp_forward {
+            Some((address, port)) => format!("user,id=net0,hostfwd=tcp:{address}:{port}-:3389"),
+            None => "user,id=net0".to_string(),
+        },
     };
     command.arg("-netdev").arg(netdev);
 
@@ -908,12 +1013,11 @@ fn vm_process_alive(vm: &LocalVm) -> bool {
 
 fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
     let mut changed = false;
-    let live_pids: Vec<u32> = vms
+    let expected: Vec<(u32, Vec<String>)> = vms
         .iter()
-        .filter(|vm| vm_process_alive(vm))
-        .filter_map(|vm| vm.pid)
+        .filter_map(|vm| vm.pid.map(|pid| (pid, vec![vm.id.clone(), vm.name.clone()])))
         .collect();
-    let metrics = platform::process_metrics(&live_pids);
+    let live = platform::qemu_processes(&expected);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
@@ -924,37 +1028,25 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
             vm.vnc_port = None;
             vm.spice_port = None;
             vm.qmp_port = None;
+            vm.rdp_port = None;
             vm.cpu_usage = None;
             vm.memory_usage = None;
             vm.uptime_seconds = None;
             continue;
         }
-        if !vm_process_alive(vm) {
-            vm.pid = None;
-            vm.vnc_port = None;
-            vm.spice_port = None;
-            vm.spice_password = None;
-            vm.qmp_port = None;
-            clear_vm_guest_agent_state(vm);
-            vm.cpu_usage = None;
-            vm.memory_usage = None;
-            vm.uptime_seconds = None;
-            vm.state = "stopped".to_string();
-            vm.updated_at = now_string();
+        let Some(&(cpu, memory_bytes, uptime)) = vm.pid.and_then(|pid| live.get(&pid)) else {
+            stop_local_vm_fields(vm);
             changed = true;
             continue;
-        }
+        };
+        let budget = (vm.memory_mib as f32 * 1024.0 * 1024.0).max(1.0);
+        vm.cpu_usage = Some(cpu);
+        vm.memory_usage = Some(((memory_bytes as f32 / budget) * 100.0).clamp(0.0, 100.0));
+        vm.uptime_seconds = Some(uptime);
 
         if vm.state != "running" && vm.state != "stopping" {
             vm.state = "running".to_string();
             changed = true;
-        }
-        if let Some((cpu, memory_bytes, uptime)) = vm.pid.and_then(|pid| metrics.get(&pid).copied())
-        {
-            let budget = (vm.memory_mib as f32 * 1024.0 * 1024.0).max(1.0);
-            vm.cpu_usage = Some(cpu);
-            vm.memory_usage = Some(((memory_bytes as f32 / budget) * 100.0).clamp(0.0, 100.0));
-            vm.uptime_seconds = Some(uptime);
         }
         match vm.qga_port {
             Some(port) => {
@@ -1040,9 +1132,14 @@ fn list_lxc_resources() -> Vec<LocalContainerResource> {
 }
 
 fn local_list_containers_blocking() -> Vec<LocalContainerResource> {
-    let mut resources = list_lxc_resources();
-    resources.extend(list_docker_resources());
-    resources
+    // Incus (possibly over SSH to the Debian VM) and Docker are independent
+    // round-trips: run them side by side instead of one after the other.
+    std::thread::scope(|scope| {
+        let docker = scope.spawn(list_docker_resources);
+        let mut resources = list_lxc_resources();
+        resources.extend(docker.join().unwrap_or_default());
+        resources
+    })
 }
 
 fn safe_container_name(name: &str) -> Result<String, String> {
@@ -1402,7 +1499,7 @@ fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(timeout)
-        .user_agent("AuxiNux-Virtua-Desktop/0.2.11")
+        .user_agent(concat!("AuxiNux-Virtua-Desktop/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|err| format!("Client HTTP impossible: {}", err))
 }
@@ -1707,7 +1804,10 @@ fn clear_desktop_setting(key: String) -> Result<(), String> {
 
 #[tauri::command]
 fn runtime_platform() -> RuntimePlatform {
+    let host = platform::host_profile();
     RuntimePlatform {
+        distro: host.distro,
+        auxinux: host.auxinux,
         os: env::consts::OS.to_string(),
         arch: normalize_arch(env::consts::ARCH).to_string(),
         mobile: cfg!(any(target_os = "ios", target_os = "android")),
@@ -1733,7 +1833,10 @@ async fn local_qemu_diagnostics() -> Result<LocalQemuDiagnostics, String> {
 }
 
 static DIAGNOSTICS_CACHE: Mutex<Option<(u64, LocalQemuDiagnostics)>> = Mutex::new(None);
-const DIAGNOSTICS_TTL_SECONDS: u64 = 5;
+/// QEMU's presence only changes through an installation, which flushes this
+/// cache: a 5 s TTL meant re-spawning `qemu-img`/`qemu-system --version` on
+/// nearly every 7 s inventory refresh.
+const DIAGNOSTICS_TTL_SECONDS: u64 = 120;
 
 /// Drop the cached QEMU probe: an engine installation changes the answer.
 fn forget_diagnostics() {
@@ -1787,6 +1890,7 @@ fn probe_qemu_diagnostics() -> Result<LocalQemuDiagnostics, String> {
         qemu_system_amd64,
         homebrew,
         ready,
+        host: platform::host_profile(),
     })
 }
 
@@ -2080,6 +2184,9 @@ fn import_template_archive(
         memory_usage: None,
         uptime_seconds: None,
         startup_notes: None,
+        rdp_port: None,
+        unified: false,
+        unified_user: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2581,6 +2688,9 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         memory_usage: None,
         uptime_seconds: None,
         startup_notes: None,
+        rdp_port: None,
+        unified: false,
+        unified_user: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -3127,6 +3237,10 @@ struct LaunchPlan {
     /// ARM64 only: UEFI firmware on pflash with a per-VM variable store, so
     /// boot entries (Windows Boot Manager, distro shims) survive a restart.
     uefi_vars: bool,
+    /// Performance tuning (`tuned_launch_args`): iothread, io_uring,
+    /// enlightenments… Each plan is tried tuned first, then untuned, so an
+    /// older QEMU that rejects one option never costs the VM a feature.
+    tuned: bool,
     note: Option<&'static str>,
 }
 
@@ -3144,6 +3258,7 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
         usb_tablet: true,
         gpu_model: gpu_model.to_string(),
         uefi_vars: arm64,
+        tuned: true,
         note: None,
     };
     let mut plans = vec![base.clone()];
@@ -3198,6 +3313,7 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
             usb_tablet: true,
             gpu_model: "std".to_string(),
             uefi_vars: arm64,
+            tuned: true,
             note: Some(
                 "acceleration materielle indisponible: la VM tourne en emulation logicielle (TCG)",
             ),
@@ -3214,6 +3330,18 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
         }
     }
     plans
+        .into_iter()
+        .flat_map(|plan| {
+            let untuned = LaunchPlan {
+                tuned: false,
+                note: Some(plan.note.unwrap_or(
+                    "optimisations de performance refusees par cette version de QEMU",
+                )),
+                ..plan.clone()
+            };
+            [plan, untuned]
+        })
+        .collect()
 }
 
 struct LaunchPorts {
@@ -3234,6 +3362,8 @@ struct LaunchPorts {
     /// Where the guest's serial console is written. The UEFI firmware reports
     /// boot attempts and Secure Boot refusals there, and nowhere else.
     serial_log: Option<String>,
+    /// Unified mode: loopback address/port forwarded to the guest's RDP.
+    rdp_forward: Option<(String, u16)>,
 }
 
 fn build_qemu_command(
@@ -3249,9 +3379,17 @@ fn build_qemu_command(
         .arg("-m")
         .arg(vm.memory_mib.to_string())
         .arg("-smp")
-        .arg(vm.cpu.to_string());
+        // One socket: Windows 10/11 Home use a single socket and Pro two, so
+        // a bare `-smp 8` (8 sockets on older QEMU) left most vCPUs idle.
+        .arg(format!("{0},sockets=1,cores={0},threads=1", vm.cpu.max(1)));
 
-    platform::machine_args(&mut command, &vm.architecture, &plan.accelerator);
+    platform::machine_args_tuned(
+        &mut command,
+        &vm.architecture,
+        &plan.accelerator,
+        &vm.guest_os,
+        plan.tuned,
+    );
     let append_pflash = |command: &mut Command, uefi: &UefiFirmware| -> Result<(), String> {
         validate_qemu_path(&uefi.code, "firmware")?;
         validate_qemu_path(&uefi.vars, "variables UEFI")?;
@@ -3296,7 +3434,11 @@ fn build_qemu_command(
         command.args(["-device", "usb-ehci", "-device", "usb-tablet"]);
     }
 
-    append_disk_args(&mut command, &vm.architecture, &vm.disk_path, &vm.disk_bus);
+    let tuning = DiskTuning::for_launch(plan);
+    if tuning.iothread {
+        command.args(["-object", "iothread,id=virtua-io0"]);
+    }
+    append_disk_args(&mut command, &vm.architecture, &vm.disk_path, &vm.disk_bus, &tuning);
     append_cdrom_args(
         &mut command,
         &vm.architecture,
@@ -3310,7 +3452,11 @@ fn build_qemu_command(
         &vm.network,
         &vm.network_model,
         &vm.guest_os,
+        ports.rdp_forward.as_ref(),
     );
+    if plan.tuned {
+        append_tuned_devices(&mut command, vm, plan);
+    }
 
     if let Some(dir) = &ports.unattend_dir {
         validate_qemu_path(dir, "autounattend")?;
@@ -3419,16 +3565,41 @@ fn build_qemu_command(
 /// Give QEMU time to fail: reading the log after 350 ms reported "started" for
 /// commands that died a second later (a missing accelerator on Windows is the
 /// usual case), leaving a phantom running VM in the inventory.
-fn wait_for_qemu(child: &mut std::process::Child) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + Duration::from_millis(2500);
+///
+/// QEMU only serves QMP from its main loop, i.e. once every option, device
+/// and accelerator has been accepted: a QMP answer ends the wait early (plus
+/// a short grace for a vCPU that fails on its first run) instead of always
+/// paying the full 2.5 s on every start.
+fn wait_for_qemu(child: &mut std::process::Child, qmp_port: u16) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_millis(2500);
+    let mut ready_at: Option<std::time::Instant> = None;
     while std::time::Instant::now() < deadline {
         match child.try_wait() {
             Ok(Some(status)) => return Err(status.to_string()),
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {}
             Err(err) => return Err(err.to_string()),
         }
+        match ready_at {
+            Some(at) if at.elapsed() >= Duration::from_millis(300) => return Ok(()),
+            Some(_) => {}
+            None if qmp_answers(qmp_port) => ready_at = Some(std::time::Instant::now()),
+            None => {}
+        }
+        std::thread::sleep(Duration::from_millis(60));
     }
     Ok(())
+}
+
+/// True once QEMU's main loop answers on QMP.
+fn qmp_answers(port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(150)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let mut buffer = [0_u8; 1024];
+    matches!(stream.read(&mut buffer), Ok(size) if size > 0 && buffer[..size].windows(4).any(|w| w == b"QMP\""))
 }
 
 /// The QEMU command line as written to the log, SPICE password masked.
@@ -3695,7 +3866,15 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         ),
         unattend_dir: None,
         serial_log: None,
+        rdp_forward: None,
     };
+    // Every Windows guest on the NAT network gets its RDP forwarded to
+    // loopback, so enabling the Unified mode never needs a VM restart.
+    if vm.guest_os == "windows" && normalize_network_mode(Some(vm.network.clone())) == "user" {
+        if let Some(port) = find_free_port_excluding(6301, 6399, &reserved(|vm| vm.rdp_port)) {
+            ports.rdp_forward = Some((unified::loopback_address(port), port));
+        }
+    }
 
     let log_dir = local_state_dir()?.join("Logs");
     fs::create_dir_all(&log_dir).map_err(|err| err.to_string())?;
@@ -3815,7 +3994,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 continue;
             }
         };
-        match wait_for_qemu(&mut child) {
+        match wait_for_qemu(&mut child, qmp_port) {
             Ok(()) => {
                 if let Some(note) = plan.note {
                     notes.push(note.to_string());
@@ -3850,6 +4029,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 vm.spice_password = spice_enabled.then(|| ports.spice_password.clone());
                 vm.qmp_port = Some(qmp_port);
                 vm.qga_port = Some(qga_port);
+                vm.rdp_port = ports.rdp_forward.as_ref().map(|(_, port)| *port);
                 vm.guest_ip = None;
                 vm.guest_agent_running = false;
                 vm.qga_last_probe_at = None;
@@ -3890,6 +4070,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
 fn stop_local_vm_fields(vm: &mut LocalVm) {
     vm.pid = None;
     vm.vnc_port = None;
+    vm.rdp_port = None;
     vm.spice_port = None;
     vm.spice_password = None;
     vm.qmp_port = None;
@@ -4086,6 +4267,11 @@ fn install_crash_log() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Host launchers of the Unified mode: open one Windows app, no window.
+    let args: Vec<String> = env::args().collect();
+    if let Some(position) = args.iter().position(|arg| arg == "--unified-launch") {
+        std::process::exit(unified::cli(&args[position + 1..]));
+    }
     install_crash_log();
     log_line(&format!(
         "demarrage {} {} sur {}/{}",
@@ -4137,6 +4323,13 @@ pub fn run() {
             engines::local_prepare_engine,
             companion::local_stop_lxc_vm,
             companion::local_lxc_logs,
+            unified::local_unified_overview,
+            unified::local_unified_prepare,
+            unified::local_unified_disable,
+            unified::local_unified_refresh_apps,
+            unified::local_unified_launch,
+            unified::local_unified_integrate,
+            unified::local_unified_install_client,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
@@ -4164,6 +4357,88 @@ mod local_mode_tests {
         assert_eq!(last.gpu_model, "std");
         // Only the first attempt is silent; every degradation is explained.
         assert!(plans.iter().skip(1).all(|plan| plan.note.is_some()));
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_tuned_commands() {
+        let out = std::env::var("VIRTUA_DUMP").expect("VIRTUA_DUMP");
+        let disk = std::env::var("VIRTUA_DISK").expect("VIRTUA_DISK");
+        let mut lines = vec![];
+        for (guest, bus, accel, tuned) in [
+            ("windows", "virtio", "kvm", true),
+            ("windows", "nvme", "kvm", true),
+            ("other", "virtio", "kvm", true),
+            ("windows", "virtio", "whpx", true),
+            ("windows", "sata", "tcg", true),
+            ("windows", "virtio", "kvm", false),
+        ] {
+            let mut vm = sample_vm("amd64", "virtio");
+            vm.guest_os = guest.into();
+            vm.disk_bus = bus.into();
+            vm.disk_path = disk.clone();
+            vm.cpu = 4;
+            let mut ports = sample_ports();
+            ports.rdp_forward = Some(("127.0.0.1".into(), 6391));
+            let mut plan = launch_plans("amd64", "virtio").remove(0);
+            plan.accelerator = accel.into();
+            plan.tuned = tuned;
+            plan.spice = SpiceMode::Off;
+            plan.audio = false;
+            let command = build_qemu_command("qemu", &vm, &ports, &plan).unwrap();
+            lines.push(serde_json::to_string(&command_args(&command)).unwrap());
+        }
+        std::fs::write(out, lines.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn every_plan_is_retried_without_tuning_before_degrading() {
+        let plans = launch_plans("amd64", "virtio");
+        assert!(plans[0].tuned);
+        assert!(!plans[1].tuned);
+        assert_eq!(plans[1].spice, plans[0].spice);
+        assert_eq!(plans[1].accelerator, plans[0].accelerator);
+        assert!(!plans.last().unwrap().tuned);
+    }
+
+    #[test]
+    fn a_tuned_linux_kvm_launch_uses_an_iothread_and_io_uring() {
+        assert_eq!(
+            DiskTuning::for_host("linux", "kvm", true),
+            DiskTuning { iothread: true, aio: Some("io_uring") }
+        );
+        assert_eq!(DiskTuning::for_host("macos", "hvf", true), DiskTuning { iothread: true, aio: None });
+        assert_eq!(DiskTuning::for_host("windows", "whpx", true), DiskTuning::default());
+        assert_eq!(DiskTuning::for_host("linux", "kvm", false), DiskTuning::default());
+
+        let mut command = Command::new("qemu");
+        append_disk_args(&mut command, "amd64", "/d/vm.qcow2", "virtio", &DiskTuning { iothread: true, aio: Some("io_uring") });
+        let args = command_args(&command);
+        assert!(args.contains(&"file=/d/vm.qcow2,if=none,id=virtua-disk0,format=qcow2,cache=writeback,discard=unmap,detect-zeroes=unmap,aio=io_uring".to_string()));
+        assert!(args.contains(&"virtio-blk-pci,drive=virtua-disk0,iothread=virtua-io0".to_string()));
+
+        let mut plain = Command::new("qemu");
+        append_disk_args(&mut plain, "amd64", "/d/vm.qcow2", "virtio", &DiskTuning::default());
+        assert!(command_args(&plain).iter().any(|a| a.starts_with("file=/d/vm.qcow2,if=virtio")));
+    }
+
+    #[test]
+    fn windows_guests_get_one_socket_and_a_loopback_rdp_forward() {
+        let mut vm = sample_vm("amd64", "virtio");
+        vm.guest_os = "windows".into();
+        vm.cpu = 8;
+        let mut ports = sample_ports();
+        ports.rdp_forward = Some(("127.0.0.1".into(), 6301));
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
+        assert!(args.contains(&"8,sockets=1,cores=8,threads=1".to_string()));
+        assert!(args.contains(&"user,id=net0,hostfwd=tcp:127.0.0.1:6301-:3389".to_string()));
+        assert!(args.contains(&"virtio-rng-pci,rng=virtua-rng".to_string()));
+        assert!(args.contains(&"base=localtime,driftfix=slew".to_string()));
+
+        let untuned = launch_plans("amd64", "virtio").remove(1);
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &untuned).unwrap());
+        assert!(!args.iter().any(|a| a.contains("virtio-rng") || a.contains("iothread")));
     }
 
     #[test]
@@ -4246,6 +4521,7 @@ mod local_mode_tests {
             usb_tablet: false,
             gpu_model: "std".into(),
             uefi_vars: false,
+            tuned: false,
             note: None,
         };
         let args = command_args(&build_qemu_command("qemu", &vm, &ports, &plan).unwrap());
@@ -4317,7 +4593,7 @@ mod local_mode_tests {
     #[test]
     fn a_sata_disk_declares_its_controller() {
         let mut cmd = Command::new("qemu");
-        append_disk_args(&mut cmd, "amd64", "/disks/vm.qcow2", "sata");
+        append_disk_args(&mut cmd, "amd64", "/disks/vm.qcow2", "sata", &DiskTuning::default());
         let args = command_args(&cmd);
         assert!(args.iter().any(|a| a.starts_with("ich9-ahci")));
         assert!(args.iter().any(|a| a.contains("bus=virtua-ahci.0")));
@@ -4326,7 +4602,7 @@ mod local_mode_tests {
     #[test]
     fn an_nvme_disk_carries_a_serial() {
         let mut cmd = Command::new("qemu");
-        append_disk_args(&mut cmd, "arm64", "/disks/vm.qcow2", "nvme");
+        append_disk_args(&mut cmd, "arm64", "/disks/vm.qcow2", "nvme", &DiskTuning::default());
         let args = command_args(&cmd);
         assert!(args
             .iter()
@@ -4372,10 +4648,10 @@ mod local_mode_tests {
     #[test]
     fn windows_on_arm_gets_a_pci_network_card() {
         let mut windows = Command::new("qemu");
-        append_network_args(&mut windows, "arm64", "user", "virtio", "windows");
+        append_network_args(&mut windows, "arm64", "user", "virtio", "windows", None);
         assert!(command_args(&windows).iter().any(|a| a == "virtio-net-pci,netdev=net0"));
         let mut linux = Command::new("qemu");
-        append_network_args(&mut linux, "arm64", "user", "virtio", "other");
+        append_network_args(&mut linux, "arm64", "user", "virtio", "other", None);
         assert!(command_args(&linux).iter().any(|a| a == "virtio-net-device,netdev=net0"));
     }
 
@@ -4577,6 +4853,9 @@ mod local_mode_tests {
             memory_usage: None,
             uptime_seconds: None,
             startup_notes: None,
+        rdp_port: None,
+        unified: false,
+        unified_user: None,
             created_at: "0".into(),
             updated_at: "0".into(),
         }
@@ -4594,6 +4873,7 @@ mod local_mode_tests {
             tpm_device: tpm_device_model("amd64", false, true),
             unattend_dir: None,
             serial_log: None,
+            rdp_forward: None,
         }
     }
 

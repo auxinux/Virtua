@@ -286,6 +286,9 @@ pub fn forget_caches() {
     if let Ok(mut cache) = BINARIES.lock() {
         *cache = None;
     }
+    if let Ok(mut cache) = PROFILE.lock() {
+        *cache = None;
+    }
 }
 
 /// Windows hands a process its PATH at creation: a tool installed by winget
@@ -334,7 +337,24 @@ pub fn qemu_system_binary(arch: &str) -> &'static str {
 /// `-machine`/`-accel`/`-cpu` triplet for `arch`, forcing `accel` when the
 /// caller is retrying a VM that failed to start with the preferred one.
 pub fn machine_args(cmd: &mut Command, arch: &str, accel: &str) {
-    let machine = if arch == "arm64" {
+    machine_args_tuned(cmd, arch, accel, "other", false);
+}
+
+/// Hyper-V enlightenments KVM exposes to a Windows guest. Without them Windows
+/// polls timers and spins on locks as on bare metal: the single largest CPU
+/// cost of a Windows VM on Linux. QEMU 4.1+ knows every flag listed here.
+const KVM_HYPERV_FLAGS: &str = "hv_relaxed,hv_vapic,hv_spinlocks=0x1fff,hv_vpindex,hv_runtime,hv_synic,hv_stimer,hv_time,hv_frequencies,hv_tlbflush,hv_ipi";
+
+/// x86-64-v2 on top of `qemu64`: Windows 11 24H2 refuses to boot without
+/// SSE4.2 and POPCNT, which the bare `qemu64` model WHPX is limited to lacks.
+const WHPX_V2_FLAGS: &str = "+ssse3,+sse4.1,+sse4.2,+popcnt,+cx16,+lahf_lm";
+
+/// Same as `machine_args`, with the per-guest tuning of `tuned` launches:
+/// enlightenments and timer settings for Windows, x86-64-v2 on WHPX. A QEMU
+/// that refuses one of them gets an untuned retry from the launch ladder.
+pub fn machine_args_tuned(cmd: &mut Command, arch: &str, accel: &str, guest_os: &str, tuned: bool) {
+    let windows = guest_os == "windows";
+    let mut machine = if arch == "arm64" {
         "virt".to_string()
     } else if accel == "whpx" {
         // WHPX cannot drive the in-kernel IRQ chip; without this QEMU aborts
@@ -343,6 +363,11 @@ pub fn machine_args(cmd: &mut Command, arch: &str, accel: &str) {
     } else {
         "q35".to_string()
     };
+    if tuned && windows && arch != "arm64" && accel == "kvm" {
+        // With hv_stimer/hv_time Windows no longer needs the HPET, whose
+        // emulation costs a VM exit per timer read.
+        machine.push_str(",hpet=off");
+    }
     // Cross-architecture TCG (x86 guest on Apple Silicon) defaults to a single
     // host thread for every vCPU because x86 memory ordering is stronger than
     // ARM's. Multi-threaded TCG is what makes a multi-vCPU x86 guest usable
@@ -352,18 +377,88 @@ pub fn machine_args(cmd: &mut Command, arch: &str, accel: &str) {
     } else {
         accel.to_string()
     };
-    cmd.args([
-        "-machine",
-        &machine,
-        "-accel",
-        &accel_arg,
-        "-cpu",
-        match accel {
-            "tcg" => "max",
-            "whpx" => "qemu64,-hypervisor",
-            _ => "host",
-        },
-    ]);
+    let cpu = match accel {
+        "tcg" => "max".to_string(),
+        "whpx" if tuned => format!("qemu64,{WHPX_V2_FLAGS},-hypervisor"),
+        "whpx" => "qemu64,-hypervisor".to_string(),
+        "kvm" if tuned && windows && arch != "arm64" => format!("host,{KVM_HYPERV_FLAGS}"),
+        _ => "host".to_string(),
+    };
+    cmd.args(["-machine", &machine, "-accel", &accel_arg, "-cpu", &cpu]);
+}
+
+/// What the host can give a VM, for the UI and for the launch tuning.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostProfile {
+    /// `auxinux` on AuxiNux OS, else the os-release ID (`debian`, `ubuntu`…),
+    /// `macos` or `windows`.
+    pub distro: String,
+    pub auxinux: bool,
+    /// Why hardware acceleration is unavailable although the host has it
+    /// (e.g. /dev/kvm exists but the user is not in the `kvm` group).
+    pub acceleration_issue: Option<String>,
+}
+
+fn os_release_ids() -> Vec<String> {
+    let raw = fs::read_to_string("/etc/os-release")
+        .or_else(|_| fs::read_to_string("/usr/lib/os-release"))
+        .unwrap_or_default();
+    parse_os_release_ids(&raw)
+}
+
+/// `ID` then every `ID_LIKE` entry, lower-cased and unquoted.
+pub fn parse_os_release_ids(raw: &str) -> Vec<String> {
+    let mut ids = vec![];
+    for line in raw.lines() {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim().trim_matches('"').trim_matches('\'').to_lowercase();
+        match key.trim() {
+            "ID" => ids.insert(0, value),
+            "ID_LIKE" => ids.extend(value.split_whitespace().map(str::to_string)),
+            _ => {}
+        }
+    }
+    ids
+}
+
+/// AuxiNux OS ships its own kernel (`*-auxinux-*`) on a Debian base; either
+/// marker is enough.
+pub fn is_auxinux(os_ids: &[String], kernel_release: &str) -> bool {
+    os_ids.iter().any(|id| id.contains("auxinux")) || kernel_release.to_lowercase().contains("auxinux")
+}
+
+static PROFILE: Mutex<Option<HostProfile>> = Mutex::new(None);
+
+pub fn host_profile() -> HostProfile {
+    if let Some(found) = PROFILE.lock().ok().and_then(|cache| cache.clone()) {
+        return found;
+    }
+    let profile = match env::consts::OS {
+        "linux" => {
+            let ids = os_release_ids();
+            let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+            let auxinux = is_auxinux(&ids, &kernel);
+            let kvm = Path::new("/dev/kvm");
+            let acceleration_issue = if !kvm.exists() {
+                Some("/dev/kvm absent : activez la virtualisation (VT-x/AMD-V) dans le BIOS/UEFI.".to_string())
+            } else if fs::OpenOptions::new().read(true).write(true).open(kvm).is_err() {
+                Some("/dev/kvm refusé : votre compte doit faire partie du groupe kvm, sinon les VM tournent en émulation logicielle, dix fois plus lente.".to_string())
+            } else {
+                None
+            };
+            HostProfile {
+                distro: if auxinux { "auxinux".into() } else { ids.first().cloned().unwrap_or_else(|| "linux".into()) },
+                auxinux,
+                acceleration_issue,
+            }
+        }
+        os => HostProfile { distro: os.to_string(), auxinux: false, acceleration_issue: None },
+    };
+    if let Ok(mut cache) = PROFILE.lock() {
+        *cache = Some(profile.clone());
+    }
+    profile
 }
 
 /// Accelerators to try, in order, for `arch`: the preferred one first and TCG
@@ -449,30 +544,46 @@ pub fn terminate(pid: u32) -> Result<(), String> {
     }
 }
 
-/// Live CPU/RAM/uptime for several processes in one refresh. The previous
-/// implementation shelled out to `ps` once per VM on every poll: absent on
-/// Windows, and a process storm on macOS/Linux.
-pub fn process_metrics(pids: &[u32]) -> HashMap<u32, (f32, u64, u64)> {
+/// Liveness (QEMU `-name` matching one of the expected names) and CPU/RAM/
+/// uptime of several VMs from one process-table pass and two CPU samples.
+/// The inventory refresh used to check each VM with up to two full process
+/// refreshes, then sample metrics separately: four scans per VM per poll.
+pub fn qemu_processes(expected: &[(u32, Vec<String>)]) -> HashMap<u32, (f32, u64, u64)> {
     let mut result = HashMap::new();
-    if pids.is_empty() {
+    if expected.is_empty() {
         return result;
     }
-    let wanted: Vec<sysinfo::Pid> = pids.iter().map(|p| sysinfo::Pid::from_u32(*p)).collect();
+    let wanted: Vec<sysinfo::Pid> = expected.iter().map(|(p, _)| sysinfo::Pid::from_u32(*p)).collect();
     let mut system = sysinfo::System::new();
-    let refresh = sysinfo::ProcessRefreshKind::nothing()
+    let first = sysinfo::ProcessRefreshKind::nothing()
         .with_cpu()
-        .with_memory();
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&wanted), true, refresh);
+        .with_memory()
+        .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet);
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&wanted), true, first);
+    let alive: Vec<sysinfo::Pid> = expected
+        .iter()
+        .filter(|(pid, names)| {
+            system.process(sysinfo::Pid::from_u32(*pid)).is_some_and(|process| {
+                process.status() != sysinfo::ProcessStatus::Zombie
+                    && process.cmd().windows(2).any(|pair| {
+                        pair[0] == "-name" && names.iter().any(|name| pair[1] == name.as_str())
+                    })
+            })
+        })
+        .map(|(pid, _)| sysinfo::Pid::from_u32(*pid))
+        .collect();
+    if alive.is_empty() {
+        return result;
+    }
     // A single sample always reports 0% CPU: sysinfo needs two.
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&wanted), true, refresh);
-    // `System::new_all()` here enumerated every process, disk and network
-    // interface of the host on each poll, only to count CPUs.
+    let second = sysinfo::ProcessRefreshKind::nothing().with_cpu().with_memory();
+    system.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&alive), true, second);
     let cores = logical_cores();
-    for pid in pids {
-        if let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) {
+    for pid in alive {
+        if let Some(process) = system.process(pid) {
             result.insert(
-                *pid,
+                pid.as_u32(),
                 (
                     (process.cpu_usage() / cores).clamp(0.0, 100.0),
                     process.memory(),
@@ -558,6 +669,32 @@ mod tests {
         assert!(cmd.get_args().any(|a| a == "tcg,thread=multi"));
     }
     #[test]
+    fn windows_on_kvm_gets_hyperv_enlightenments_only_when_tuned() {
+        let args = |tuned: bool, guest: &str, accel: &str| {
+            let mut cmd = Command::new("qemu");
+            machine_args_tuned(&mut cmd, "amd64", accel, guest, tuned);
+            cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>()
+        };
+        let tuned = args(true, "windows", "kvm");
+        assert!(tuned.iter().any(|a| a.starts_with("host,hv_relaxed") && a.contains("hv_stimer")));
+        assert!(tuned.contains(&"q35,hpet=off".to_string()));
+        assert!(args(false, "windows", "kvm").contains(&"host".to_string()));
+        assert!(args(true, "other", "kvm").contains(&"host".to_string()));
+        // Windows 11 24H2 needs SSE4.2 + POPCNT, absent from bare qemu64.
+        let whpx = args(true, "windows", "whpx");
+        assert!(whpx.iter().any(|a| a.contains("+sse4.2") && a.contains("+popcnt") && a.ends_with("-hypervisor")));
+        assert!(args(false, "windows", "whpx").contains(&"qemu64,-hypervisor".to_string()));
+    }
+    #[test]
+    fn auxinux_is_recognised_by_os_release_or_kernel() {
+        let ids = parse_os_release_ids("NAME=\"AuxiNux OS\"\nID=auxinux\nID_LIKE=\"debian\"\n");
+        assert_eq!(ids, ["auxinux", "debian"]);
+        assert!(is_auxinux(&ids, "6.12.0"));
+        let debian = parse_os_release_ids("ID=debian\n");
+        assert!(is_auxinux(&debian, "7.2.4-auxinux-virtua-amd64"));
+        assert!(!is_auxinux(&debian, "6.12.0-amd64"));
+    }
+    #[test]
     fn tcg_is_always_the_last_resort() {
         assert_eq!(accelerator_chain("nonexistent-arch").last().unwrap(), "tcg");
     }
@@ -614,14 +751,18 @@ mod process_tests {
         assert!(!wrong);
     }
     #[test]
-    fn process_metrics_report_a_live_child() {
+    fn qemu_processes_match_the_name_and_report_metrics() {
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "sleep 3"])
+            .args(["-c", "sleep 3; true", "-name", "Virtua-metrics"])
             .spawn()
             .unwrap();
-        let metrics = process_metrics(&[child.id()]);
+        std::thread::sleep(Duration::from_millis(100));
+        let pid = child.id();
+        let found = qemu_processes(&[(pid, vec!["other".into(), "Virtua-metrics".into()])]);
+        let wrong = qemu_processes(&[(pid, vec!["other".into()])]);
         let _ = child.kill();
         let _ = child.wait();
-        assert!(metrics.contains_key(&child.id()));
+        assert!(found.contains_key(&pid));
+        assert!(wrong.is_empty());
     }
 }

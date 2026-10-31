@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 export type EngineId = "qemu" | "docker" | "lxc";
 export interface EngineStatus { id: EngineId; state: "ready" | "missing" | "stopped" | "unavailable"; detail: string }
-export interface EngineOverview { os: string; architecture: string; accelerator: string; engines: EngineStatus[]; busy: boolean }
+export interface HostProfile { distro: string; auxinux: boolean; accelerationIssue?: string | null }
+export interface EngineOverview { os: string; architecture: string; accelerator: string; engines: EngineStatus[]; busy: boolean; host?: HostProfile }
 export const engines = {
   status: () => invoke<EngineOverview>("local_engine_status"),
   prepare: (engine: EngineId) => invoke<EngineOverview>("local_prepare_engine", { engine }),

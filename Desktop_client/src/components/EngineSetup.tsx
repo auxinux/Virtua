@@ -53,7 +53,8 @@ export function EngineSetup({ requiredOnly = false, onReady }: { requiredOnly?: 
   return <section className="space-y-4 rounded border border-virtua-border bg-virtua-panel p-5">
     <div className="flex items-center justify-between gap-4">
       <div><h2 className="flex items-center gap-2 text-lg font-semibold"><Server className="h-5 w-5 text-virtua-accent" />{requiredOnly ? "Préparer cet ordinateur" : "Moteurs locaux"}</h2>
-        <p className="mt-1 text-sm text-virtua-muted">{overview ? `${overview.os} · ${overview.architecture.toUpperCase()} · accélération QEMU : ${overview.accelerator.toUpperCase()}` : "Détection du système…"}</p></div>
+        <p className="mt-1 text-sm text-virtua-muted">{overview ? `${overview.host?.auxinux ? "AuxiNux OS" : overview.os} · ${overview.architecture.toUpperCase()} · accélération QEMU : ${overview.accelerator.toUpperCase()}` : "Détection du système…"}</p>
+        {overview?.host?.auxinux && <p className="mt-1 text-xs text-virtua-green">Noyau AuxiNux : KVM, LXC et Docker natifs — réglages de performance KVM activés pour vos VM.</p>}</div>
       <button disabled={locked} onClick={() => void refresh()} className="virtua-button" aria-label="Actualiser les moteurs"><RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} /></button>
     </div>
     {requiredOnly && <p className="text-sm text-virtua-muted">QEMU est nécessaire pour créer et exécuter vos VM locales. Docker et LXC pourront être activés ensuite, à votre demande.</p>}
@@ -74,6 +75,10 @@ export function EngineSetup({ requiredOnly = false, onReady }: { requiredOnly?: 
     </div>)}
     {logs !== null && <div><button onClick={() => setLogs(null)} className="virtua-button mb-2">Fermer les journaux</button><pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-3 text-xs">{logs || "Aucun journal disponible."}</pre></div>}
     {requiredOnly && ready && <button disabled={locked} onClick={onReady} className="virtua-button-primary w-full justify-center">Ouvrir le mode local</button>}
-    {overview?.accelerator === "tcg" && <p className="text-xs text-virtua-yellow">QEMU utilisera l’émulation logicielle. Vérifiez les droits KVM sous Linux ou l’activation de Windows Hypervisor Platform sous Windows pour bénéficier de l’accélération sur les architectures compatibles.</p>}
+    {overview?.host?.accelerationIssue && <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded border border-virtua-yellow/40 bg-virtua-yellow/10 p-3 text-xs text-virtua-yellow">
+      <span>{overview.host.accelerationIssue}</span>
+      {overview.os === "linux" && overview.host.accelerationIssue.includes("groupe kvm") && <button disabled={locked} onClick={() => void prepare("qemu")} className="virtua-button">Autoriser KVM</button>}
+    </div>}
+    {overview?.accelerator === "tcg" && !overview.host?.accelerationIssue && <p className="text-xs text-virtua-yellow">QEMU utilisera l’émulation logicielle. Vérifiez les droits KVM sous Linux ou l’activation de Windows Hypervisor Platform sous Windows pour bénéficier de l’accélération sur les architectures compatibles.</p>}
   </section>;
 }
