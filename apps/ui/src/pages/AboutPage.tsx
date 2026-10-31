@@ -12,6 +12,24 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.9",
+      items: fr
+        ? [
+            "Nouveau (bêta) : Proxmox Backup Server dans le VDM. Les datastores PBS se déclarent une seule fois dans le VDM (Backups → Proxmox Backup Server) et servent à tout le datacenter.",
+            "Sauvegarde vers PBS de n'importe quelle VM ou conteneur LXC de n'importe quel nœud, depuis la barre d'outils ou le menu contextuel (« Back up to PBS »). Le VDM suit la progression de la tâche du nœud.",
+            "Restauration d'un snapshot PBS sur le nœud de votre choix : pool de stockage, correspondance des bridges réseau, nom, démarrage automatique. Le VDM vérifie que la machine existe à la fin.",
+            "Tâches planifiées multi-nœuds : toutes les VM et/ou tous les conteneurs du datacenter ou une sélection, jours et heure, rétention appliquée après chaque sauvegarde. Une machine à la fois ; les nœuds hors ligne sont signalés (« partiel »).",
+            "État de proxmox-backup-client sur chaque nœud, avec installation en un clic depuis le VDM.",
+          ]
+        : [
+            "New (beta): Proxmox Backup Server in VDM. PBS datastores are declared once in VDM (Backups → Proxmox Backup Server) and serve the whole datacenter.",
+            "Back up any VM or LXC container of any node to PBS from the toolbar or the context menu (\"Back up to PBS\"). VDM follows the node task's progress.",
+            "Restore a PBS snapshot to the node of your choice: storage pool, network bridge mapping, name, autostart. VDM checks that the guest exists at the end.",
+            "Multi-node scheduled jobs: all VMs and/or containers of the datacenter or a selection, days and time, retention applied after each backup. One guest at a time; offline nodes are reported (\"partial\").",
+            "proxmox-backup-client status on every node, with one-click install from VDM.",
+          ],
+    },
+    {
       v: "0.8.8",
       items: fr
         ? [
