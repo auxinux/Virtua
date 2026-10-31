@@ -41,6 +41,20 @@ SSH dédiée avec identité serveur vérifiée. Le téléchargement nécessite I
 Les IP LXC sont internes à Debian; la publication de ports vers le poste n’est
 pas encore proposée. Le stockage LXC `dir` est partagé, sans quota individuel.
 
+## Installation sur AuxiNux OS / Debian (amd64)
+
+Le client est publié dans le dépôt Virtua (`dep.auxinux.ca/VIRTUA`) sous le
+nom `auxinux-virtua-desktop` ; QEMU, OVMF, swtpm et FreeRDP 3 sont recommandés
+et installés avec lui :
+
+```sh
+sudo curl -fsSL https://dep.auxinux.ca/VIRTUA/virtua.sources -o /etc/apt/sources.list.d/virtua.sources
+sudo apt update && sudo apt install auxinux-virtua-desktop
+```
+
+Publication : `npx tauri build --bundles deb`, puis `scripts/package-apt.sh`
+(renomme le paquet Tauri), puis `publish-repo.sh --deploy` sur le dépôt.
+
 ## Développement
 
 Prérequis de compilation : Node.js 22+, Rust stable, bibliothèques Tauri propres

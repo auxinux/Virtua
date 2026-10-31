@@ -29,7 +29,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "deb", "appimage", "nsis"],
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "appimage",
+      "nsis"
+    ],
     "category": "DeveloperTool",
     "icon": [
       "icons/32x32.png",
@@ -42,15 +48,33 @@
     "copyright": "Copyright AuxiNux",
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+        "section": "admin",
+        "recommends": [
+          "qemu-system-x86",
+          "qemu-utils",
+          "ovmf",
+          "swtpm",
+          "freerdp3-x11"
+        ]
       }
     },
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
-      "nsis": { "installMode": "currentUser", "languages": ["French", "English"] }
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "French",
+          "English"
+        ]
+      }
     },
     "macOS": {
       "minimumSystemVersion": "11.0"
-    }
+    },
+    "shortDescription": "Machines virtuelles, LXC et Docker en local ou sur un serveur Virtua",
+    "longDescription": "Client AuxiNux Virtua : gère les VM QEMU, les conteneurs LXC (Incus) et Docker de cet ordinateur, ou se connecte à un nœud Virtua ou à un VDM. Mode Unifié : les applications d'une VM Windows s'ouvrent comme des applications natives (RDP RemoteApp)."
   }
 }
