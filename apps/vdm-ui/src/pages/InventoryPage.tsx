@@ -10,6 +10,7 @@ import { VmConfigForm, VmHardwarePanel, LxcConfigForm, DockerConfigForm, DockerE
 import { ResourceMetaPanel } from "@/components/ResourceMetaPanel";
 import { resourceLabel } from "@/lib/resourceLabel";
 import { MigrateModal, CloneModal, BackupModal, DockerTransferModal } from "@/components/TransferModals";
+import { PbsBackupModal } from "@/components/PbsBackupModal";
 import { ResourceContextMenu, type ResourceMenuTarget } from "@/components/ResourceContextMenu";
 import { ContextMenuState } from "@/components/ui/ContextMenu";
 import { useConfirm, usePrompt } from "@/hooks/useDialog";
@@ -84,6 +85,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
   const [showMigrate, setShowMigrate] = useState(false);
   const [showClone, setShowClone] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
+  const [showPbsBackup, setShowPbsBackup] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const navigate = useNavigate();
   const { confirm, dialog: confirmDialog } = useConfirm();
@@ -170,6 +172,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
         <ActionButton label="Migrate" icon="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" onClick={() => setShowMigrate(true)} />
         <ActionButton label="Clone" icon="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" onClick={() => setShowClone(true)} />
         <ActionButton label="Backup" icon="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 11.278 3.75 9m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 13.903 3.75 11.625" onClick={() => setShowBackup(true)} />
+        <ActionButton label="Back up to PBS" icon="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 11.278 3.75 9m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 13.903 3.75 11.625" onClick={() => setShowPbsBackup(true)} />
         <ActionButton label="Logs" icon="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" onClick={() => setShowLogs(true)} />
         <div className="h-6 w-px bg-vdm-border self-center" />
         <ActionButton label="Console" icon="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" variant="primary" disabled={!isRunning} onClick={() => setShowConsole(true)} />
@@ -276,6 +279,7 @@ function VmDetail({ nodeName, vmName }: { nodeName: string; vmName: string }) {
         nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
         onSubmit={(n, t, p, s) => cloneMut.mutate({ newName: n, targetNode: t, targetStoragePool: p, sharedStorageName: s })} />
       <BackupModal open={showBackup} onClose={() => setShowBackup(false)} resourceName={vm.name} storages={storagesQuery.data ?? []} onSubmit={(s) => backupMut.mutate(s)} />
+      <PbsBackupModal open={showPbsBackup} onClose={() => setShowPbsBackup(false)} kind="vm" node={nodeName} name={vm.name} onStarted={() => navigate("/tasks")} />
       <LogsModal open={showLogs} onClose={() => setShowLogs(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} />
       <ConsoleModal open={showConsole} onClose={() => setShowConsole(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} mode="term" />
       <ConsoleModal open={showVnc} onClose={() => setShowVnc(false)} type="vms" node={nodeName} name={vm.name} title={vm.name} mode="vnc" />
@@ -293,6 +297,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
   const navigate = useNavigate();
   const [showMigrate, setShowMigrate] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
+  const [showPbsBackup, setShowPbsBackup] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showConsole, setShowConsole] = useState(false);
   const [tab, setTab] = useState<"summary" | "config" | "network" | "snapshots">("summary");
@@ -338,6 +343,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
         <div className="h-6 w-px bg-vdm-border self-center" />
         <ActionButton label="Migrate" icon="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" onClick={() => setShowMigrate(true)} />
         <ActionButton label="Backup" icon="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 11.278 3.75 9m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 13.903 3.75 11.625" onClick={() => setShowBackup(true)} />
+        <ActionButton label="Back up to PBS" icon="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 11.278 3.75 9m16.5 2.625c0 2.278-3.694 4.125-8.25 4.125S3.75 13.903 3.75 11.625" onClick={() => setShowPbsBackup(true)} />
         <ActionButton label="Logs" icon="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" onClick={() => setShowLogs(true)} />
         <ActionButton label="Console" icon="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" variant="primary" disabled={!isRunning} onClick={() => setShowConsole(true)} />
       </div>
@@ -367,6 +373,7 @@ function LxcDetail({ nodeName, ctName }: { nodeName: string; ctName: string }) {
         nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
         onSubmit={(t, s, p, d) => migrateMut.mutate({ targetNode: t, sharedStorageName: s, targetStoragePool: p, deleteSource: d })} />
       <BackupModal open={showBackup} onClose={() => setShowBackup(false)} resourceName={ct.name} storages={storagesQuery.data ?? []} onSubmit={(s) => backupMut.mutate(s)} />
+      <PbsBackupModal open={showPbsBackup} onClose={() => setShowPbsBackup(false)} kind="lxc" node={nodeName} name={ct.name} onStarted={() => navigate("/tasks")} />
       <LogsModal open={showLogs} onClose={() => setShowLogs(false)} type="lxc" node={nodeName} name={ct.name} title={ct.name} />
       <ConsoleModal open={showConsole} onClose={() => setShowConsole(false)} type="lxc" node={nodeName} name={ct.name} title={ct.name} mode="term" />
     </div>

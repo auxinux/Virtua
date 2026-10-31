@@ -45,6 +45,7 @@ import {
 } from "./ssl.js";
 import { walkFiles, isManagedStorageLocation } from "./storageScan.js";
 import { isPbsJobDue } from "./pbsSchedule.js";
+import type { ZodTypeAny, infer as zodInfer } from "zod";
 import { clientHost, isLoopbackHost, webOrigin } from "./wsHost.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
@@ -83,6 +84,11 @@ import {
   qemuToArch,
   type TemplateArch,
   type TemplateSummary,
+  InternalPbsBackupRequestSchema,
+  InternalPbsConnectionRequestSchema,
+  InternalPbsInspectRequestSchema,
+  InternalPbsRestoreRequestSchema,
+  type PbsConnectionInput,
 } from "@auxinux/shared";
 
 declare module "@fastify/session" {
@@ -10395,6 +10401,40 @@ function pbsConnectionFromBody(body: Record<string, unknown>, existing?: PbsRemo
   };
 }
 
+/** Connection sent by VDM, which owns its remotes (no pbs_remotes row on this node). */
+function pbsConnectionFromInternal(conn: PbsConnectionInput): PbsConnectionParams {
+  return {
+    server: conn.server,
+    port: conn.port ?? 8007,
+    datastore: conn.datastore,
+    namespace: conn.namespace,
+    authId: conn.authId,
+    secret: conn.secret,
+    fingerprint: conn.fingerprint,
+  };
+}
+
+/** Parse an /api/internal/pbs/* body; zod issues never echo field values (no secret). */
+function parseInternalPbsBody<T extends ZodTypeAny>(schema: T, body: unknown): zodInfer<T> {
+  const parsed = schema.safeParse(body ?? {});
+  if (!parsed.success) {
+    throw Object.assign(new Error(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")), { statusCode: 400 });
+  }
+  return parsed.data;
+}
+
+async function testPbsConnection(conn: PbsConnectionParams) {
+  await validatePbsConnectionOnRunner(conn);
+  try {
+    const result = await callRunner<{ ok: boolean; error?: string; fingerprint?: string; snapshots: unknown[] }>(
+      "pbs_list_snapshots", { connection: conn }, PBS_LIST_TIMEOUT_MS,
+    );
+    return { ok: result.ok, error: result.error, fingerprint: result.fingerprint, snapshotCount: result.snapshots.length };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Connection failed" };
+  }
+}
+
 async function validatePbsConnectionOnRunner(conn: PbsConnectionParams) {
   try {
     return await callRunner<Omit<PbsConnectionParams, "secret">>("pbs_validate", { connection: conn });
@@ -10430,16 +10470,7 @@ app.post("/api/pbs/test", async (req, reply) => {
   requireAdmin(req, reply);
   const body = (req.body as Record<string, unknown> | undefined) ?? {};
   const existing = body.id !== undefined && body.id !== null && body.id !== "" ? getPbsRemote(String(body.id)) : undefined;
-  const conn = pbsConnectionFromBody(body, existing);
-  await validatePbsConnectionOnRunner(conn);
-  try {
-    const result = await callRunner<{ ok: boolean; error?: string; fingerprint?: string; snapshots: unknown[] }>(
-      "pbs_list_snapshots", { connection: conn }, PBS_LIST_TIMEOUT_MS,
-    );
-    return { ok: result.ok, error: result.error, fingerprint: result.fingerprint, snapshotCount: result.snapshots.length };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Connection failed" };
-  }
+  return testPbsConnection(pbsConnectionFromBody(body, existing));
 });
 
 app.post("/api/pbs/remotes", async (req, reply) => {
@@ -10496,27 +10527,31 @@ app.get("/api/pbs/remotes/:id/inspect", async (req, reply) => {
   return callRunner("pbs_inspect", { connection: pbsConnectionFromRow(remote), snapshot }, PBS_LIST_TIMEOUT_MS);
 });
 
-app.post("/api/pbs/remotes/:id/restore", async (req, reply) => {
-  requireAdmin(req, reply);
-  const remote = getPbsRemote((req.params as { id: string }).id);
-  const payload = (req.body as Record<string, unknown> | undefined) ?? {};
+type PbsRestorePlan = { kind: "vm" | "lxc"; snapshot: string; name: string; params: Record<string, unknown> };
+
+/**
+ * Restore request → runner params. Shared by the node route and VDM's internal
+ * route; storagePool is a pool NAME resolved to its path on this node.
+ */
+function buildPbsRestorePlan(conn: PbsConnectionParams, payload: Record<string, unknown>): PbsRestorePlan {
+  const fail = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
   const snapshot = String(payload.snapshot ?? "");
   const name = String(payload.name ?? "").trim();
   const kind = snapshot.startsWith("vm/") ? "vm" : snapshot.startsWith("ct/") ? "lxc" : null;
-  if (!kind) return reply.status(400).send({ error: "Invalid PBS snapshot" });
-  if (!name) return reply.status(400).send({ error: "Name is required" });
+  if (!kind) throw fail(400, "Invalid PBS snapshot");
+  if (!name) throw fail(400, "Name is required");
 
   let storagePoolPath: string | undefined;
   const poolName = String(payload.storagePool ?? "").trim();
   if (poolName) {
     const pool = db.prepare("SELECT path FROM storage_pools WHERE name = ?").get(poolName) as { path: string } | undefined;
-    if (!pool) return reply.status(404).send({ error: "Storage pool not found" });
+    if (!pool) throw fail(404, "Storage pool not found");
     storagePoolPath = pool.path;
   }
-  if (kind === "vm" && !storagePoolPath) return reply.status(400).send({ error: "Storage pool is required" });
+  if (kind === "vm" && !storagePoolPath) throw fail(400, "Storage pool is required");
 
   const params: Record<string, unknown> = {
-    connection: pbsConnectionFromRow(remote),
+    connection: conn,
     snapshot,
     name,
     storagePool: storagePoolPath,
@@ -10532,12 +10567,22 @@ app.post("/api/pbs/remotes/:id/restore", async (req, reply) => {
     params.rootArchive = payload.rootArchive;
     params.totalBytes = payload.totalBytes;
   }
+  return { kind, snapshot, name, params };
+}
 
-  const ip = getClientIp(req);
-  const task = createTask(req.session.userId!, req.session.username ?? "unknown", {
+/** Run a restore plan as a tracked task; ownerUserId null = no local owner (VDM-driven). */
+function startPbsRestore(
+  plan: PbsRestorePlan,
+  sourceLabel: string,
+  owner: { id: number; username: string },
+  ownerUserId: number | null,
+  ip: string,
+) {
+  const { kind, snapshot, name, params } = plan;
+  const task = createTask(owner.id, owner.username, {
     kind: kind === "vm" ? "vm-restore" : "lxc-restore",
     action: kind === "vm" ? "vm.pbs.restore" : "lxc.pbs.restore",
-    label: `Restore ${snapshot} from PBS ${remote.name}`,
+    label: `Restore ${snapshot} from PBS ${sourceLabel}`,
     resourceType: kind,
     resourceName: name,
     message: "Restoring from Proxmox Backup Server",
@@ -10551,16 +10596,24 @@ app.post("/api/pbs/remotes/:id/restore", async (req, reply) => {
       onBackupProgress(task.id),
     );
     if (kind === "vm") {
-      db.prepare("INSERT OR IGNORE INTO qemu_vms (vm_name, user_id, node_name) VALUES (?, ?, ?)").run(name, req.session.userId!, getLocalNodeName());
+      db.prepare("INSERT OR IGNORE INTO qemu_vms (vm_name, user_id, node_name) VALUES (?, ?, ?)").run(name, ownerUserId, getLocalNodeName());
     } else {
-      db.prepare("INSERT OR IGNORE INTO lxc_containers (container_name, user_id, description, node_name) VALUES (?, ?, ?, ?)").run(name, req.session.userId!, null, getLocalNodeName());
+      db.prepare("INSERT OR IGNORE INTO lxc_containers (container_name, user_id, description, node_name) VALUES (?, ?, ?, ?)").run(name, ownerUserId, null, getLocalNodeName());
     }
     // One activity-log line per caveat (TPM, passthrough, VLAN…) so they stay visible.
     for (const warning of result.warnings ?? []) update({ message: `Note: ${warning}` });
     update({ progressPercent: 100, message: kind === "vm" ? "VM restored from PBS" : "Container restored from PBS", detail: snapshot });
     return result;
   });
-  return sanitizeTask(task);
+  return task;
+}
+
+app.post("/api/pbs/remotes/:id/restore", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemote((req.params as { id: string }).id);
+  const plan = buildPbsRestorePlan(pbsConnectionFromRow(remote), (req.body as Record<string, unknown> | undefined) ?? {});
+  const owner = { id: req.session.userId!, username: req.session.username ?? "unknown" };
+  return sanitizeTask(startPbsRestore(plan, remote.name, owner, req.session.userId!, getClientIp(req)));
 });
 
 // ── Backups to PBS (on demand + scheduled jobs) ────────────────────────────
@@ -10569,27 +10622,30 @@ type PbsKeep = { keepLast?: number; keepDaily?: number; keepWeekly?: number; kee
 
 const pbsBackupsInFlight = new Set<string>();
 
+type PbsBackupTarget = { conn: PbsConnectionParams; label: string; detail: string };
+
 /**
- * Back one local guest up to a PBS remote as a tracked task. Resolves with the
- * final task status (failures are recorded on the task, not thrown).
+ * Back one local guest up to PBS as a tracked task. `task` is returned at once
+ * (VDM polls it); `done` resolves with the final status — failures are recorded
+ * on the task, not thrown.
  */
-async function runPbsGuestBackup(
-  remote: PbsRemoteRow,
+function startPbsGuestBackup(
+  target: PbsBackupTarget,
   kind: "vm" | "lxc",
   name: string,
   keep: PbsKeep,
   owner: { id: number; username: string },
   ip: string,
-): Promise<{ taskId: string; status: string; error?: string }> {
+): { task: BackgroundTask; done: Promise<{ taskId: string; status: string; error?: string }> } {
   const key = `${kind}/${name}`;
   const task = createTask(owner.id, owner.username, {
     kind: kind === "vm" ? "vm-backup" : "lxc-backup",
     action: kind === "vm" ? "vm.pbs.backup" : "lxc.pbs.backup",
-    label: `Back up ${kind === "vm" ? "VM" : "container"} ${name} to PBS ${remote.name}`,
+    label: `Back up ${kind === "vm" ? "VM" : "container"} ${name} to PBS ${target.label}`,
     resourceType: kind,
     resourceName: name,
     message: "Backing up to Proxmox Backup Server",
-    detail: `${remote.name}:${remote.datastore}`,
+    detail: target.detail,
   });
   const done = runTrackedTask(task, ip, async ({ update }) => {
     if (pbsBackupsInFlight.has(key)) throw new Error(`A PBS backup of ${name} is already running`);
@@ -10597,20 +10653,33 @@ async function runPbsGuestBackup(
     try {
       const result = await callRunner<{ ok: boolean; snapshot?: string; warnings?: string[] }>(
         kind === "vm" ? "qemu_backup_pbs" : "lxc_backup_pbs",
-        { connection: pbsConnectionFromRow(remote), name, keep },
+        { connection: target.conn, name, keep },
         BACKUP_TIMEOUT_MS,
         onBackupProgress(task.id),
       );
       for (const warning of result.warnings ?? []) update({ message: `Note: ${warning}` });
-      update({ progressPercent: 100, message: "Backed up to PBS", detail: result.snapshot ?? `${remote.name}:${remote.datastore}` });
+      update({ progressPercent: 100, message: "Backed up to PBS", detail: result.snapshot ?? target.detail });
       return result;
     } finally {
       pbsBackupsInFlight.delete(key);
     }
+  }).then(() => {
+    const final = getTaskRecord(task.id);
+    return { taskId: task.id, status: final?.status ?? "failed", error: final?.error };
   });
-  await done;
-  const final = getTaskRecord(task.id);
-  return { taskId: task.id, status: final?.status ?? "failed", error: final?.error };
+  return { task, done };
+}
+
+function runPbsGuestBackup(
+  remote: PbsRemoteRow,
+  kind: "vm" | "lxc",
+  name: string,
+  keep: PbsKeep,
+  owner: { id: number; username: string },
+  ip: string,
+): Promise<{ taskId: string; status: string; error?: string }> {
+  const target = { conn: pbsConnectionFromRow(remote), label: remote.name, detail: `${remote.name}:${remote.datastore}` };
+  return startPbsGuestBackup(target, kind, name, keep, owner, ip).done;
 }
 
 function readKeep(body: Record<string, unknown>): PbsKeep {
@@ -10632,6 +10701,84 @@ app.post("/api/pbs/remotes/:id/backup", async (req, reply) => {
   if (node && !node.isLocal) return reply.status(400).send({ error: `${name} runs on node ${node.name}: back it up from that node` });
   void runPbsGuestBackup(remote, kind, name, readKeep(body), { id: req.session.userId!, username: req.session.username ?? "unknown" }, getClientIp(req));
   return { ok: true };
+});
+
+// ── PBS for VDM (node token) ───────────────────────────────────────────────
+// VDM owns its PBS remotes and sends the connection with each call, so these
+// routes need no pbs_remotes row here. Bodies carry a secret: never log them.
+
+/** VDM user behind an internal call, for task owner names and the security log. */
+function internalPbsActor(req: FastifyRequest): string {
+  const raw = `${req.headers["x-auxinux-actor"] ?? ""}`.trim();
+  return /^[A-Za-z0-9._@-]{1,64}$/.test(raw) ? `vdm:${raw}` : "vdm";
+}
+
+app.get("/api/internal/pbs/status", async (req) => {
+  requireInternalNodeToken(req);
+  return callRunner("pbs_status");
+});
+
+app.post("/api/internal/pbs/install-client", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const actor = internalPbsActor(req);
+  try {
+    const result = await callRunner<{ installed: boolean; version: string }>("pbs_install_client", { repoUrl: getRepoUrl("proxmox") }, 15 * 60_000);
+    securityLog(db, { userId: null, username: actor, ip: getClientIp(req), action: "pbs.client.install", resourceType: "host", resourceName: getLocalNodeName(), result: "success", details: result.version });
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Installation failed";
+    securityLog(db, { userId: null, username: actor, ip: getClientIp(req), action: "pbs.client.install", resourceType: "host", resourceName: getLocalNodeName(), result: "error", details: message });
+    return reply.status(500).send({ error: message });
+  }
+});
+
+app.post("/api/internal/pbs/test", async (req) => {
+  requireInternalNodeToken(req);
+  const { connection } = parseInternalPbsBody(InternalPbsConnectionRequestSchema, req.body);
+  return testPbsConnection(pbsConnectionFromInternal(connection));
+});
+
+// Raw runner answer ({ ok, error, code, fingerprint, snapshots }): VDM decides
+// how to surface an untrusted certificate.
+app.post("/api/internal/pbs/snapshots", async (req) => {
+  requireInternalNodeToken(req);
+  const { connection } = parseInternalPbsBody(InternalPbsConnectionRequestSchema, req.body);
+  const conn = pbsConnectionFromInternal(connection);
+  await validatePbsConnectionOnRunner(conn);
+  return callRunner("pbs_list_snapshots", { connection: conn }, PBS_LIST_TIMEOUT_MS);
+});
+
+app.post("/api/internal/pbs/inspect", async (req) => {
+  requireInternalNodeToken(req);
+  const { connection, snapshot } = parseInternalPbsBody(InternalPbsInspectRequestSchema, req.body);
+  const conn = pbsConnectionFromInternal(connection);
+  await validatePbsConnectionOnRunner(conn);
+  return callRunner("pbs_inspect", { connection: conn, snapshot }, PBS_LIST_TIMEOUT_MS);
+});
+
+app.post("/api/internal/pbs/backup", async (req) => {
+  requireInternalNodeToken(req);
+  const body = parseInternalPbsBody(InternalPbsBackupRequestSchema, req.body);
+  const conn = pbsConnectionFromInternal(body.connection);
+  await validatePbsConnectionOnRunner(conn);
+  const label = body.remoteName || conn.server;
+  const { task } = startPbsGuestBackup(
+    { conn, label, detail: `${label}:${conn.datastore}` },
+    body.resourceType, body.name, body.keep,
+    { id: 0, username: internalPbsActor(req) }, getClientIp(req),
+  );
+  return sanitizeTask(task);
+});
+
+app.post("/api/internal/pbs/restore", async (req) => {
+  requireInternalNodeToken(req);
+  const body = parseInternalPbsBody(InternalPbsRestoreRequestSchema, req.body);
+  const conn = pbsConnectionFromInternal(body.connection);
+  await validatePbsConnectionOnRunner(conn);
+  const { connection: _connection, remoteName, ...payload } = body;
+  const plan = buildPbsRestorePlan(conn, payload);
+  const task = startPbsRestore(plan, remoteName || `${conn.server}:${conn.datastore}`, { id: 0, username: internalPbsActor(req) }, null, getClientIp(req));
+  return sanitizeTask(task);
 });
 
 type PbsJobRow = {

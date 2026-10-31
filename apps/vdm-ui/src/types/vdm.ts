@@ -3,7 +3,7 @@
 export type NodeStatus = "online" | "degraded" | "offline" | "unknown";
 export type ResourceState = "running" | "stopped" | "paused" | "suspended" | "crashed" | "unknown";
 export type TaskStatus = "pending" | "running" | "completed" | "completed-with-warning" | "failed" | "cancelled" | "recovery-required";
-export type TaskKind = "migrate" | "clone" | "backup" | "restore" | "action" | "storage" | "other";
+export type TaskKind = "migrate" | "clone" | "backup" | "restore" | "action" | "storage" | "pbs-backup" | "pbs-restore" | "pbs-client-install" | "other";
 export type StorageType = "nfs" | "smb" | "cifs" | "glusterfs" | "s3";
 
 export interface VdmUser {
@@ -309,4 +309,101 @@ export interface VdmBackupJob {
   compress: boolean;
   nextRunAt: string | null;
   lastRunAt: string | null;
+}
+
+// ── Proxmox Backup Server (datacenter-wide) ────────────────────────────────
+
+export interface VdmPbsRemote {
+  id: number;
+  name: string;
+  server: string;
+  port: number;
+  datastore: string;
+  namespace: string;
+  authId: string;
+  fingerprint: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VdmPbsClientStatus {
+  node: string;
+  displayName: string;
+  online: boolean;
+  supported: boolean;
+  installed: boolean;
+  version: string | null;
+  error?: string;
+}
+
+export interface VdmPbsSnapshotFile { filename: string; sizeBytes?: number; encrypted: boolean }
+
+export interface VdmPbsSnapshot {
+  ref: string;
+  type: "vm" | "ct";
+  id: string;
+  time: string;
+  sizeBytes?: number;
+  comment?: string;
+  protected: boolean;
+  encrypted: boolean;
+  files: VdmPbsSnapshotFile[];
+}
+
+export interface VdmPbsVmSpec {
+  name?: string;
+  vcpus: number;
+  memoryMb: number;
+  uefi: boolean;
+  secureBoot: boolean;
+  machine: string;
+  tpm?: string;
+  ostype?: string;
+  onboot: boolean;
+  smbiosUuid?: string;
+  disks: Array<{ key: string; sizeBytes?: number; inBackup: boolean }>;
+  nics: Array<{ key: string; model: string; mac?: string; bridge?: string }>;
+  warnings: string[];
+}
+
+export interface VdmPbsCtSpec {
+  hostname?: string;
+  ostype?: string;
+  cores?: number;
+  memoryMb: number;
+  unprivileged: boolean;
+  onboot: boolean;
+  rootfsSizeGb?: number;
+  nics: Array<{ key: string; name: string; bridge?: string; hwaddr?: string; ip?: string }>;
+  warnings: string[];
+}
+
+export type VdmPbsInspect =
+  | { type: "vm"; spec: VdmPbsVmSpec; suggestedName: string }
+  | { type: "ct"; spec: VdmPbsCtSpec; suggestedName: string };
+
+export interface VdmPbsJobTargets {
+  /** Kinds backed up on every enabled node (resolved at run time). */
+  all: Array<"vm" | "lxc">;
+  /** Explicit guests, `node:kind:name`. */
+  guests: string[];
+}
+
+export interface VdmPbsJob {
+  id: number;
+  name: string;
+  remoteId: number;
+  targets: VdmPbsJobTargets;
+  days: string;
+  time: string;
+  keepLast?: number;
+  keepDaily?: number;
+  keepWeekly?: number;
+  keepMonthly?: number;
+  enabled: boolean;
+  running: boolean;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+  lastMessage: string | null;
+  createdBy: string | null;
 }

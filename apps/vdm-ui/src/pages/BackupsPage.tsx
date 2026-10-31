@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useVdmAuth } from "@/hooks/useVdmAuth";
 import { useConfirm } from "@/hooks/useDialog";
+import PbsSection from "@/components/PbsSection";
 import type { VdmBackupItem, VdmBackupJob, VdmBackupRepository, VdmNode } from "@/types/vdm";
 
 function bytes(value: number) {
@@ -274,6 +275,8 @@ export default function BackupsPage() {
       </div>
 
       {(verify.error || restore.error) && <p className="text-sm text-vdm-danger">{(verify.error ?? restore.error)?.message}</p>}
+
+      {isAdmin && <PbsSection nodes={nodes.data ?? []} />}
 
       <RestoreModal
         item={restoreTarget}

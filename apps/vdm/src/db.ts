@@ -228,6 +228,44 @@ function migrate(db: Database.Database) {
       UNIQUE(resource_type, node_name, resource_name)
     );
 
+    -- Proxmox Backup Server remotes owned by VDM (the nodes get the connection
+    -- with each call). secret is encrypted with encryptSecret().
+    CREATE TABLE IF NOT EXISTS vdm_pbs_remotes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      server TEXT NOT NULL,
+      port INTEGER NOT NULL DEFAULT 8007,
+      datastore TEXT NOT NULL,
+      namespace TEXT,
+      auth_id TEXT NOT NULL,
+      secret TEXT NOT NULL,
+      fingerprint TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Scheduled datacenter-wide PBS backups. days = JS weekday digits
+    -- (0 = Sunday), time = VDM-local HH:MM. targets = JSON
+    -- {"all": ["vm"|"lxc"], "guests": ["node:kind:name", …]}.
+    CREATE TABLE IF NOT EXISTS vdm_pbs_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      remote_id INTEGER NOT NULL REFERENCES vdm_pbs_remotes(id) ON DELETE CASCADE,
+      targets TEXT NOT NULL,
+      days TEXT NOT NULL DEFAULT '0123456',
+      time TEXT NOT NULL DEFAULT '02:00',
+      keep_last INTEGER,
+      keep_daily INTEGER,
+      keep_weekly INTEGER,
+      keep_monthly INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT,
+      last_status TEXT,
+      last_message TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS vdm_audit_log (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT,

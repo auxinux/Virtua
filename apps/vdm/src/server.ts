@@ -6,7 +6,7 @@ import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import * as argon2 from "argon2";
-import { validatePassword } from "@auxinux/shared";
+import { validatePassword, VdmPbsRestoreRequestSchema, PBS_GUEST_NAME_RE, isPbsJobDue, type PbsKeepInput } from "@auxinux/shared";
 import * as path from "path";
 import * as fs from "fs";
 import { randomUUID } from "crypto";
@@ -15,11 +15,28 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "http";
 import type { Socket } from "net";
 import { getDb, getSetting, setSetting, DATA_DIR } from "./db.js";
-import { fetchNode, tryFetchNode, pingNode, type VdmNodeRow } from "./nodeClient.js";
+import { fetchNode, tryFetchNode, pingNode, NodeRequestError, type VdmNodeRow } from "./nodeClient.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { parseLogSettings, serializeLogSettings, shouldLog, recordVdmLog, purgeOldLogs, LOG_SETTINGS_KEY, type VdmLogLevel, type VdmLogCategory, type VdmLogSettings } from "./logs.js";
 import { reconcileStorageMounts } from "./storageReconcile.js";
 import { registerVdmDesktopApi } from "./desktop.js";
+import {
+  PBS_REMOTE_NAME_RE,
+  extractTaskNotes,
+  parsePbsJobBody,
+  parsePbsJobTargets,
+  pbsConnectionFromBody,
+  pbsConnectionFromStored,
+  readPbsKeep,
+  resolvePbsJobGuests,
+  scaleProgress,
+  summarizePbsJobRun,
+  type PbsGuestKind,
+  type PbsGuestRef,
+  type PbsJobValues,
+  type StoredPbsRemote,
+  type VdmPbsJobTargets,
+} from "./pbs.js";
 
 declare module "@fastify/session" {
   interface FastifySessionObject {
@@ -3022,6 +3039,566 @@ app.delete("/api/vdm/backup-jobs/:id", async (req, reply) => {
   if (!result.changes) return reply.status(404).send({ error: "Backup job not found" });
   return { ok: true };
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROXMOX BACKUP SERVER (datacenter-wide, beta)
+// VDM owns the PBS remotes; each node call carries the connection in its body.
+// Listing / inspection go through any online node with proxmox-backup-client;
+// backups run on the guest's node, restores on the chosen target node.
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface VdmPbsRemoteRow {
+  id: number;
+  name: string;
+  server: string;
+  port: number;
+  datastore: string;
+  namespace: string | null;
+  auth_id: string;
+  secret: string;
+  fingerprint: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface VdmPbsJobRow {
+  id: number;
+  name: string;
+  remote_id: number;
+  targets: string;
+  days: string;
+  time: string;
+  keep_last: number | null;
+  keep_daily: number | null;
+  keep_weekly: number | null;
+  keep_monthly: number | null;
+  enabled: number;
+  last_run_at: string | null;
+  last_status: string | null;
+  last_message: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+interface NodeTaskStatus {
+  status: string;
+  progressPercent?: number;
+  message?: string;
+  detail?: string;
+  error?: string;
+  activityLog?: string[];
+}
+
+interface PbsClientStatus {
+  node: string;
+  displayName: string;
+  online: boolean;
+  /** false when the node's Virtua predates the internal PBS routes */
+  supported: boolean;
+  installed: boolean;
+  version: string | null;
+  error?: string;
+}
+
+// The node runner gives a listing 3 minutes; backups/restores get the node's
+// own 12 h backup budget.
+const PBS_LIST_TIMEOUT_MS = 4 * 60_000;
+const PBS_TASK_TIMEOUT_MS = Math.max(LONG_OPERATION_TIMEOUT_MS, 12 * 60 * 60_000);
+const PBS_INSTALL_TIMEOUT_MS = 16 * 60_000;
+const PBS_CLIENT_STATUS_TTL_MS = 60_000;
+const PBS_POLL_MS = 3_000;
+/** How long a node may stay unreachable while VDM follows one of its tasks. */
+const PBS_POLL_GRACE_MS = 10 * 60_000;
+
+function pbsFail(statusCode: number, message: string): Error {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function mapPbsRemote(row: VdmPbsRemoteRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    server: row.server,
+    port: row.port,
+    datastore: row.datastore,
+    namespace: row.namespace ?? "",
+    authId: row.auth_id,
+    fingerprint: row.fingerprint ?? "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function getPbsRemoteRow(id: unknown): VdmPbsRemoteRow {
+  const row = db.prepare("SELECT * FROM vdm_pbs_remotes WHERE id = ?").get(Number(id)) as VdmPbsRemoteRow | undefined;
+  if (!row) throw pbsFail(404, "PBS remote not found");
+  return row;
+}
+
+function storedPbsRemote(row: VdmPbsRemoteRow): StoredPbsRemote {
+  return { ...row, secret: decryptSecret(row.secret) };
+}
+
+function pbsConnectionOf(row: VdmPbsRemoteRow) {
+  return pbsConnectionFromStored(storedPbsRemote(row));
+}
+
+function pbsActorHeaders(username: string | undefined): Record<string, string> {
+  return { "x-auxinux-actor": username ?? "vdm" };
+}
+
+const pbsClientStatusCache = new Map<string, { at: number; status: PbsClientStatus }>();
+
+async function getPbsClientStatus(node: VdmNodeRow, fresh = false): Promise<PbsClientStatus> {
+  const base = { node: node.name, displayName: node.display_name ?? node.name };
+  if (node.status !== "online") return { ...base, online: false, supported: false, installed: false, version: null, error: "Node offline" };
+  const cached = pbsClientStatusCache.get(node.name);
+  if (!fresh && cached && Date.now() - cached.at < PBS_CLIENT_STATUS_TTL_MS) return cached.status;
+  let status: PbsClientStatus;
+  try {
+    const r = await fetchNode<{ installed: boolean; version: string | null }>(node, "/api/internal/pbs/status", { timeoutMs: 15_000 });
+    status = { ...base, online: true, supported: true, installed: !!r.installed, version: r.version ?? null };
+  } catch (error) {
+    const tooOld = error instanceof NodeRequestError && error.statusCode === 404;
+    status = {
+      ...base, online: true, supported: !tooOld, installed: false, version: null,
+      error: tooOld ? "Virtua on this node is too old for PBS from VDM: update it" : error instanceof Error ? error.message : "Status unavailable",
+    };
+  }
+  pbsClientStatusCache.set(node.name, { at: Date.now(), status });
+  return status;
+}
+
+/** A node able to talk to PBS: the requested one, else the first online node with the client. */
+async function pickPbsClientNode(preferred?: string): Promise<VdmNodeRow> {
+  if (preferred) {
+    const node = getEnabledNode(preferred);
+    const status = await getPbsClientStatus(node);
+    if (!status.installed) throw pbsFail(409, `proxmox-backup-client is not available on ${node.name}${status.error ? ` (${status.error})` : ""}`);
+    return node;
+  }
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 AND status = 'online' ORDER BY name").all() as VdmNodeRow[];
+  for (const node of nodes) {
+    if ((await getPbsClientStatus(node)).installed) return node;
+  }
+  throw pbsFail(409, "No online node has proxmox-backup-client installed. Install it on a node in Backups → Proxmox Backup Server.");
+}
+
+async function ensurePbsClientOn(node: VdmNodeRow): Promise<void> {
+  const status = await getPbsClientStatus(node, true);
+  if (!status.installed) throw new Error(`proxmox-backup-client is not available on ${node.name}${status.error ? ` (${status.error})` : ""}`);
+}
+
+/**
+ * Mirror a node task into a VDM task until it ends. Progress is mapped into
+ * [from, to]; a node that stays unreachable past the grace period fails the
+ * VDM task (the node-side task may still finish on its own).
+ */
+async function followNodePbsTask(node: VdmNodeRow, nodeTaskId: string, vdmTaskId: string, from: number, to: number): Promise<{ detail?: string; notes: string[] }> {
+  const deadline = Date.now() + PBS_TASK_TIMEOUT_MS;
+  let unreachableSince: number | null = null;
+  while (Date.now() < deadline) {
+    let status: NodeTaskStatus;
+    try {
+      status = await fetchNode<NodeTaskStatus>(node, `/api/internal/tasks/${encodeURIComponent(nodeTaskId)}`, { timeoutMs: 15_000 });
+      unreachableSince = null;
+    } catch (error) {
+      if (error instanceof NodeRequestError && error.statusCode === 404) throw new Error(`Node ${node.name} no longer knows task ${nodeTaskId} (node restarted?)`);
+      unreachableSince ??= Date.now();
+      if (Date.now() - unreachableSince > PBS_POLL_GRACE_MS) throw new Error(`Node ${node.name} unreachable for ${PBS_POLL_GRACE_MS / 60_000} min: ${error instanceof Error ? error.message : "network error"}`);
+      await new Promise((r) => setTimeout(r, PBS_POLL_MS));
+      continue;
+    }
+    if (status.status === "completed") return { detail: status.detail, notes: extractTaskNotes(status.activityLog) };
+    if (status.status === "failed") throw new Error(status.error || status.message || `Task failed on ${node.name}`);
+    updateTask(vdmTaskId, "running", scaleProgress(status.progressPercent, from, to), status.message ?? `Running on ${node.name}`);
+    await new Promise((r) => setTimeout(r, PBS_POLL_MS));
+  }
+  throw new Error(`Timed out following task ${nodeTaskId} on ${node.name}`);
+}
+
+/** Run a PBS backup inside an existing VDM task; never throws (the task records failures). */
+async function runVdmPbsBackup(
+  taskId: string,
+  remote: VdmPbsRemoteRow,
+  node: VdmNodeRow,
+  kind: PbsGuestKind,
+  name: string,
+  keep: PbsKeepInput,
+  actor: string | undefined,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    updateTask(taskId, "running", 3, `Checking proxmox-backup-client on ${node.name}...`);
+    await ensurePbsClientOn(node);
+    updateTask(taskId, "running", 5, "Starting backup on node...");
+    const nodeTask = await fetchNode<{ id: string }>(node, "/api/internal/pbs/backup", {
+      method: "POST",
+      timeoutMs: 60_000,
+      headers: pbsActorHeaders(actor),
+      body: JSON.stringify({ connection: pbsConnectionOf(remote), remoteName: remote.name, resourceType: kind, name, keep }),
+    });
+    const result = await followNodePbsTask(node, nodeTask.id, taskId, 5, 99);
+    updateTask(taskId, "completed", 100, "Backed up to PBS", undefined, {
+      remote: remote.name, node: node.name, snapshot: result.detail, warnings: result.notes, nodeTaskId: nodeTask.id,
+    });
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "PBS backup failed";
+    updateTask(taskId, "failed", 0, undefined, message);
+    return { ok: false, error: message };
+  }
+}
+
+function createPbsBackupTask(remote: VdmPbsRemoteRow, node: VdmNodeRow, kind: PbsGuestKind, name: string, createdBy: string | undefined) {
+  return createTask({
+    kind: "pbs-backup",
+    label: `Back up ${kind === "vm" ? "VM" : "LXC"} ${name} to PBS ${remote.name}`,
+    sourceNode: node.name,
+    resourceType: kind,
+    resourceName: name,
+    createdBy,
+  });
+}
+
+// ── Client status / install ────────────────────────────────────────────────
+
+app.get("/api/vdm/pbs/nodes", async (req, reply) => {
+  requireAdmin(req, reply);
+  const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name").all() as VdmNodeRow[];
+  const fresh = (req.query as { refresh?: string }).refresh === "1";
+  return Promise.all(nodes.map((node) => getPbsClientStatus(node, fresh)));
+});
+
+app.post("/api/vdm/pbs/nodes/:node/install-client", async (req, reply) => {
+  requireAdmin(req, reply);
+  const node = getEnabledNode((req.params as { node: string }).node);
+  const task = createTask({ kind: "pbs-client-install", label: `Install proxmox-backup-client on ${node.name}`, targetNode: node.name, createdBy: req.session.username });
+  const actor = req.session.username;
+  void (async () => {
+    try {
+      updateTask(task.id, "running", 10, "Installing proxmox-backup-client (apt)...");
+      const result = await fetchNode<{ installed: boolean; version: string }>(node, "/api/internal/pbs/install-client", {
+        method: "POST", timeoutMs: PBS_INSTALL_TIMEOUT_MS, headers: pbsActorHeaders(actor), body: JSON.stringify({}),
+      });
+      updateTask(task.id, "completed", 100, `proxmox-backup-client ${result.version} installed`, undefined, result);
+    } catch (error) {
+      updateTask(task.id, "failed", 0, undefined, error instanceof Error ? error.message : "Installation failed");
+    } finally {
+      pbsClientStatusCache.delete(node.name);
+    }
+  })();
+  return reply.status(202).send(mapTaskRow(task));
+});
+
+// ── Remotes ────────────────────────────────────────────────────────────────
+
+app.get("/api/vdm/pbs/remotes", async (req, reply) => {
+  requireAdmin(req, reply);
+  return (db.prepare("SELECT * FROM vdm_pbs_remotes ORDER BY name").all() as VdmPbsRemoteRow[]).map(mapPbsRemote);
+});
+
+app.post("/api/vdm/pbs/test", async (req, reply) => {
+  requireAdmin(req, reply);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const existing = body.id !== undefined && body.id !== null && body.id !== "" ? storedPbsRemote(getPbsRemoteRow(body.id)) : undefined;
+  const connection = pbsConnectionFromBody(body, existing);
+  const node = await pickPbsClientNode(typeof body.node === "string" && body.node ? body.node : undefined);
+  const result = await fetchNode<{ ok: boolean; error?: string; fingerprint?: string; snapshotCount?: number }>(node, "/api/internal/pbs/test", {
+    method: "POST", timeoutMs: PBS_LIST_TIMEOUT_MS, body: JSON.stringify({ connection }),
+  });
+  return { ...result, node: node.name };
+});
+
+app.post("/api/vdm/pbs/remotes", async (req, reply) => {
+  requireAdmin(req, reply);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const name = String(body.name ?? "").trim();
+  if (!PBS_REMOTE_NAME_RE.test(name)) return reply.status(400).send({ error: "Invalid remote name" });
+  const conn = pbsConnectionFromBody(body);
+  if (db.prepare("SELECT 1 FROM vdm_pbs_remotes WHERE name = ?").get(name)) return reply.status(409).send({ error: "A PBS remote with this name already exists" });
+  const result = db.prepare(`
+    INSERT INTO vdm_pbs_remotes (name, server, port, datastore, namespace, auth_id, secret, fingerprint)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, conn.server, conn.port, conn.datastore, conn.namespace ?? null, conn.authId, encryptSecret(conn.secret), conn.fingerprint ?? null);
+  recordVdmLog(db, "info", "vdm", "backup", `PBS remote ${name} added (${conn.authId}@${conn.server}:${conn.datastore}) by ${req.session.username ?? "?"}`);
+  return reply.status(201).send(mapPbsRemote(getPbsRemoteRow(result.lastInsertRowid)));
+});
+
+app.put("/api/vdm/pbs/remotes/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsRemoteRow((req.params as { id: string }).id);
+  const conn = pbsConnectionFromBody((req.body as Record<string, unknown> | undefined) ?? {}, storedPbsRemote(row));
+  db.prepare(`
+    UPDATE vdm_pbs_remotes SET server = ?, port = ?, datastore = ?, namespace = ?, auth_id = ?, secret = ?, fingerprint = ?, updated_at = datetime('now') WHERE id = ?
+  `).run(conn.server, conn.port, conn.datastore, conn.namespace ?? null, conn.authId, encryptSecret(conn.secret), conn.fingerprint ?? null, row.id);
+  recordVdmLog(db, "info", "vdm", "backup", `PBS remote ${row.name} updated by ${req.session.username ?? "?"}`);
+  return mapPbsRemote(getPbsRemoteRow(row.id));
+});
+
+// Pin the certificate fingerprint a failed test/listing reported (self-signed PBS).
+app.post("/api/vdm/pbs/remotes/:id/trust-fingerprint", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsRemoteRow((req.params as { id: string }).id);
+  const fingerprint = String(((req.body ?? {}) as { fingerprint?: unknown }).fingerprint ?? "").trim();
+  if (!fingerprint) return reply.status(400).send({ error: "fingerprint is required" });
+  const conn = pbsConnectionFromBody({ fingerprint }, storedPbsRemote(row));
+  db.prepare("UPDATE vdm_pbs_remotes SET fingerprint = ?, updated_at = datetime('now') WHERE id = ?").run(conn.fingerprint ?? null, row.id);
+  recordVdmLog(db, "info", "vdm", "backup", `PBS remote ${row.name}: certificate ${conn.fingerprint} trusted by ${req.session.username ?? "?"}`);
+  return mapPbsRemote(getPbsRemoteRow(row.id));
+});
+
+app.delete("/api/vdm/pbs/remotes/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsRemoteRow((req.params as { id: string }).id);
+  db.prepare("DELETE FROM vdm_pbs_remotes WHERE id = ?").run(row.id);
+  recordVdmLog(db, "info", "vdm", "backup", `PBS remote ${row.name} removed by ${req.session.username ?? "?"}`);
+  return { ok: true };
+});
+
+// ── Snapshots / inspect ────────────────────────────────────────────────────
+
+app.get("/api/vdm/pbs/remotes/:id/snapshots", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsRemoteRow((req.params as { id: string }).id);
+  const node = await pickPbsClientNode((req.query as { node?: string }).node || undefined);
+  const result = await fetchNode<{ ok: boolean; error?: string; code?: string; fingerprint?: string; snapshots: unknown[] }>(node, "/api/internal/pbs/snapshots", {
+    method: "POST", timeoutMs: PBS_LIST_TIMEOUT_MS, body: JSON.stringify({ connection: pbsConnectionOf(row) }),
+  });
+  if (!result.ok) return reply.status(502).send({ error: result.error, code: result.code, fingerprint: result.fingerprint, node: node.name });
+  return { node: node.name, snapshots: result.snapshots };
+});
+
+app.get("/api/vdm/pbs/remotes/:id/inspect", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsRemoteRow((req.params as { id: string }).id);
+  const { snapshot, node: preferred } = req.query as { snapshot?: string; node?: string };
+  if (!snapshot) return reply.status(400).send({ error: "snapshot is required" });
+  const node = await pickPbsClientNode(preferred || undefined);
+  return fetchNode(node, "/api/internal/pbs/inspect", {
+    method: "POST", timeoutMs: PBS_LIST_TIMEOUT_MS, body: JSON.stringify({ connection: pbsConnectionOf(row), snapshot }),
+  });
+});
+
+// ── Backup / restore ───────────────────────────────────────────────────────
+
+app.post("/api/vdm/pbs/remotes/:id/backup", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemoteRow((req.params as { id: string }).id);
+  const body = (req.body as Record<string, unknown> | undefined) ?? {};
+  const kind = body.resourceType === "vm" || body.resourceType === "lxc" ? body.resourceType : null;
+  const name = String(body.name ?? "").trim();
+  if (!kind || !PBS_GUEST_NAME_RE.test(name)) return reply.status(400).send({ error: "resourceType (vm|lxc) and a valid name are required" });
+  const node = getEnabledNode(String(body.node ?? ""));
+  const keep = readPbsKeep(body);
+  const task = createPbsBackupTask(remote, node, kind, name, req.session.username);
+  void runVdmPbsBackup(task.id, remote, node, kind, name, keep, req.session.username);
+  return reply.status(202).send(mapTaskRow(task));
+});
+
+app.post("/api/vdm/pbs/remotes/:id/restore", async (req, reply) => {
+  requireAdmin(req, reply);
+  const remote = getPbsRemoteRow((req.params as { id: string }).id);
+  const parsed = VdmPbsRestoreRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const { targetNode: targetName, ...restore } = parsed.data;
+  const kind: PbsGuestKind | null = restore.snapshot.startsWith("vm/") ? "vm" : restore.snapshot.startsWith("ct/") ? "lxc" : null;
+  if (!kind) return reply.status(400).send({ error: "Invalid PBS snapshot" });
+  if (!PBS_GUEST_NAME_RE.test(restore.name)) return reply.status(400).send({ error: "Invalid restore name" });
+  if (kind === "vm" && !restore.storagePool) return reply.status(400).send({ error: "Storage pool is required" });
+  const node = getEnabledNode(targetName);
+  const task = createTask({
+    kind: "pbs-restore",
+    label: `Restore ${restore.snapshot} from PBS ${remote.name} on ${node.name}`,
+    targetNode: node.name,
+    resourceType: kind,
+    resourceName: restore.name,
+    createdBy: req.session.username,
+  });
+  const actor = req.session.username;
+  void (async () => {
+    try {
+      updateTask(task.id, "running", 3, `Checking proxmox-backup-client on ${node.name}...`);
+      await ensurePbsClientOn(node);
+      updateTask(task.id, "running", 5, "Starting restore on node...");
+      const nodeTask = await fetchNode<{ id: string }>(node, "/api/internal/pbs/restore", {
+        method: "POST",
+        timeoutMs: 60_000,
+        headers: pbsActorHeaders(actor),
+        body: JSON.stringify({ ...restore, connection: pbsConnectionOf(remote), remoteName: remote.name }),
+      });
+      const result = await followNodePbsTask(node, nodeTask.id, task.id, 5, 95);
+      updateTask(task.id, "running", 97, "Validating restored resource...");
+      await validateRestoredResource(node, kind, restore.name);
+      updateTask(task.id, "completed", 100, kind === "vm" ? "VM restored from PBS" : "Container restored from PBS", undefined, {
+        remote: remote.name, snapshot: restore.snapshot, node: node.name, name: restore.name, warnings: result.notes, nodeTaskId: nodeTask.id,
+      });
+    } catch (error) {
+      updateTask(task.id, "failed", 0, undefined, error instanceof Error ? error.message : "PBS restore failed");
+    }
+  })();
+  return reply.status(202).send(mapTaskRow(task));
+});
+
+// ── Scheduled jobs ─────────────────────────────────────────────────────────
+
+function mapPbsJob(row: VdmPbsJobRow) {
+  let targets: VdmPbsJobTargets = { all: [], guests: [] };
+  try { targets = JSON.parse(row.targets) as VdmPbsJobTargets; } catch { /* corrupt row: show empty */ }
+  return {
+    id: row.id,
+    name: row.name,
+    remoteId: row.remote_id,
+    targets,
+    days: row.days,
+    time: row.time,
+    keepLast: row.keep_last ?? undefined,
+    keepDaily: row.keep_daily ?? undefined,
+    keepWeekly: row.keep_weekly ?? undefined,
+    keepMonthly: row.keep_monthly ?? undefined,
+    enabled: !!row.enabled,
+    running: vdmPbsJobsRunning.has(row.id),
+    lastRunAt: row.last_run_at,
+    lastStatus: row.last_status,
+    lastMessage: row.last_message,
+    createdBy: row.created_by,
+  };
+}
+
+function getPbsJobRow(id: unknown): VdmPbsJobRow {
+  const row = db.prepare("SELECT * FROM vdm_pbs_jobs WHERE id = ?").get(Number(id)) as VdmPbsJobRow | undefined;
+  if (!row) throw pbsFail(404, "Job not found");
+  return row;
+}
+
+function pbsJobValues(body: unknown): PbsJobValues {
+  const v = parsePbsJobBody((body ?? {}) as Record<string, unknown>);
+  getPbsRemoteRow(v.remoteId);
+  return v;
+}
+
+const vdmPbsJobsRunning = new Set<number>();
+
+/** Guests a job covers right now; enabled nodes that cannot be listed are reported as skipped. */
+async function resolveVdmPbsJobGuests(targets: VdmPbsJobTargets): Promise<{ guests: PbsGuestRef[]; skippedNodes: string[] }> {
+  const inventory: PbsGuestRef[] = [];
+  const skippedNodes: string[] = [];
+  if (targets.all.length > 0) {
+    const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name").all() as VdmNodeRow[];
+    for (const node of nodes) {
+      if (node.status !== "online") { skippedNodes.push(node.name); continue; }
+      try {
+        for (const kind of targets.all) {
+          const list = await fetchNode<Array<{ name?: unknown }>>(node, kind === "vm" ? "/api/internal/vms" : "/api/internal/lxc", { timeoutMs: 30_000 });
+          for (const g of list) if (typeof g.name === "string" && PBS_GUEST_NAME_RE.test(g.name)) inventory.push({ node: node.name, kind, name: g.name });
+        }
+      } catch {
+        skippedNodes.push(node.name);
+      }
+    }
+  }
+  return { guests: resolvePbsJobGuests(targets, inventory), skippedNodes };
+}
+
+async function runVdmPbsJob(job: VdmPbsJobRow, actor: string): Promise<void> {
+  if (vdmPbsJobsRunning.has(job.id)) return;
+  vdmPbsJobsRunning.add(job.id);
+  db.prepare("UPDATE vdm_pbs_jobs SET last_run_at = ?, last_status = 'running', last_message = NULL WHERE id = ?").run(new Date().toISOString(), job.id);
+  try {
+    const remote = getPbsRemoteRow(job.remote_id);
+    const targets = parsePbsJobTargets(JSON.parse(job.targets));
+    const keep: PbsKeepInput = {
+      keepLast: job.keep_last ?? undefined,
+      keepDaily: job.keep_daily ?? undefined,
+      keepWeekly: job.keep_weekly ?? undefined,
+      keepMonthly: job.keep_monthly ?? undefined,
+    };
+    const { guests, skippedNodes } = await resolveVdmPbsJobGuests(targets);
+    const failed: string[] = [];
+    // One guest at a time across the whole datacenter: parallel full-image
+    // reads would saturate disks and the PBS ingest.
+    for (const g of guests) {
+      const label = `${g.node}/${g.name}`;
+      const node = getNode(g.node);
+      if (!node || !node.enabled) { failed.push(`${label}: node not found or disabled`); continue; }
+      let task: VdmTaskRow;
+      try {
+        task = createPbsBackupTask(remote, node, g.kind, g.name, actor);
+      } catch (error) {
+        failed.push(`${label}: ${error instanceof Error ? error.message : "could not start"}`);
+        continue;
+      }
+      const r = await runVdmPbsBackup(task.id, remote, node, g.kind, g.name, keep, actor);
+      if (!r.ok) failed.push(`${label}: ${r.error ?? "failed"}`);
+    }
+    const summary = summarizePbsJobRun(guests.length, failed, skippedNodes);
+    db.prepare("UPDATE vdm_pbs_jobs SET last_status = ?, last_message = ? WHERE id = ?").run(summary.status, summary.message, job.id);
+    recordVdmLog(db, summary.status === "ok" ? "info" : summary.status === "partial" ? "warn" : "error", "vdm", "backup", `PBS job ${job.name}: ${summary.message}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Job failed";
+    db.prepare("UPDATE vdm_pbs_jobs SET last_status = 'failed', last_message = ? WHERE id = ?").run(message.slice(0, 2000), job.id);
+    recordVdmLog(db, "error", "vdm", "backup", `PBS job ${job.name}: ${message}`);
+  } finally {
+    vdmPbsJobsRunning.delete(job.id);
+  }
+}
+
+app.get("/api/vdm/pbs/jobs", async (req, reply) => {
+  requireAdmin(req, reply);
+  return (db.prepare("SELECT * FROM vdm_pbs_jobs ORDER BY name").all() as VdmPbsJobRow[]).map(mapPbsJob);
+});
+
+app.post("/api/vdm/pbs/jobs", async (req, reply) => {
+  requireAdmin(req, reply);
+  const v = pbsJobValues(req.body);
+  const result = db.prepare(`
+    INSERT INTO vdm_pbs_jobs (name, remote_id, targets, days, time, keep_last, keep_daily, keep_weekly, keep_monthly, enabled, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(v.name, v.remoteId, JSON.stringify(v.targets), v.days, v.time, v.keep.keepLast ?? null, v.keep.keepDaily ?? null, v.keep.keepWeekly ?? null, v.keep.keepMonthly ?? null, v.enabled ? 1 : 0, req.session.username ?? null);
+  return reply.status(201).send(mapPbsJob(getPbsJobRow(result.lastInsertRowid)));
+});
+
+app.put("/api/vdm/pbs/jobs/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsJobRow((req.params as { id: string }).id);
+  const v = pbsJobValues(req.body);
+  db.prepare(`
+    UPDATE vdm_pbs_jobs SET name = ?, remote_id = ?, targets = ?, days = ?, time = ?, keep_last = ?, keep_daily = ?, keep_weekly = ?, keep_monthly = ?, enabled = ?
+    WHERE id = ?
+  `).run(v.name, v.remoteId, JSON.stringify(v.targets), v.days, v.time, v.keep.keepLast ?? null, v.keep.keepDaily ?? null, v.keep.keepWeekly ?? null, v.keep.keepMonthly ?? null, v.enabled ? 1 : 0, row.id);
+  return mapPbsJob(getPbsJobRow(row.id));
+});
+
+app.delete("/api/vdm/pbs/jobs/:id", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsJobRow((req.params as { id: string }).id);
+  db.prepare("DELETE FROM vdm_pbs_jobs WHERE id = ?").run(row.id);
+  return { ok: true };
+});
+
+app.post("/api/vdm/pbs/jobs/:id/run", async (req, reply) => {
+  requireAdmin(req, reply);
+  const row = getPbsJobRow((req.params as { id: string }).id);
+  if (vdmPbsJobsRunning.has(row.id)) return reply.status(409).send({ error: "This job is already running" });
+  void runVdmPbsJob(row, req.session.username ?? "admin");
+  return reply.status(202).send({ ok: true });
+});
+
+// A job cut short by a VDM restart must not stay "running" forever.
+db.prepare("UPDATE vdm_pbs_jobs SET last_status = 'failed', last_message = 'Interrupted (VDM restarted)' WHERE last_status = 'running'").run();
+
+// Scheduler tick (VDM-local time). A slot missed while VDM was down runs once
+// when it comes back the same day.
+setInterval(() => {
+  if (INSTANCE_ROLE !== "active") return;
+  try {
+    const now = new Date();
+    for (const job of db.prepare("SELECT * FROM vdm_pbs_jobs WHERE enabled = 1").all() as VdmPbsJobRow[]) {
+      if (isPbsJobDue(job, now) && !vdmPbsJobsRunning.has(job.id)) void runVdmPbsJob(job, "scheduler");
+    }
+  } catch (error) {
+    app.log.error({ err: error }, "[pbs-jobs] scheduler tick failed");
+  }
+}, 30_000).unref();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TASKS

@@ -32,6 +32,8 @@ const cases: Array<[string, ResourceMenuTarget, string, string]> = [
   ["VM clone", { kind: "vm", node: "n1", name: "vm1", displayName: "vm1", state: "stopped" }, "Clone…", /Clone VM/i.source],
   ["LXC migrate", { kind: "lxc", node: "n1", name: "ct1", displayName: "ct1", state: "stopped" }, "Migrate…", /Migrate/i.source],
   ["VM backup", { kind: "vm", node: "n1", name: "vm1", displayName: "vm1", state: "stopped" }, "Backup…", /Backup/i.source],
+  ["VM PBS backup", { kind: "vm", node: "n1", name: "vm1", displayName: "vm1", state: "running" }, "Back up to PBS…", /Proxmox Backup Server/i.source],
+  ["LXC PBS backup", { kind: "lxc", node: "n1", name: "ct1", displayName: "ct1", state: "stopped" }, "Back up to PBS…", /Proxmox Backup Server/i.source],
   ["Docker duplicate", { kind: "docker", node: "n1", name: "abc", displayName: "web", state: "running" }, "Duplicate…", /Duplicate/i.source],
 ];
 

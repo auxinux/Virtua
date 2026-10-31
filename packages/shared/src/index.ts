@@ -24,3 +24,4 @@ export * from "./schemas/desktop";
 export * from "./schemas/template";
 export * from "./desktop/inventory";
 export * from "./virtuaos";
+export * from "./schemas/pbs";

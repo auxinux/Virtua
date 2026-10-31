@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import { ContextMenu, type ContextMenuEntry, type ContextMenuState } from "@/components/ui/ContextMenu";
 import { useConfirm, usePrompt } from "@/hooks/useDialog";
 import { MigrateModal, CloneModal, BackupModal, DockerTransferModal } from "@/components/TransferModals";
+import { PbsBackupModal } from "@/components/PbsBackupModal";
 import type { VdmNode, VdmSharedStorage, VdmTask } from "@/types/vdm";
 
 // ── Icons ───────────────────────────────────────────────────────────────────
@@ -57,6 +58,7 @@ export function ResourceContextMenu({ menu, onClose }: {
   const [showMigrate, setShowMigrate] = useState(false);
   const [showClone, setShowClone] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
+  const [showPbsBackup, setShowPbsBackup] = useState(false);
   const [showTransfer, setShowTransfer] = useState<"migrate" | "duplicate" | null>(null);
   // Remember the last target resource so modals (migrate/clone/backup/transfer)
   // stay mounted after the context menu itself closes. The menu closes on
@@ -70,6 +72,7 @@ export function ResourceContextMenu({ menu, onClose }: {
     setShowMigrate(false);
     setShowClone(false);
     setShowBackup(false);
+    setShowPbsBackup(false);
     setShowTransfer(null);
   }
 
@@ -147,6 +150,7 @@ export function ResourceContextMenu({ menu, onClose }: {
     if (r.kind === "vm") entries.push({ label: "Clone…", icon: ICONS.clone, onClick: () => setShowClone(true) });
     entries.push({ label: "Migrate…", icon: ICONS.migrate, onClick: () => setShowMigrate(true) });
     entries.push({ label: "Backup…", icon: ICONS.backup, onClick: () => setShowBackup(true) });
+    entries.push({ label: "Back up to PBS…", icon: ICONS.backup, onClick: () => setShowPbsBackup(true) });
   } else {
     entries.push({ divider: true, label: "", onClick: () => {} });
     entries.push({ label: "Duplicate…", icon: ICONS.clone, onClick: () => setShowTransfer("duplicate") });
@@ -176,6 +180,10 @@ export function ResourceContextMenu({ menu, onClose }: {
       {showBackup && r.kind !== "docker" && (
         <BackupModal open onClose={() => setShowBackup(false)} resourceName={r.displayName} storages={storagesQuery.data ?? []}
           onSubmit={(s) => backupMut.mutate(s)} />
+      )}
+      {showPbsBackup && r.kind !== "docker" && (
+        <PbsBackupModal open onClose={() => setShowPbsBackup(false)} kind={r.kind} node={r.node} name={r.name}
+          onStarted={() => navigate("/tasks")} />
       )}
       {showTransfer && r.kind === "docker" && (
         <DockerTransferModal open onClose={() => setShowTransfer(null)} mode={showTransfer} currentName={r.displayName} sourceNode={r.node}
