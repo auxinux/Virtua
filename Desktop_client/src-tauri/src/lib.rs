@@ -4355,6 +4355,7 @@ pub fn run() {
             load_desktop_setting,
             clear_desktop_setting,
             runtime_platform,
+            log_ui_error,
             appearance::desktop_appearance,
             local_host_metrics,
             local_qemu_diagnostics,
@@ -4402,6 +4403,28 @@ pub fn run() {
             // On Windows this is almost always a missing WebView2 runtime.
             panic!("AuxiNux Virtua Desktop n'a pas pu demarrer: {error}");
         });
+}
+
+/// Interface errors (a page that crashed, an unhandled rejection) written to
+/// `Logs/interface.log`, so they can be read after the fact: the error screen
+/// alone was lost as soon as the user pressed "Recharger".
+fn append_ui_log(dir: &Path, message: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join("interface.log");
+    if fs::metadata(&path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
+        let _ = fs::rename(&path, dir.join("interface.log.1"));
+    }
+    let message: String = message.chars().take(8000).collect();
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
+    writeln!(file, "=== {} · {} {}\n{}\n", now_string(), env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), message.trim_end())
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+#[tauri::command]
+fn log_ui_error(message: String) -> Result<String, String> {
+    let dir = local_state_dir()?.join("Logs");
+    append_ui_log(&dir, &message).map(|path| path.to_string_lossy().to_string())
 }
 
 /// Laptop screens (1366×768, 1280×800…) are smaller than the default window
@@ -4475,6 +4498,20 @@ mod local_mode_tests {
             lines.push(serde_json::to_string(&command_args(&command)).unwrap());
         }
         std::fs::write(out, lines.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn interface_errors_are_appended_and_rotated() {
+        let dir = std::env::temp_dir().join(format!("virtua-ui-log-{}", random_token()));
+        let path = append_ui_log(&dir, "TypeError: x is null\n at Page").unwrap();
+        append_ui_log(&dir, "second").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("TypeError: x is null") && text.contains("second"));
+        fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        append_ui_log(&dir, "after rotation").unwrap();
+        assert!(dir.join("interface.log.1").is_file());
+        assert!(fs::read_to_string(&path).unwrap().contains("after rotation"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

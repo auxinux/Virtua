@@ -6,7 +6,9 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { LanguageProvider } from "@/i18n";
 import "@/index.css";
 import { startTheme } from "@/theme";
+import { installGlobalErrorLog } from "@/api/uiLog";
 
+installGlobalErrorLog();
 startTheme();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

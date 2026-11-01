@@ -1,8 +1,10 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { reportUiError, uiLogPath } from "@/api/uiLog";
 
 interface State {
   error: Error | null;
   details: string | null;
+  copied: boolean;
 }
 
 /**
@@ -10,7 +12,7 @@ interface State {
  * indistinguishable from a crash. Keep the app usable and show what happened.
  */
 export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
-  state: State = { error: null, details: null };
+  state: State = { error: null, details: null, copied: false };
 
   static getDerivedStateFromError(error: Error): Partial<State> {
     return { error };
@@ -20,9 +22,36 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
     // Console output ends up in the WebView devtools and in the Tauri log.
     console.error("Virtua Desktop: erreur d'affichage", error, info.componentStack);
     this.setState({ details: info.componentStack ?? null });
+    void reportUiError("page", error, info.componentStack ?? "").then(() => this.forceUpdate());
   }
 
-  private reset = () => this.setState({ error: null, details: null });
+  private reset = () => this.setState({ error: null, details: null, copied: false });
+
+  private report() {
+    const { error, details } = this.state;
+    return [
+      `Virtua Desktop ${__APP_VERSION__} · ${window.location.hash || "#/"}`,
+      error ? `${error.name}: ${error.message}` : "",
+      error?.stack ?? "",
+      details ?? "",
+    ].filter(Boolean).join("\n");
+  }
+
+  private copy = async () => {
+    const text = this.report();
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API refused: the old way still works in WebKitGTK.
+      const area = document.createElement("textarea");
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    this.setState({ copied: true });
+  };
 
   private restart = () => {
     this.reset();
@@ -48,7 +77,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
           <div className="flex flex-wrap gap-2">
             <button className="virtua-button-primary" onClick={this.restart}>Recharger</button>
             <button className="virtua-button" onClick={this.reset}>Reessayer</button>
+            <button className="virtua-button" onClick={() => void this.copy()}>{this.state.copied ? "Erreur copiée" : "Copier l'erreur"}</button>
           </div>
+          {uiLogPath() ? <p className="text-xs text-virtua-muted">Enregistrée dans {uiLogPath()}</p> : null}
         </div>
       </div>
     );

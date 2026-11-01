@@ -419,6 +419,19 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
     )
 }
 
+/// `Windows11*.iso` / `Win11*.iso` of the depot listing.
+pub fn is_windows11_iso(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    (lower.starts_with("windows11") || lower.starts_with("win11")) && lower.ends_with(".iso")
+}
+
+/// Size announced by the server. reqwest's `content_length()` is the size of
+/// the *body*, which a HEAD response does not have: it reported 0 for every
+/// ISO of the depot, and quick create concluded there was none.
+pub fn header_length(response: &reqwest::blocking::Response) -> Option<u64> {
+    response.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.trim().parse().ok()
+}
+
 /// Windows 11 installer: one already in the ISO library, else the AuxiNux
 /// depot's (amd64). Microsoft offers no stable direct link to its ISOs.
 fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
@@ -442,13 +455,7 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
     if let Some((_, path)) = local.pop() {
         return Ok(path);
     }
-    if wants_arm {
-        return Err(format!(
-            "Microsoft ne publie pas de lien direct vers Windows 11 ARM64. Téléchargez l’ISO sur microsoft.com/software-download/windows11arm64, placez-la dans {} puis relancez la création rapide.",
-            config.iso_dir
-        ));
-    }
-    let base = repository_url("ISO", "amd64")?;
+    let base = repository_url("ISO", arch)?;
     let client = http_client(Duration::from_secs(60))?;
     let listing = client
         .get(&base)
@@ -460,14 +467,24 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
         .split("href=\"")
         .skip(1)
         .filter_map(|chunk| chunk.split('"').next())
-        .filter(|name| name.to_lowercase().starts_with("windows11") && name.to_lowercase().ends_with(".iso") && !name.contains('/'))
+        .filter(|name| is_windows11_iso(name) && !name.contains('/'))
         .filter_map(|name| {
-            let size = client.head(format!("{base}{name}")).send().ok()?.content_length()?;
+            let response = client.head(format!("{base}{name}")).send().ok()?;
+            let size = header_length(&response)?;
             big_enough(size).then(|| (size, name.to_string()))
         })
         .collect();
     candidates.sort();
-    let (size, name) = candidates.pop().ok_or("Aucune ISO Windows 11 disponible sur le dépôt AuxiNux")?;
+    let Some((size, name)) = candidates.pop() else {
+        return Err(if wants_arm {
+            format!(
+                "Aucune ISO Windows 11 ARM64 sur le dépôt AuxiNux ({base}). Microsoft ne publie pas de lien direct : téléchargez-la sur microsoft.com/software-download/windows11arm64 et placez-la dans {}, ou déposez-la dans TEMPLATES/ISO/ARM du dépôt.",
+                config.iso_dir
+            )
+        } else {
+            format!("Aucune ISO Windows 11 (plus de 3 Go) sur le dépôt AuxiNux ({base}).")
+        });
+    };
     let name = html_unescape(&name);
     let destination = PathBuf::from(&config.iso_dir).join(safe_download_name(&name)?);
     let free = sysinfo::Disks::new_with_refreshed_list()
@@ -683,6 +700,37 @@ mod tests {
     }
 
     #[test]
+    fn the_size_of_a_head_response_comes_from_its_header() {
+        // A HEAD answered like nginx does for the 8.4 GB ISO: big
+        // Content-Length, no body. content_length() said 0 here.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8376897536\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
+                .unwrap();
+        });
+        let response = http_client(Duration::from_secs(5))
+            .unwrap()
+            .head(format!("http://127.0.0.1:{port}/Windows11.iso"))
+            .send()
+            .unwrap();
+        assert_eq!(header_length(&response), Some(8_376_897_536));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn windows_isos_of_the_depot_are_recognised() {
+        assert!(is_windows11_iso("Windows11-FR_CA-25h2.iso"));
+        assert!(is_windows11_iso("Win11_25H2_FrenchCanadian_Arm64.iso"));
+        assert!(!is_windows11_iso("debian-13.5.0-amd64-netinst.iso"));
+        assert!(!is_windows11_iso("Windows11.iso.part"));
+    }
+
+    #[test]
     fn profiles_match_the_requested_sizes() {
         let w = profile("windows11").unwrap();
         assert_eq!((w.cpu, w.memory_mib, w.disk_gib), (4, 4096, 80));
@@ -789,3 +837,4 @@ mod tests {
         assert!(win.autoinstall.is_none() && win.iso_path.is_none());
     }
 }
+
