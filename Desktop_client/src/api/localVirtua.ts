@@ -373,6 +373,23 @@ export const localVirtua = {
     }
   },
 
+  /**
+   * Quick create: downloads the installer, creates an optimally configured VM
+   * and starts its unattended installation (account virtua / virtua).
+   */
+  async quickCreate(os: "windows11" | "debian13", name?: string) {
+    const label = os === "windows11" ? "Windows 11" : "Debian 13";
+    const taskId = pushTask({ label: `Création rapide ${label}`, target: name || label, status: "running", progress: 10 });
+    try {
+      const vm = await invoke<LocalVm>("local_quick_create", { os, name: name || null });
+      updateTask(taskId, { status: "completed", progress: 100 });
+      return mapLocalVm(vm);
+    } catch (error) {
+      updateTask(taskId, { status: "failed", progress: 100 });
+      throw new Error(error instanceof Error ? error.message : String(error));
+    }
+  },
+
   /** Path of virtio-win.iso in the ISO library, downloaded on first use. */
   async ensureVirtioDrivers(architecture: VmArchitecture) {
     const taskId = pushTask({ label: "Telechargement pilotes VirtIO", target: "virtio-win.iso", status: "running", progress: 20 });

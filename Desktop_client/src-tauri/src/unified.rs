@@ -361,6 +361,11 @@ fn password_entry(vm_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, &format!("unified-{}", safe_file_name(vm_id)?)).map_err(|e| e.to_string())
 }
 
+/// Store the Windows password of a VM (quick create knows it already).
+pub fn remember_password(vm_id: &str, password: &str) -> Result<(), String> {
+    password_entry(vm_id)?.set_password(password).map_err(|e| format!("Trousseau indisponible : {e}"))
+}
+
 fn load_password(vm_id: &str) -> Result<String, String> {
     password_entry(vm_id)?
         .get_password()

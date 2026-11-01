@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { QuickCreatePanel } from "@/components/QuickCreatePanel";
 import { Boxes, Container, Loader2, Monitor, Plus, Play, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -122,6 +123,7 @@ function CreateResourceDialog({
   hostArch,
   listCreateOptions = defaultListCreateOptions,
   createResource = defaultCreateResource,
+  quickCreate,
   onClose,
   onCreated,
 }: {
@@ -131,9 +133,11 @@ function CreateResourceDialog({
   hostArch?: string | null;
   listCreateOptions?: (type: ResourceKind) => Promise<DesktopCreateOptionsResponse>;
   createResource?: (payload: CreateResourcePayload) => Promise<unknown>;
+  quickCreate?: (os: "windows11" | "debian13", name?: string) => Promise<{ id: string }>;
   onClose: () => void;
   onCreated?: () => void;
 }) {
+  const navigate = useNavigate();
   const [form, setForm] = useState({
     type: defaultKind,
     name: "",
@@ -344,6 +348,18 @@ function CreateResourceDialog({
           </div>
           <button type="button" onClick={onClose} className="virtua-button">Fermer</button>
         </div>
+
+        {quickCreate && usageMode === "local" && form.type === "vm" ? (
+          <QuickCreatePanel
+            quickCreate={quickCreate}
+            onCreated={(resourceId) => {
+              onCreated?.();
+              onClose();
+              // Straight to the screen: the installation is running.
+              navigate(`/console/${encodeURIComponent(resourceId)}`);
+            }}
+          />
+        ) : null}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1 text-xs text-virtua-muted">
@@ -597,6 +613,7 @@ export function ResourcePage({
   hostArch,
   listCreateOptions,
   createResource,
+  quickCreate,
   runResourceAction = (resourceId, action) => virtuaClient.runAction(resourceId, action),
   onChanged,
 }: {
@@ -607,6 +624,7 @@ export function ResourcePage({
   hostArch?: string | null;
   listCreateOptions?: (type: ResourceKind) => Promise<DesktopCreateOptionsResponse>;
   createResource?: (payload: CreateResourcePayload) => Promise<unknown>;
+  quickCreate?: (os: "windows11" | "debian13", name?: string) => Promise<{ id: string }>;
   runResourceAction?: (resourceId: string, action: PowerAction) => Promise<unknown>;
   onChanged?: () => void | Promise<void>;
 }) {
@@ -744,6 +762,7 @@ export function ResourcePage({
           hostArch={hostArch}
           listCreateOptions={listCreateOptions}
           createResource={createResource}
+          quickCreate={quickCreate}
           onClose={() => setShowCreate(false)}
           onCreated={onChanged}
         />

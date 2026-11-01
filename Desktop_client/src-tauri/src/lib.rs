@@ -6,6 +6,7 @@ mod engines;
 mod firmware;
 use firmware::UefiFirmware;
 mod platform;
+mod quickcreate;
 mod unified;
 
 const KEYCHAIN_SERVICE: &str = "ca.auxinux.virtua.desktop";
@@ -344,6 +345,9 @@ struct LocalVm {
     /// the OS keychain, never in the inventory.
     #[serde(default)]
     unified_user: Option<String>,
+    /// Quick create: unattended installation still in progress.
+    #[serde(default)]
+    autoinstall: Option<quickcreate::AutoInstall>,
     created_at: String,
     updated_at: String,
 }
@@ -1024,6 +1028,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
 
+    let mut restart: Vec<String> = vec![];
     for vm in &mut vms {
         if vm.pid.is_none() {
             vm.vnc_port = None;
@@ -1036,6 +1041,9 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
             continue;
         }
         let Some(&(cpu, memory_bytes, uptime)) = vm.pid.and_then(|pid| live.get(&pid)) else {
+            if quickcreate::finish_if_done(vm, true) {
+                restart.push(vm.id.clone());
+            }
             stop_local_vm_fields(vm);
             changed = true;
             continue;
@@ -1063,6 +1071,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
                         None
                     };
                     vm.qga_last_probe_at = Some(now);
+                    quickcreate::finish_if_done(vm, false);
                     changed = true;
                 }
             }
@@ -1070,6 +1079,16 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
                 vm.guest_agent_running = false;
                 vm.guest_ip = None;
                 vm.qga_last_probe_at = None;
+            }
+        }
+    }
+    // Debian quick create: the installer powered the VM off; it now boots
+    // from its disk, without the installer kernel.
+    for id in restart {
+        let others: Vec<LocalVm> = vms.iter().filter(|vm| vm.id != id).cloned().collect();
+        if let Some(vm) = vms.iter_mut().find(|vm| vm.id == id) {
+            if let Err(error) = start_local_vm(vm, &others) {
+                log_line(&format!("redemarrage apres installation de {}: {error}", vm.name));
             }
         }
     }
@@ -1571,8 +1590,15 @@ fn download_file_with_progress(
             .unwrap_or_default()
     ));
 
-    let mut response = http_client(Duration::from_secs(7200))?
-        .get(url)
+    // Resume an interrupted download (a Windows ISO is 8 GB): ask for the
+    // rest of the file; a server that ignores the range answers 200 and the
+    // download starts over.
+    let already = fs::metadata(&temp_destination).map(|m| m.len()).unwrap_or(0);
+    let mut request = http_client(Duration::from_secs(4 * 3600))?.get(url);
+    if already > 0 {
+        request = request.header("Range", format!("bytes={already}-"));
+    }
+    let mut response = request
         .send()
         .map_err(|err| format!("Telechargement impossible: {}", err))?;
 
@@ -1583,9 +1609,16 @@ fn download_file_with_progress(
         ));
     }
 
-    let total = response.content_length();
-    let mut file = fs::File::create(&temp_destination).map_err(|err| err.to_string())?;
-    let mut received = 0_u64;
+    let resumed = already > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let offset = if resumed { already } else { 0 };
+    let total = response.content_length().map(|rest| rest + offset);
+    let mut file = if resumed {
+        fs::OpenOptions::new().append(true).open(&temp_destination)
+    } else {
+        fs::File::create(&temp_destination)
+    }
+    .map_err(|err| err.to_string())?;
+    let mut received = offset;
     let mut last_emit = 0_u64;
     let mut buffer = [0_u8; 1024 * 128];
 
@@ -2188,6 +2221,7 @@ fn import_template_archive(
         rdp_port: None,
         unified: false,
         unified_user: None,
+        autoinstall: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2692,6 +2726,7 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         rdp_port: None,
         unified: false,
         unified_user: None,
+        autoinstall: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -3458,6 +3493,15 @@ fn build_qemu_command(
     if plan.tuned {
         append_tuned_devices(&mut command, vm, plan);
     }
+    // Quick create (Debian): the installer is booted directly, with its preseed.
+    if let Some(auto) = &vm.autoinstall {
+        if let (Some(kernel), Some(initrd)) = (&auto.kernel, &auto.initrd) {
+            command.arg("-kernel").arg(kernel).arg("-initrd").arg(initrd);
+            if let Some(append) = &auto.append {
+                command.arg("-append").arg(append);
+            }
+        }
+    }
 
     if let Some(dir) = &ports.unattend_dir {
         validate_qemu_path(dir, "autounattend")?;
@@ -3684,7 +3728,8 @@ fn windows_unattend_xml(architecture: &str) -> String {
 /// installer mounted and the bypass left on.
 fn prepare_windows_unattend(vm: &LocalVm) -> Option<String> {
     let installer = vm.iso_path.as_deref().map(str::trim).unwrap_or("");
-    if vm.guest_os != "windows" || !vm.windows_setup_bypass || installer.is_empty() {
+    let quick = vm.autoinstall.as_ref().filter(|auto| auto.os == "windows11");
+    if vm.guest_os != "windows" || installer.is_empty() || (!vm.windows_setup_bypass && quick.is_none()) {
         return None;
     }
     let dir = local_state_dir()
@@ -3692,7 +3737,16 @@ fn prepare_windows_unattend(vm: &LocalVm) -> Option<String> {
         .join("Unattend")
         .join(safe_file_name(&vm.id).ok()?);
     fs::create_dir_all(&dir).ok()?;
-    fs::write(dir.join("autounattend.xml"), windows_unattend_xml(&vm.architecture)).ok()?;
+    let xml = match quick {
+        // Quick create: the whole installation, not just the hardware checks.
+        Some(auto) => quickcreate::windows_answer_file(
+            &vm.architecture,
+            auto.language.as_deref().unwrap_or("en-US"),
+            &quickcreate::host_name(&vm.name, 15),
+        ),
+        None => windows_unattend_xml(&vm.architecture),
+    };
+    fs::write(dir.join("autounattend.xml"), xml).ok()?;
     Some(dir.to_string_lossy().to_string())
 }
 
@@ -3905,7 +3959,8 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
     let secure_boot_active = ports.uefi.as_ref().is_some_and(|uefi| uefi.secure_boot);
     // A real TPM and real Secure Boot pass Windows 11's checks as on a PC: the
     // answer-file bypass is only a fallback for hosts that cannot emulate them.
-    if !(vm.tpm2 && swtpm.is_some() && secure_boot_active) {
+    let quick_windows = vm.autoinstall.as_ref().is_some_and(|auto| auto.os == "windows11");
+    if quick_windows || !(vm.tpm2 && swtpm.is_some() && secure_boot_active) {
         ports.unattend_dir = prepare_windows_unattend(vm);
     }
     if ports.unattend_dir.is_some() {
@@ -4339,6 +4394,7 @@ pub fn run() {
             unified::local_unified_launch,
             unified::local_unified_integrate,
             unified::local_unified_install_client,
+            quickcreate::local_quick_create,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
@@ -4895,6 +4951,7 @@ mod local_mode_tests {
         rdp_port: None,
         unified: false,
         unified_user: None,
+        autoinstall: None,
             created_at: "0".into(),
             updated_at: "0".into(),
         }

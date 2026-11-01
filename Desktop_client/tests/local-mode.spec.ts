@@ -65,6 +65,11 @@ async function localDesktop(page: Page, overrides: Overrides = {}) {
             vms: (options as any).unifiedVms ?? [],
           };
           case "local_unified_launch": return null;
+          case "local_quick_create": return {
+            id: "local-vm-quick", name: args.name ?? "Debian 13", architecture: "arm64", cpu: 2, memoryMib: 4096, diskGib: 60,
+            diskPath: "/test/disks/quick.qcow2", network: "user", guestOs: "other", state: "running", pid: 99,
+            createdAt: "0", updatedAt: "0",
+          };
           case "plugin:event|listen": return 1;
           default: return null;
         }
@@ -250,4 +255,18 @@ test("the theme follows AuxiNux Shell and survives a backend without appearance"
   // Light palette: darkened accent with readable text on it.
   const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--v-accent").trim());
   expect(accent).toBe("186 108 14");
+});
+
+test("quick create installs Debian 13 in one click and opens its console", async ({ page }) => {
+  await localDesktop(page);
+  await page.goto("/#/vms");
+  await page.getByRole("button", { name: /Nouveau|Nouvelle|Creer/i }).first().click();
+  await expect(page.getByRole("heading", { name: "Création rapide" })).toBeVisible();
+  await expect(page.getByText("4 vCPU · 4 Go RAM · 80 Go")).toBeVisible();
+  await page.getByLabel("Nom de la VM Debian 13").fill("Mon Debian");
+  await page.getByRole("button", { name: "Créer et installer" }).nth(1).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_quick_create").map((c: any) => c.args)))
+    .toEqual([{ os: "debian13", name: "Mon Debian" }]);
+  await expect(page).toHaveURL(/#\/console\/local-vm-quick$/);
 });
