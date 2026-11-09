@@ -18,6 +18,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   AppWindow,
+  FlaskConical,
 } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useConsolePrefs } from "@/consolePrefs";
@@ -43,6 +44,7 @@ const localNavItems = [
   { to: "/lxc", labelKey: "nav.lxc", icon: Container },
   { to: "/docker", labelKey: "nav.docker", icon: Boxes },
   { to: "/storage", labelKey: "nav.storage", icon: Database },
+  { to: "/disposable", labelKey: "nav.disposable", icon: FlaskConical },
   { to: "/unified", labelKey: "nav.unified", icon: AppWindow },
   { to: "/tasks", labelKey: "nav.tasks", icon: CheckCircle2 },
   { to: "/settings", labelKey: "nav.local_settings", icon: Settings },

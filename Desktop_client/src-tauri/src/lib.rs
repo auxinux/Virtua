@@ -1,5 +1,6 @@
 mod appearance;
 mod companion;
+mod disposable;
 mod containers;
 mod docker;
 mod engines;
@@ -92,6 +93,8 @@ struct LocalStorageInventory {
     disks: Vec<LocalStorageFile>,
     snapshots: Vec<LocalStorageFile>,
     exports: Vec<LocalStorageFile>,
+    /// Floppy images (≤ 2.88 MB) of the ISO library.
+    floppies: Vec<LocalStorageFile>,
     docker_images: Vec<LocalDockerImage>,
 }
 
@@ -348,6 +351,12 @@ struct LocalVm {
     /// Quick create: unattended installation still in progress.
     #[serde(default)]
     autoinstall: Option<quickcreate::AutoInstall>,
+    /// Disposable VM: copy-on-write overlay on a base (disposable.rs).
+    #[serde(default)]
+    disposable: Option<disposable::Disposable>,
+    /// Floppy image in drive A: (raw .img/.ima/.vfd).
+    #[serde(default)]
+    floppy_path: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -378,6 +387,8 @@ struct LocalUpdateVmPayload {
     name: Option<String>,
     image: Option<String>,
     driver_image: Option<String>,
+    /// Floppy image for drive A: ("" ejects it).
+    floppy_image: Option<String>,
     guest_os: Option<String>,
     windows_setup_bypass: Option<bool>,
     cpu: Option<u16>,
@@ -776,6 +787,63 @@ fn append_cdrom_args(
     Ok(())
 }
 
+/// Raw floppy images: up to 2.88 MB (ED); 1.2/1.44/1.68/1.72 MB formats too.
+const FLOPPY_MAX_BYTES: u64 = 2_949_120;
+
+/// Drive A:. q35 has no floppy controller of its own (`isa-fdc` on its LPC
+/// bridge); ARM64 `virt` has no ISA at all, so the image is a removable USB
+/// disk there. A floppy has no boot index: BIOS VMs boot it first only when
+/// no installer ISO is mounted (a DOS boot disk), otherwise it is just A:.
+fn append_floppy_args(command: &mut Command, architecture: &str, floppy: Option<&str>, iso: Option<&str>) -> Result<(), String> {
+    let Some(path) = floppy.map(str::trim).filter(|p| !p.is_empty()) else { return Ok(()) };
+    validate_qemu_path(path, "disquette")?;
+    command
+        .arg("-drive")
+        .arg(format!("if=none,id=virtua-fd0,format=raw,file={path}"));
+    if architecture == "arm64" {
+        command.arg("-device").arg("usb-storage,drive=virtua-fd0,removable=on");
+        return Ok(());
+    }
+    command.args(["-device", "isa-fdc,id=virtua-fdc", "-device", "floppy,drive=virtua-fd0,bus=virtua-fdc.0,unit=0"]);
+    if iso.map(str::trim).filter(|p| !p.is_empty()).is_none() {
+        command.args(["-boot", "order=ac,menu=on"]);
+    }
+    Ok(())
+}
+
+fn validate_floppy(path: &str) -> Result<(), String> {
+    let lower = path.to_lowercase();
+    if ![".img", ".ima", ".vfd", ".flp"].iter().any(|ext| lower.ends_with(ext)) {
+        return Err("Disquette : image .img, .ima, .vfd ou .flp attendue".into());
+    }
+    let size = fs::metadata(path).map_err(|_| format!("Disquette introuvable : {path}"))?.len();
+    if size == 0 || size > FLOPPY_MAX_BYTES {
+        return Err(format!("« {path} » n’est pas une image de disquette (2,88 Mo au plus)."));
+    }
+    Ok(())
+}
+
+/// A VM with the defaults of a new one (used by the disposable VMs).
+#[allow(clippy::too_many_arguments)]
+fn new_local_vm(
+    id: String,
+    name: String,
+    architecture: &str,
+    cpu: u16,
+    memory_mib: u32,
+    disk_gib: u32,
+    disk_path: String,
+    guest_os: &str,
+) -> LocalVm {
+    let timestamp = now_string();
+    let value = serde_json::json!({
+        "id": id, "name": name, "architecture": architecture, "cpu": cpu, "memoryMib": memory_mib,
+        "diskGib": disk_gib, "diskPath": disk_path, "guestOs": guest_os, "network": "user",
+        "state": "stopped", "createdAt": timestamp, "updatedAt": timestamp,
+    });
+    serde_json::from_value(value).expect("LocalVm defaults")
+}
+
 fn append_network_args(
     command: &mut Command,
     architecture: &str,
@@ -1029,6 +1097,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
         .unwrap_or(0);
 
     let mut restart: Vec<String> = vec![];
+    let mut make_base: Vec<(String, String)> = vec![];
     for vm in &mut vms {
         if vm.pid.is_none() {
             vm.vnc_port = None;
@@ -1041,8 +1110,10 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
             continue;
         }
         let Some(&(cpu, memory_bytes, uptime)) = vm.pid.and_then(|pid| live.get(&pid)) else {
-            if quickcreate::finish_if_done(vm, true) {
-                restart.push(vm.id.clone());
+            match quickcreate::finish_if_done(vm, true) {
+                quickcreate::InstallOutcome::Restart => restart.push(vm.id.clone()),
+                quickcreate::InstallOutcome::MakeBase(os) => make_base.push((vm.id.clone(), os)),
+                quickcreate::InstallOutcome::Nothing => {}
             }
             stop_local_vm_fields(vm);
             changed = true;
@@ -1071,7 +1142,8 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
                         None
                     };
                     vm.qga_last_probe_at = Some(now);
-                    quickcreate::finish_if_done(vm, false);
+                    // Windows bases ask for a clean shutdown here.
+                    let _ = quickcreate::finish_if_done(vm, false);
                     changed = true;
                 }
             }
@@ -1094,6 +1166,15 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
     }
     if changed {
         write_local_vms(&vms)?;
+    }
+    // A finished base build becomes a base off the refresh path: copying tens
+    // of GB must not hold the inventory (the copy takes the lock when done).
+    for (id, os) in make_base {
+        std::thread::spawn(move || {
+            if let Err(error) = disposable::base_from_vm(&id, Some(&os), true) {
+                log_line(&format!("base jetable {id}: {error}"));
+            }
+        });
     }
     Ok(vms)
 }
@@ -1959,15 +2040,19 @@ fn local_storage_inventory_blocking() -> Result<LocalStorageInventory, String> {
     ensure_storage_dirs(&config)?;
     let template_dir = template_cache_dir()?;
     fs::create_dir_all(&template_dir).map_err(|err| err.to_string())?;
+    let (floppies, iso): (Vec<_>, Vec<_>) = scan_files(&config.iso_dir, &[".iso", ".img", ".ima", ".vfd", ".flp"])
+        .into_iter()
+        .partition(|file| !file.name.to_lowercase().ends_with(".iso") && file.size <= FLOPPY_MAX_BYTES);
     Ok(LocalStorageInventory {
-        iso: scan_files(&config.iso_dir, &[".iso", ".img"]),
+        iso,
+        floppies,
         templates: scan_files(&template_dir.to_string_lossy(), &[".tar.gz", ".tgz"]),
         disks: scan_files(&config.disk_dir, &[".qcow2", ".img", ".raw"]),
         snapshots: scan_files(
             &config.snapshot_dir,
             &[".qcow2", ".img", ".raw", ".tar.gz", ".tgz"],
         ),
-        exports: scan_files(&config.export_dir, &[".tar.gz", ".tgz", ".iso", ".qcow2"]),
+        exports: scan_files(&config.export_dir, &[".tar.gz", ".tgz", ".iso", ".qcow2", ".vmtmp"]),
         docker_images: docker_images(),
     })
 }
@@ -2222,6 +2307,8 @@ fn import_template_archive(
         unified: false,
         unified_user: None,
         autoinstall: None,
+        disposable: None,
+        floppy_path: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2727,6 +2814,8 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         unified: false,
         unified_user: None,
         autoinstall: None,
+        disposable: None,
+        floppy_path: None,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2775,6 +2864,14 @@ fn local_update_vm_blocking(id: String, payload: LocalUpdateVmPayload) -> Result
     if let Some(image) = payload.driver_image {
         let image = image.trim().to_string();
         vm.driver_iso_path = if image.is_empty() { None } else { Some(image) };
+    }
+
+    if let Some(image) = payload.floppy_image {
+        let image = image.trim().to_string();
+        if !image.is_empty() {
+            validate_floppy(&image)?;
+        }
+        vm.floppy_path = if image.is_empty() { None } else { Some(image) };
     }
 
     if let Some(guest_os) = payload.guest_os {
@@ -3481,6 +3578,11 @@ fn build_qemu_command(
         vm.iso_path.as_deref(),
         vm.driver_iso_path.as_deref(),
     )?;
+    append_floppy_args(&mut command, &vm.architecture, vm.floppy_path.as_deref(), vm.iso_path.as_deref())?;
+    if vm.disposable.as_ref().is_some_and(|d| d.strict) {
+        // Strict sandbox: every write goes to a temporary file QEMU drops on exit.
+        command.arg("-snapshot");
+    }
     append_gpu_args(&mut command, &vm.architecture, &plan.gpu_model);
     append_network_args(
         &mut command,
@@ -4395,6 +4497,16 @@ pub fn run() {
             unified::local_unified_launch,
             unified::local_unified_integrate,
             unified::local_unified_install_client,
+            disposable::local_list_bases,
+            disposable::local_depot_bases,
+            disposable::local_download_base,
+            disposable::local_import_base_file,
+            disposable::local_export_base,
+            disposable::local_delete_base,
+            disposable::local_base_from_vm,
+            disposable::local_prepare_base,
+            disposable::local_launch_disposable,
+            disposable::local_disposable_action,
             quickcreate::local_quick_create,
         ])
         .run(tauri::generate_context!())
@@ -4512,6 +4624,50 @@ mod local_mode_tests {
         assert!(dir.join("interface.log.1").is_file());
         assert!(fs::read_to_string(&path).unwrap().contains("after rotation"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn floppies_get_a_controller_on_q35_and_usb_on_arm64() {
+        let mut cmd = Command::new("qemu");
+        append_floppy_args(&mut cmd, "amd64", Some("/f/dos.img"), None).unwrap();
+        let args = command_args(&cmd);
+        assert!(args.contains(&"if=none,id=virtua-fd0,format=raw,file=/f/dos.img".to_string()));
+        assert!(args.contains(&"isa-fdc,id=virtua-fdc".to_string()));
+        assert!(args.contains(&"floppy,drive=virtua-fd0,bus=virtua-fdc.0,unit=0".to_string()));
+        assert!(args.contains(&"order=ac,menu=on".to_string()));
+        // With an installer ISO the CD boots, the floppy is just drive A:.
+        let mut with_iso = Command::new("qemu");
+        append_floppy_args(&mut with_iso, "amd64", Some("/f/f6.img"), Some("/i/xp.iso")).unwrap();
+        assert!(!command_args(&with_iso).iter().any(|a| a.starts_with("order=")));
+        let mut arm = Command::new("qemu");
+        append_floppy_args(&mut arm, "arm64", Some("/f/d.img"), None).unwrap();
+        assert!(command_args(&arm).contains(&"usb-storage,drive=virtua-fd0,removable=on".to_string()));
+        assert!(append_floppy_args(&mut Command::new("q"), "amd64", Some("/a,b.img"), None).is_err());
+    }
+
+    #[test]
+    fn floppy_images_are_checked_by_extension_and_size() {
+        let dir = std::env::temp_dir().join(format!("virtua-fd-{}", random_token()));
+        fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("dos.img");
+        fs::write(&ok, vec![0u8; 1_474_560]).unwrap();
+        assert!(validate_floppy(&ok.to_string_lossy()).is_ok());
+        let big = dir.join("disk.img");
+        fs::write(&big, vec![0u8; 3_000_000]).unwrap();
+        assert!(validate_floppy(&big.to_string_lossy()).is_err());
+        assert!(validate_floppy(&dir.join("x.iso").to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_strict_disposable_writes_nothing_to_disk() {
+        let mut vm = sample_vm("amd64", "virtio");
+        let plan = launch_plans("amd64", "virtio").remove(0);
+        assert!(!command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap()).contains(&"-snapshot".to_string()));
+        vm.disposable = Some(disposable::Disposable { base_id: "b".into(), base_label: "B".into(), strict: true });
+        assert!(command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap()).contains(&"-snapshot".to_string()));
+        let fresh = new_local_vm("id".into(), "Jetable".into(), "arm64", 2, 4096, 60, "/d/j.qcow2".into(), "other");
+        assert_eq!((fresh.state.as_str(), fresh.network.as_str(), fresh.disk_bus.as_str()), ("stopped", "user", "virtio"));
     }
 
     #[test]
@@ -4989,6 +5145,8 @@ mod local_mode_tests {
         unified: false,
         unified_user: None,
         autoinstall: None,
+        disposable: None,
+        floppy_path: None,
             created_at: "0".into(),
             updated_at: "0".into(),
         }

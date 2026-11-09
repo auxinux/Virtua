@@ -16,6 +16,8 @@ import { StoragePage } from "@/pages/StoragePage";
 import { TasksPage } from "@/pages/TasksPage";
 import { UsageModePage } from "@/pages/UsageModePage";
 import { UnifiedPage } from "@/pages/UnifiedPage";
+import { DisposablePage } from "@/pages/DisposablePage";
+import { DisposableStopDialog } from "@/components/DisposableStopDialog";
 import type { UsageMode, VirtuaConnection, VirtuaNode, VirtuaResource, VirtuaTask, VirtuaUser } from "@/types";
 
 const engineLabels = { qemu: "QEMU", lxc: "LXC (Incus)", docker: "Docker" } as const;
@@ -362,7 +364,9 @@ export default function App() {
         <Route path="/tasks" element={<TasksPage tasks={tasks} onClear={() => usageMode === "local" ? localVirtua.clearTasks() : virtuaClient.clearTasks()} onChanged={() => usageMode === "local" ? setTasks(localVirtua.listTasks()) : void virtuaClient.listTasks().then(setTasks)} />} />
         <Route path="/settings" element={usageMode === "local" ? <LocalSettingsPage /> : <SettingsPage connection={connection} />} />
         {usageMode === "local" ? <Route path="/unified" element={<UnifiedPage onChanged={() => refreshInventory()} />} /> : null}
+        {usageMode === "local" ? <Route path="/disposable" element={<DisposablePage resources={resources} onChanged={() => void refreshInventory()} />} /> : null}
       </Routes>
+      {usageMode === "local" ? <DisposableStopDialog resources={resources} onChanged={() => void refreshInventory()} /> : null}
     </Layout>
   );
 }

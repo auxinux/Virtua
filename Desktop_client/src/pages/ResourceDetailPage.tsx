@@ -69,6 +69,7 @@ type UpdateResourcePayload = {
   displayName?: string;
   image?: string;
   driverImage?: string;
+  floppyImage?: string;
   guestOs?: string;
   windowsSetupBypass?: boolean;
   cpu?: number;
@@ -111,6 +112,7 @@ export function ResourceDetailPage({
     displayName: resource?.displayName ?? "",
     image: resource?.image ?? "",
     driverImage: resource?.driverImage ?? "",
+    floppyImage: resource?.floppyImage ?? "",
     guestOs: resource?.guestOs ?? "other",
     windowsSetupBypass: resource?.windowsSetupBypass ?? true,
     cpu: resource?.cpuCores ? String(resource.cpuCores) : "",
@@ -130,6 +132,7 @@ export function ResourceDetailPage({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteDisks, setDeleteDisks] = useState(false);
   const [localIsoFiles, setLocalIsoFiles] = useState<LocalStorageFile[]>([]);
+  const [localFloppies, setLocalFloppies] = useState<LocalStorageFile[]>([]);
   const [isDownloadingDrivers, setDownloadingDrivers] = useState(false);
   const [snapshots, setSnapshots] = useState<LocalSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
@@ -142,6 +145,7 @@ export function ResourceDetailPage({
       displayName: resource.displayName,
       image: resource.image ?? "",
       driverImage: resource.driverImage ?? "",
+      floppyImage: resource.floppyImage ?? "",
       guestOs: resource.guestOs ?? "other",
       windowsSetupBypass: resource.windowsSetupBypass ?? true,
       cpu: resource.cpuCores ? String(resource.cpuCores) : "",
@@ -163,7 +167,10 @@ export function ResourceDetailPage({
     }
     let isCurrent = true;
     void localVirtua.storageInventory().then((inventory) => {
-      if (isCurrent) setLocalIsoFiles(inventory.iso);
+      if (isCurrent) {
+        setLocalIsoFiles(inventory.iso);
+        setLocalFloppies(inventory.floppies ?? []);
+      }
     }).catch(() => {
       if (isCurrent) setLocalIsoFiles([]);
     });
@@ -222,6 +229,7 @@ export function ResourceDetailPage({
       if (nextDisplayName && nextDisplayName !== resource.displayName) payload.displayName = nextDisplayName;
       if (nextImage !== (resource.image ?? "")) payload.image = nextImage;
       if (isLocal && form.driverImage.trim() !== (resource.driverImage ?? "")) payload.driverImage = form.driverImage.trim();
+      if (isLocal && form.floppyImage.trim() !== (resource.floppyImage ?? "")) payload.floppyImage = form.floppyImage.trim();
       if (isLocal && form.guestOs !== (resource.guestOs ?? "other")) payload.guestOs = form.guestOs;
       if (isLocal && form.windowsSetupBypass !== (resource.windowsSetupBypass ?? true)) payload.windowsSetupBypass = form.windowsSetupBypass;
       if (form.cpu && Number(form.cpu) !== resource.cpuCores) payload.cpu = Number(form.cpu);
@@ -267,14 +275,17 @@ export function ResourceDetailPage({
     }
   };
 
-  const browseIso = async (field: "image" | "driverImage" = "image") => {
+  const browseIso = async (field: "image" | "driverImage" | "floppyImage" = "image") => {
     setError(null);
     try {
+      const floppy = field === "floppyImage";
       const selected = await open({
         multiple: false,
         directory: false,
-        title: "Selectionner une ISO",
-        filters: [{ name: "Images disque", extensions: ["iso", "img"] }],
+        title: floppy ? "Selectionner une image de disquette" : "Selectionner une ISO",
+        filters: floppy
+          ? [{ name: "Disquettes", extensions: ["img", "ima", "vfd", "flp"] }]
+          : [{ name: "Images disque", extensions: ["iso", "img"] }],
       });
       if (typeof selected === "string") {
         setForm((current) => ({ ...current, [field]: selected }));
@@ -480,6 +491,34 @@ export function ResourceDetailPage({
                 <p className="text-xs text-virtua-muted">Pendant l'installation de Windows : « Charger un pilote » puis parcourir ce lecteur (viostor, NetKVM).</p>
               </div>
             ) : null}
+            {resource.source === "local" && resource.kind === "vm" ? (
+              <div className="space-y-2 text-xs text-virtua-muted">
+                Disquette (lecteur A:)
+                <select
+                  className="virtua-input w-full"
+                  disabled={!canModify}
+                  value={localFloppies.some((file) => file.path === form.floppyImage) ? form.floppyImage : ""}
+                  onChange={(event) => setForm((current) => ({ ...current, floppyImage: event.target.value }))}
+                >
+                  <option value="">Aucune disquette du Storage</option>
+                  {localFloppies.map((file) => (
+                    <option key={file.path} value={file.path}>{file.name}</option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    className="virtua-input min-w-0 flex-1"
+                    disabled={!canModify}
+                    placeholder="Lecteur vide"
+                    value={form.floppyImage}
+                    onChange={(event) => setForm((current) => ({ ...current, floppyImage: event.target.value }))}
+                  />
+                  <button type="button" disabled={!canModify} onClick={() => void browseIso("floppyImage")} className="virtua-button shrink-0">Parcourir</button>
+                  <button type="button" disabled={!canModify || !form.floppyImage} onClick={() => setForm((current) => ({ ...current, floppyImage: "" }))} className="virtua-button shrink-0">Ejecter</button>
+                </div>
+                <p className="text-xs text-virtua-muted">Image .img/.ima/.vfd de 2,88 Mo au plus. Sans ISO, la VM démarre sur la disquette (BIOS uniquement : un micrologiciel UEFI ne démarre pas sur une disquette). Prise en compte au prochain démarrage.</p>
+              </div>
+            ) : null}
             {resource.source === "local" && resource.kind === "vm" ? null : (
               <label className="space-y-1 text-xs text-virtua-muted">
                 Image
@@ -626,6 +665,7 @@ export function ResourceDetailPage({
                     ["Bus disque", resource.diskBus ?? "virtio"],
                     ["Systeme invite", resource.guestOs === "windows" ? "Windows" : "Linux / autre"],
                     ["ISO pilotes", resource.driverImage ?? "aucune"],
+                    ["Disquette A:", resource.floppyImage ?? "aucune"],
                   ] as Array<[string, string]>)
                 : []),
               ["TPM 2.0", yesNo(resource.tpm2)],

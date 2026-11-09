@@ -72,6 +72,10 @@ export interface VirtuaResource {
   image?: string;
   /** Local VMs: second CD-ROM holding a driver disc (virtio-win). */
   driverImage?: string;
+  /** Local VMs: floppy image in drive A:. */
+  floppyImage?: string;
+  /** Local VMs: disposable copy of a base (copy-on-write). */
+  disposable?: { baseId: string; baseLabel: string; strict: boolean };
   /** Local VMs: `windows` or `other`. */
   guestOs?: string;
   /** Local Windows VMs: lift the TPM/Secure Boot/RAM checks of Windows setup. */
@@ -270,6 +274,8 @@ export interface LocalStorageInventory {
   disks: LocalStorageFile[];
   snapshots: LocalStorageFile[];
   exports: LocalStorageFile[];
+  /** Floppy images (≤ 2.88 MB) of the ISO library. */
+  floppies?: LocalStorageFile[];
   dockerImages: LocalDockerImage[];
 }
 
@@ -340,6 +346,8 @@ export interface LocalVm {
   startupNotes?: string | null;
   createdAt: string;
   updatedAt: string;
+  disposable?: { baseId: string; baseLabel: string; strict: boolean } | null;
+  floppyPath?: string | null;
 }
 
 export interface LocalContainerResource {

@@ -42,7 +42,11 @@ async function localDesktop(page: Page, overrides: Overrides = {}) {
           case "local_prepare_engine":
             if (args.engine === "docker") docker = true;
             return engineState();
-          case "local_list_vms": return vms;
+          case "local_list_vms": return (window as any).__vms ?? vms;
+          case "local_list_bases": return [{ id: "debian13-amd64-1", label: "Debian 13 (AMD64)", os: "debian13", architecture: "amd64", guestOs: "other", cpu: 2, memoryMib: 4096, diskGib: 60, createdAt: "0", source: "depot", size: 1.2e9, inUse: 0 }];
+          case "local_depot_bases": return [{ name: "debian13-amd64.vmtmp", url: "https://dep.auxinux.ca/TEMPLATES/VM/AMD64/debian13-amd64.vmtmp", size: 9e8 }];
+          case "local_launch_disposable": return { id: "local-vm-jetable", name: "Jetable Debian 13 #1", architecture: "amd64", cpu: 2, memoryMib: 4096, diskGib: 60, diskPath: "/d/j.qcow2", network: "user", state: "running", pid: 7, createdAt: "0", updatedAt: "0", disposable: { baseId: args.baseId, baseLabel: "Debian 13 (AMD64)", strict: args.strict } };
+          case "local_disposable_action": return null;
           case "local_list_containers": return [];
           case "local_create_container": return {
             id: `docker:${args.payload.name}`, kind: "docker", name: args.payload.name,
@@ -269,4 +273,38 @@ test("quick create installs Debian 13 in one click and opens its console", async
     .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_quick_create").map((c: any) => c.args)))
     .toEqual([{ os: "debian13", name: "Mon Debian" }]);
   await expect(page).toHaveURL(/#\/console\/local-vm-quick$/);
+});
+
+test("a disposable VM starts from a base in one click and opens its console", async ({ page }) => {
+  await localDesktop(page);
+  await page.goto("/#/disposable");
+  await expect(page.getByRole("heading", { name: /VM jetables/ })).toBeVisible();
+  await expect(page.getByText("debian13-amd64.vmtmp")).toBeVisible();
+  await page.getByLabel(/Sandbox stricte/).check();
+  await page.getByRole("button", { name: "Lancer une jetable" }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_launch_disposable").map((c: any) => c.args)))
+    .toEqual([{ baseId: "debian13-amd64-1", strict: true, network: "user" }]);
+  await expect(page).toHaveURL(/#\/console\/local-vm-jetable$/);
+});
+
+test("when a disposable VM stops, Virtua asks whether to throw it away", async ({ page }) => {
+  const jetable = {
+    id: "local-vm-j", name: "Jetable Debian 13 #1", architecture: "amd64", cpu: 2, memoryMib: 4096, diskGib: 60,
+    diskPath: "/d/j.qcow2", network: "user", state: "running", pid: 7, createdAt: "0", updatedAt: "0",
+    disposable: { baseId: "b", baseLabel: "Debian 13 (AMD64)", strict: false },
+  };
+  await localDesktop(page, { vms: [jetable] });
+  await page.goto("/#/disposable");
+  await expect(page.getByRole("main").getByText("Jetable Debian 13 #1")).toBeVisible();
+  await page.evaluate((vm) => { (window as any).__vms = [{ ...vm, state: "stopped", pid: null }]; }, jetable);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("est arrêtée");
+  await expect(dialog.getByRole("button", { name: /Convertir en VM normale/ })).toBeVisible();
+  await dialog.getByRole("button", { name: /Repartir à neuf/ }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_disposable_action").map((c: any) => c.args)))
+    .toEqual([{ id: "local-vm-j", action: "reset" }]);
+  await expect(dialog).toBeHidden();
 });

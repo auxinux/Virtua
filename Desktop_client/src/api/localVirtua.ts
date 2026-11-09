@@ -95,6 +95,8 @@ function mapLocalVm(vm: LocalVm): VirtuaResource {
     uptime: formatDuration(vm.uptimeSeconds),
     image: vm.isoPath || undefined,
     driverImage: vm.driverIsoPath || undefined,
+    floppyImage: vm.floppyPath || undefined,
+    disposable: vm.disposable ?? undefined,
     guestOs: vm.guestOs ?? "other",
     windowsSetupBypass: vm.windowsSetupBypass ?? true,
     network: vm.network,
@@ -403,7 +405,7 @@ export const localVirtua = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; floppyImage?: string; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
     const taskId = pushTask({ label: "Modification VM locale", target: resourceId, status: "running", progress: 25 });
     try {
       const vm = await invoke<LocalVm>("local_update_vm", {
@@ -412,6 +414,7 @@ export const localVirtua = {
           name: payload.name ?? payload.displayName,
           image: payload.image,
           driverImage: payload.driverImage,
+          floppyImage: payload.floppyImage,
           guestOs: payload.guestOs,
           windowsSetupBypass: payload.windowsSetupBypass,
           cpu: payload.cpu,

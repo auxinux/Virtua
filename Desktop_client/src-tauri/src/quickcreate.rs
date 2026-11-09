@@ -37,6 +37,25 @@ pub struct AutoInstall {
     /// start; never again (a later key press would reinstall over the disk).
     #[serde(default)]
     pub boot_keys_sent: bool,
+    /// Disposable base being built: once installed, the system becomes a base
+    /// (disposable.rs) and this builder VM goes away.
+    #[serde(default)]
+    pub make_base: bool,
+    /// Windows base: when the guest agent first answered (first logon done).
+    #[serde(default)]
+    pub agent_seen_at: Option<u64>,
+    #[serde(default)]
+    pub shutdown_requested: bool,
+}
+
+/// What the inventory refresh must do after `finish_if_done`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOutcome {
+    Nothing,
+    /// Debian: the installer powered off, boot the installed system.
+    Restart,
+    /// Base build finished: turn the stopped VM into a disposable base.
+    MakeBase(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +248,16 @@ d-i grub-installer/force-efi-extra-removable boolean true
 d-i finish-install/reboot_in_progress note
 d-i debian-installer/exit/poweroff boolean true
 "#
+    )
+}
+
+/// Preseed of a disposable *base*: the same installation, generalized at the
+/// end so every copy gets its own machine-id and SSH host keys on first boot.
+pub fn debian_base_preseed(hostname: &str, timezone: &str) -> String {
+    let unit = "[Unit]\\nDescription=Virtua: SSH host keys of this copy\\nBefore=ssh.service\\nConditionPathExists=!/etc/ssh/ssh_host_ed25519_key\\n[Service]\\nType=oneshot\\nExecStart=/usr/bin/ssh-keygen -A\\n[Install]\\nWantedBy=multi-user.target\\n";
+    format!(
+        "{}d-i preseed/late_command string in-target sh -c 'truncate -s 0 /etc/machine-id; rm -f /etc/ssh/ssh_host_*; printf \"{unit}\" > /etc/systemd/system/virtua-ssh-keys.service; systemctl enable virtua-ssh-keys.service; apt-get clean'\n",
+        debian_preseed(hostname, timezone)
     )
 }
 
@@ -545,6 +574,17 @@ fn unique_name(wanted: &str, vms: &[LocalVm]) -> String {
 }
 
 pub fn quick_create(app: &tauri::AppHandle, os: &str, name: Option<String>) -> Result<LocalVm, String> {
+    quick_create_with(app, os, name, false)
+}
+
+/// Quick create of a disposable base: same unattended install, generalized
+/// (Debian), then kept as a base by the inventory refresh.
+pub fn quick_create_base(app: &tauri::AppHandle, os: &str) -> Result<LocalVm, String> {
+    let label = profile(os)?.label;
+    quick_create_with(app, os, Some(format!("Base jetable {label} (préparation)")), true)
+}
+
+fn quick_create_with(app: &tauri::AppHandle, os: &str, name: Option<String>, make_base: bool) -> Result<LocalVm, String> {
     let profile = profile(os)?;
     progress(app, 1, "Vérification de QEMU…");
     let diagnostics = qemu_diagnostics_blocking()?;
@@ -587,9 +627,11 @@ pub fn quick_create(app: &tauri::AppHandle, os: &str, name: Option<String>) -> R
         let dir = local_state_dir()?.join("Unattend").join(safe_file_name(&format!("debian-{}", now_id()))?);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let seeded = dir.join("initrd-preseed.gz");
-        fs::write(&seeded, initrd_with_preseed(&original, &debian_preseed(&hostname, &host_timezone()))?).map_err(|e| e.to_string())?;
+        let preseed = if make_base { debian_base_preseed("debian-13", &host_timezone()) } else { debian_preseed(&hostname, &host_timezone()) };
+        fs::write(&seeded, initrd_with_preseed(&original, &preseed)?).map_err(|e| e.to_string())?;
         AutoInstall {
             os: profile.os.into(),
+            make_base,
             kernel: Some(kernel.to_string_lossy().to_string()),
             initrd: Some(seeded.to_string_lossy().to_string()),
             // Boot-parameter aliases of debian-installer: read before the preseed,
@@ -609,7 +651,7 @@ pub fn quick_create(app: &tauri::AppHandle, os: &str, name: Option<String>) -> R
         let language = windows_language(&iso.file_name().unwrap_or_default().to_string_lossy()).to_string();
         payload.iso_path = Some(iso.to_string_lossy().to_string());
         payload.driver_iso_path = Some(drivers.to_string_lossy().to_string());
-        AutoInstall { os: profile.os.into(), language: Some(language), ..Default::default() }
+        AutoInstall { os: profile.os.into(), language: Some(language), make_base, ..Default::default() }
     };
 
     progress(app, 3, format!("Création de « {name} » : {} vCPU, {} Mio, {} Gio…", payload.cpu, payload.memory_mib, payload.disk_gib));
@@ -653,27 +695,47 @@ pub fn quick_create(app: &tauri::AppHandle, os: &str, name: Option<String>) -> R
 }
 
 /// What a finished unattended install leaves behind, applied by the
-/// inventory refresh. Returns true when the VM must be started again (Debian:
-/// the installer powered off, the system now boots from disk).
-pub fn finish_if_done(vm: &mut LocalVm, process_exited: bool) -> bool {
-    let Some(auto) = vm.autoinstall.clone() else { return false };
-    match auto.os.as_str() {
+/// inventory refresh (`process_exited`: the VM's QEMU went away by itself).
+pub fn finish_if_done(vm: &mut LocalVm, process_exited: bool) -> InstallOutcome {
+    let Some(mut auto) = vm.autoinstall.clone() else { return InstallOutcome::Nothing };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let outcome = match auto.os.as_str() {
         "debian13" if process_exited && auto.kernel.is_some() => {
             vm.autoinstall = None;
-            vm.updated_at = now_string();
-            true
+            if auto.make_base { InstallOutcome::MakeBase(auto.os.clone()) } else { InstallOutcome::Restart }
         }
-        // The guest agent answers once the guest tools were installed at the
-        // first logon: Windows is done, the installer and its answer file go.
-        "windows11" if vm.guest_agent_running => {
+        // Windows base: shut down cleanly once the first logon had time to
+        // finish (guest tools, RDP, RemoteApp), then keep it as a base.
+        "windows11" if auto.make_base && process_exited && auto.shutdown_requested => {
             vm.autoinstall = None;
             vm.iso_path = None;
             vm.driver_iso_path = None;
-            vm.updated_at = now_string();
-            false
+            InstallOutcome::MakeBase(auto.os.clone())
         }
-        _ => false,
-    }
+        "windows11" if auto.make_base && vm.guest_agent_running => {
+            let seen = *auto.agent_seen_at.get_or_insert(now);
+            if !auto.shutdown_requested && now.saturating_sub(seen) >= 120 {
+                if let Some(port) = vm.qga_port {
+                    // guest-shutdown never answers: the agent goes down with Windows.
+                    let _ = qga_execute(port, "guest-shutdown");
+                    auto.shutdown_requested = true;
+                }
+            }
+            vm.autoinstall = Some(auto);
+            return InstallOutcome::Nothing;
+        }
+        // The guest agent answers once the guest tools were installed at the
+        // first logon: Windows is done, the installer and its answer file go.
+        "windows11" if !auto.make_base && vm.guest_agent_running => {
+            vm.autoinstall = None;
+            vm.iso_path = None;
+            vm.driver_iso_path = None;
+            InstallOutcome::Nothing
+        }
+        _ => return InstallOutcome::Nothing,
+    };
+    vm.updated_at = now_string();
+    outcome
 }
 
 #[tauri::command]
@@ -696,6 +758,8 @@ mod tests {
         if let Ok(initrd) = std::env::var("VIRTUA_INITRD") {
             let original = fs::read(initrd).unwrap();
             fs::write(out.join("initrd-preseed.gz"), initrd_with_preseed(&original, &debian_preseed("debian-13", "America/Toronto")).unwrap()).unwrap();
+            fs::write(out.join("initrd-base.gz"), initrd_with_preseed(&original, &debian_base_preseed("debian-13", "America/Toronto")).unwrap()).unwrap();
+            fs::write(out.join("base-preseed.cfg"), debian_base_preseed("debian-13", "America/Toronto")).unwrap();
         }
     }
 
@@ -823,18 +887,31 @@ mod tests {
     fn a_finished_install_boots_from_disk() {
         let mut vm = crate::local_mode_tests::sample_vm("amd64", "virtio");
         vm.autoinstall = Some(AutoInstall { os: "debian13".into(), kernel: Some("/k".into()), ..Default::default() });
-        assert!(!finish_if_done(&mut vm, false));
-        assert!(finish_if_done(&mut vm, true));
+        assert_eq!(finish_if_done(&mut vm, false), InstallOutcome::Nothing);
+        assert_eq!(finish_if_done(&mut vm, true), InstallOutcome::Restart);
         assert!(vm.autoinstall.is_none());
+
+        let mut base = crate::local_mode_tests::sample_vm("amd64", "virtio");
+        base.autoinstall = Some(AutoInstall { os: "debian13".into(), kernel: Some("/k".into()), make_base: true, ..Default::default() });
+        assert_eq!(finish_if_done(&mut base, true), InstallOutcome::MakeBase("debian13".into()));
 
         let mut win = crate::local_mode_tests::sample_vm("amd64", "virtio");
         win.iso_path = Some("/w.iso".into());
         win.autoinstall = Some(AutoInstall { os: "windows11".into(), ..Default::default() });
-        assert!(!finish_if_done(&mut win, false));
+        assert_eq!(finish_if_done(&mut win, false), InstallOutcome::Nothing);
         assert!(win.autoinstall.is_some());
         win.guest_agent_running = true;
-        assert!(!finish_if_done(&mut win, false));
+        assert_eq!(finish_if_done(&mut win, false), InstallOutcome::Nothing);
         assert!(win.autoinstall.is_none() && win.iso_path.is_none());
+
+        // Windows base: agent seen, shutdown asked after two minutes, base on exit.
+        let mut wbase = crate::local_mode_tests::sample_vm("amd64", "virtio");
+        wbase.guest_agent_running = true;
+        wbase.autoinstall = Some(AutoInstall { os: "windows11".into(), make_base: true, ..Default::default() });
+        assert_eq!(finish_if_done(&mut wbase, false), InstallOutcome::Nothing);
+        assert!(wbase.autoinstall.as_ref().unwrap().agent_seen_at.is_some());
+        wbase.autoinstall.as_mut().unwrap().shutdown_requested = true;
+        assert_eq!(finish_if_done(&mut wbase, true), InstallOutcome::MakeBase("windows11".into()));
     }
 }
 

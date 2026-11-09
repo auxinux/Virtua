@@ -5,7 +5,7 @@ import { localVirtua } from "@/api/localVirtua";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { LocalDockerImage, LocalStorageFile, LocalStorageInventory, RemoteTemplateItem, VirtuaResource, VmArchitecture } from "@/types";
 
-type StorageTab = "iso" | "templates" | "disks" | "snapshots" | "docker" | "depot";
+type StorageTab = "iso" | "floppies" | "templates" | "disks" | "snapshots" | "docker" | "depot";
 type DeletableStorageKind = "iso" | "template" | "disk" | "snapshot";
 
 interface DownloadProgressEvent {
@@ -158,6 +158,7 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
 
   const tabs = [
     { id: "iso" as const, label: "ISO", count: inventory?.iso.length ?? 0 },
+    { id: "floppies" as const, label: "Disquettes", count: inventory?.floppies?.length ?? 0 },
     { id: "templates" as const, label: "Templates", count: inventory?.templates.length ?? 0 },
     { id: "disks" as const, label: "Disques", count: inventory?.disks.length ?? 0 },
     { id: "snapshots" as const, label: "Snapshots", count: inventory?.snapshots.length ?? 0 },
@@ -340,6 +341,8 @@ export function StoragePage({ resources, hostArch, onChanged }: { resources: Vir
 
   const renderTab = () => {
     if (activeTab === "iso") return <FilesTable files={inventory?.iso ?? []} kind="iso" resources={resources} onDelete={deleteFile} pending={pending} />;
+    // Floppy images live in the ISO folder (.img/.ima/.vfd/.flp, 2.88 MB at most).
+    if (activeTab === "floppies") return <FilesTable files={inventory?.floppies ?? []} kind="iso" resources={resources} onDelete={deleteFile} pending={pending} />;
     if (activeTab === "templates") {
       return (
         <div className="space-y-4">
