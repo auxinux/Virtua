@@ -1086,7 +1086,7 @@ function VmHardwareTab({
   const [existingDiskPool, setExistingDiskPool] = useState("");
   const [editVcpus, setEditVcpus] = useState(vm.vcpus);
   const [editMemoryMb, setEditMemoryMb] = useState(Math.max(128, Math.round(vm.maxMemoryKiB / 1024)));
-  const [editBootDevice, setEditBootDevice] = useState<"hd" | "cdrom" | "network">(vm.bootOrder?.[0] ?? "hd");
+  const [editBootDevice, setEditBootDevice] = useState<"hd" | "cdrom" | "network" | "fd">(vm.bootOrder?.[0] ?? "hd");
   const [editTpmEnabled, setEditTpmEnabled] = useState(Boolean(vm.tpmEnabled));
   const [editQemuAgentEnabled, setEditQemuAgentEnabled] = useState(vm.qemuAgentEnabled !== false);
   const [editVideoModel, setEditVideoModel] = useState<"vga" | "virtio" | "qxl">(vm.videoModel ?? "vga");
@@ -1094,6 +1094,11 @@ function VmHardwareTab({
   const [editSecureBoot, setEditSecureBoot] = useState<boolean>(vm.secureBoot ?? false);
   const [editAutostart, setEditAutostart] = useState<boolean>(vm.autostart);
   const [selectedIso, setSelectedIso] = useState("");
+  const [floppyOpen, setFloppyOpen] = useState(false);
+  const [selectedFloppy, setSelectedFloppy] = useState("");
+  const [floppyWritable, setFloppyWritable] = useState(false);
+  const [floppyNote, setFloppyNote] = useState("");
+  const floppyCapable = !vm.arch || vm.arch === "x86_64" || vm.arch === "i686";
 
   const { data: pools = [] } = useQuery<Array<{ name: string }>>({
     queryKey: ["storage", "pools"],
@@ -1176,6 +1181,28 @@ function VmHardwareTab({
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vm", vmName] }),
   });
 
+  // Floppy drive A:. A running VM without a drive cannot get one hot-plugged:
+  // the server then answers pendingRestart with a message, shown below.
+  type FloppyResult = { pendingRestart?: boolean; message?: string };
+  const attachFloppy = useMutation({
+    mutationFn: () => apiPost<FloppyResult>(`/api/vms/${vmName}/floppy/attach`, { floppyFile: selectedFloppy, readonly: !floppyWritable }),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["vm", vmName] });
+      setFloppyOpen(false);
+      setSelectedFloppy("");
+      setFloppyNote(result?.pendingRestart ? (result.message ?? "Applies after the next full stop/start.") : "");
+    },
+  });
+
+  const ejectFloppy = useMutation({
+    mutationFn: (remove: boolean) => apiPost<FloppyResult>(`/api/vms/${vmName}/floppy/eject`, { remove }),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["vm", vmName] });
+      setFloppyNote(result?.pendingRestart ? (result.message ?? "Applies after the next full stop/start.") : "");
+    },
+  });
+  const floppyImages = isos.filter((iso) => iso.type === "floppy");
+
   // Insert the virtio-win guest tools ISO; the server downloads it first when
   // the ISO library doesn't have it yet (long task with progress in Journaux).
   const [guestToolsNote, setGuestToolsNote] = useState("");
@@ -1228,7 +1255,25 @@ function VmHardwareTab({
             {ejectIso.isPending ? "Ejecting..." : "Eject ISO"}
           </button>
         )}
+        {permissions.canMedia && floppyCapable && (
+          <button onClick={() => { setFloppyWritable(vm.floppyReadonly === false); setFloppyOpen(true); }} className="btn-secondary btn-sm" title="Drive A: — .img / .ima / .vfd floppy images">
+            Insert Floppy
+          </button>
+        )}
+        {permissions.canMedia && vm.mountedFloppy && (
+          <button onClick={() => ejectFloppy.mutate(false)} disabled={ejectFloppy.isPending} className="btn-secondary btn-sm">
+            {ejectFloppy.isPending ? "Ejecting..." : "Eject Floppy"}
+          </button>
+        )}
       </div>
+      {floppyNote && (
+        <p className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-2 py-1.5 text-right">{floppyNote}</p>
+      )}
+      {(attachFloppy.isError || ejectFloppy.isError) && (
+        <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/40 rounded px-2 py-1.5 text-right">
+          Floppy: {((attachFloppy.error ?? ejectFloppy.error) as Error)?.message ?? "operation failed"}
+        </p>
+      )}
       {guestToolsNote && (
         <p className="text-xs text-cyan-300 bg-cyan-900/20 border border-cyan-800/40 rounded px-2 py-1.5 text-right">{guestToolsNote}</p>
       )}
@@ -1308,6 +1353,33 @@ function VmHardwareTab({
           <span className="text-text-200 font-mono">{currentIso?.source || "No ISO inserted"}</span>
         </div>
       </div>
+
+      {floppyCapable && (
+        <div className="card p-4">
+          <h3 className="text-sm font-semibold text-text-300 mb-3">💾 Floppy (A:)</h3>
+          <div className="space-y-2 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-text-500">Current media</span>
+              <span className="text-text-200 font-mono">
+                {vm.mountedFloppy || (vm.floppyDrive ? "Empty drive" : "No floppy drive")}
+                {vm.mountedFloppy && (vm.floppyReadonly === false ? " (writable)" : " (write-protected)")}
+              </span>
+            </div>
+            {permissions.canMedia && vm.floppyDrive && (
+              <div className="flex justify-end">
+                <button
+                  onClick={() => ejectFloppy.mutate(true)}
+                  disabled={ejectFloppy.isPending}
+                  className="btn-ghost btn-sm text-red-400"
+                  title="Removes drive A: from the VM definition"
+                >
+                  Remove drive
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="card p-4">
         <h3 className="text-sm font-semibold text-text-300 mb-3">Boot & Security</h3>
@@ -1444,11 +1516,22 @@ function VmHardwareTab({
           </div>
           <div>
             <label className="label">Primary Boot Device</label>
-            <select value={editBootDevice} onChange={(e) => setEditBootDevice(e.target.value as "hd" | "cdrom" | "network")} className="select">
+            <select value={editBootDevice} onChange={(e) => setEditBootDevice(e.target.value as "hd" | "cdrom" | "network" | "fd")} className="select">
               <option value="hd">Disk</option>
               <option value="cdrom">CD-ROM / ISO</option>
               <option value="network">Network (PXE)</option>
+              {floppyCapable && (
+                <option value="fd" disabled={!vm.floppyDrive || editUefi}>Floppy (A:)</option>
+              )}
             </select>
+            {floppyCapable && editBootDevice === "fd" && editUefi && (
+              <p className="mt-1.5 text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-2 py-1.5">
+                ⚠ UEFI firmware cannot boot from a floppy: switch the firmware to BIOS.
+              </p>
+            )}
+            {floppyCapable && !vm.floppyDrive && (
+              <p className="text-xs text-text-500 mt-1">Floppy boot needs a floppy drive: insert a floppy image first.</p>
+            )}
             {editBootDevice === "network" && editUefi && vm.networks.some((n) => n.model === "virtio") && (
               <p className="mt-1.5 text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-2 py-1.5">
                 ⚠ PXE UEFI + VirtIO NIC : OVMF n'a pas de ROM PXE pour VirtIO. Le boot réseau échouera (SCCM/WDS inclus). Passe le modèle NIC en <strong>e1000</strong> dans l'onglet Réseau.
@@ -1465,7 +1548,7 @@ function VmHardwareTab({
           </div>
           <div>
             <label className="label">Firmware</label>
-            <select value={editUefi ? "uefi" : "bios"} onChange={(e) => { const uefi = e.target.value === "uefi"; setEditUefi(uefi); if (!uefi) setEditSecureBoot(false); }} className="select" disabled={vm.arch === "aarch64"}>
+            <select value={editUefi ? "uefi" : "bios"} onChange={(e) => { const uefi = e.target.value === "uefi"; setEditUefi(uefi); if (!uefi) setEditSecureBoot(false); if (uefi && editBootDevice === "fd") setEditBootDevice("hd"); }} className="select" disabled={vm.arch === "aarch64"}>
               <option value="bios">BIOS (SeaBIOS)</option>
               <option value="uefi">UEFI (OVMF)</option>
             </select>
@@ -1521,6 +1604,44 @@ function VmHardwareTab({
               ))}
             </select>
           </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={floppyOpen && permissions.canMedia}
+        onClose={() => setFloppyOpen(false)}
+        title="Insert Floppy (A:)"
+        footer={
+          <>
+            <button onClick={() => setFloppyOpen(false)} className="btn-secondary">Cancel</button>
+            <button onClick={() => attachFloppy.mutate()} disabled={attachFloppy.isPending || !selectedFloppy} className="btn-primary">
+              {attachFloppy.isPending ? "Inserting..." : "Insert"}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <div>
+            <label className="label">Floppy image</label>
+            <select value={selectedFloppy} onChange={(e) => setSelectedFloppy(e.target.value)} className="select">
+              <option value="">Select floppy image...</option>
+              {floppyImages.map((img) => (
+                <option key={img.filename} value={img.filename}>{img.displayName || img.filename} · {formatBytes(img.sizeBytes)}</option>
+              ))}
+            </select>
+            {floppyImages.length === 0 && (
+              <p className="mt-1 text-xs text-text-500">No floppy image in the library. Upload one from Storage → ISO / Templates (type "Floppy").</p>
+            )}
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue" checked={floppyWritable} onChange={(e) => setFloppyWritable(e.target.checked)} />
+            <span className="text-sm text-text-300">Writable (remove write protection)</span>
+          </label>
+          <p className="text-xs text-text-500">
+            {vm.state === "running" && !vm.floppyDrive
+              ? "This VM has no floppy drive yet: a floppy controller cannot be hot-plugged, so drive A: appears after the next full stop/start."
+              : "On a running VM with a floppy drive, the medium is swapped live. Library images are shared: keep them write-protected unless the guest must write to it."}
+          </p>
         </div>
       </Modal>
     </div>

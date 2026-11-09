@@ -13,7 +13,7 @@ import * as http from "http";
 import * as os from "os";
 import { createHash, createPrivateKey, randomBytes, randomUUID, timingSafeEqual, X509Certificate } from "crypto";
 import { pipeline } from "stream/promises";
-import { Duplex, Readable } from "stream";
+import { Duplex, Readable, Transform } from "stream";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { execFile, spawn } from "child_process";
@@ -45,10 +45,12 @@ import {
 } from "./ssl.js";
 import { walkFiles, isManagedStorageLocation } from "./storageScan.js";
 import { isPbsJobDue } from "./pbsSchedule.js";
+import { poolFileMatchesMediaType } from "./installMedia.js";
 import type { ZodTypeAny, infer as zodInfer } from "zod";
 import { clientHost, isLoopbackHost, webOrigin } from "./wsHost.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
+  AttachFloppySchema, FLOPPY_MAX_BYTES, isFloppyFilename, validateFloppyImage,
   CreateVmSchema, UpdateVmConfigSchema, AttachDiskSchema, AttachNetworkSchema, UpdateNetworkSchema, CreateSnapshotSchema, BackupVmSchema,
   UsbDeviceAssignmentSchema, PartitionDiskSchema,
   CreateLxcSchema, UpdateLxcConfigSchema, BackupLxcSchema, LxcNicSchema, GpuDeviceAssignmentSchema, DockerConnectNetworkSchema,
@@ -123,12 +125,15 @@ const APP_ROOT = path.resolve(fileURLToPath(new URL("../../../", import.meta.url
 const UI_DIST_DIR = path.join(APP_ROOT, "apps", "ui", "dist");
 const LANG_DIR = path.join(APP_ROOT, "lang");
 const ISOS_DIR = process.env.QEMU_ISOS_DIR ?? "/var/lib/libvirt/images/isos";
+// Floppy images live beside the ISOs but in their own directory: both accept
+// ".img", so a shared directory could not tell a driver floppy from a CD image.
+const FLOPPIES_DIR = process.env.QEMU_FLOPPIES_DIR ?? path.join(path.dirname(ISOS_DIR), "floppies");
 const LXC_TEMPLATES_DIR = process.env.LXC_TEMPLATES_DIR ?? path.join(DATA_DIR, "templates", "lxc");
 const DOCKER_ARCHIVES_DIR = process.env.DOCKER_ARCHIVES_DIR ?? path.join(DATA_DIR, "templates", "docker");
 const VM_DISKS_DIR = process.env.VM_DISKS_DIR ?? path.join(DATA_DIR, "images", "vm-disks");
 const VM_TEMPLATES_DIR = process.env.VM_TEMPLATES_DIR ?? path.join(DATA_DIR, "templates", "vm");
 /** Directories Virtua owns; anything outside them is not pool content. */
-const MANAGED_STORAGE_ROOTS = [DATA_DIR, ISOS_DIR, VM_DISKS_DIR, VM_TEMPLATES_DIR, LXC_TEMPLATES_DIR, DOCKER_ARCHIVES_DIR, "/var/lib/libvirt/images", "/var/lib/lxc"];
+const MANAGED_STORAGE_ROOTS = [DATA_DIR, ISOS_DIR, FLOPPIES_DIR, VM_DISKS_DIR, VM_TEMPLATES_DIR, LXC_TEMPLATES_DIR, DOCKER_ARCHIVES_DIR, "/var/lib/libvirt/images", "/var/lib/lxc"];
 // Hard cap on uploaded template/ISO size (bytes). Configurable for large ISOs.
 const TEMPLATE_MAX_BYTES = parseInt(process.env.TEMPLATE_MAX_BYTES ?? `${8 * 1024 * 1024 * 1024}`, 10);
 // Backup/restore can run for hours on huge LXC/VM images. These run inside a
@@ -190,7 +195,16 @@ function detectNodeReleaseVersion(): string {
 
 const APP_VERSION = detectNodeReleaseVersion();
 
-type ManagedFileType = "iso" | "lxc_template" | "docker_image" | "vm_disk";
+type ManagedFileType = "iso" | "floppy" | "lxc_template" | "docker_image" | "vm_disk";
+const MANAGED_FILE_TYPES: ManagedFileType[] = ["iso", "floppy", "lxc_template", "docker_image", "vm_disk"];
+/** Pool content flag a managed file type needs. Floppies ride on ISO-capable pools ("install media"). */
+const MANAGED_TYPE_POOL_CONTENT: Record<ManagedFileType, string> = {
+  iso: "iso",
+  floppy: "iso",
+  lxc_template: "template",
+  docker_image: "template",
+  vm_disk: "disk",
+};
 interface RebootSafetyCheck {
   id: string;
   label: string;
@@ -796,6 +810,7 @@ async function prepareVmCreatePayload(input: CreateVmInput) {
     ...input,
     storagePool: poolPath,
     isoFile: input.isoFile ? await resolveManagedIsoPath(input.isoFile) : undefined,
+    floppyFile: input.floppyFile ? await resolveManagedFloppyPath(input.floppyFile) : undefined,
   };
 }
 
@@ -2281,6 +2296,7 @@ async function loadLanguageBundle(code: string) {
 
 function getManagedStorageDir(type: ManagedFileType) {
   if (type === "iso") return ISOS_DIR;
+  if (type === "floppy") return FLOPPIES_DIR;
   if (type === "lxc_template") return LXC_TEMPLATES_DIR;
   if (type === "vm_disk") return VM_DISKS_DIR;
   return DOCKER_ARCHIVES_DIR;
@@ -2291,13 +2307,14 @@ function sanitizeManagedFilename(input: string) {
 }
 
 function resolveManagedFileType(raw?: string): ManagedFileType {
-  if (raw === "lxc_template" || raw === "docker_image" || raw === "iso" || raw === "vm_disk") return raw;
+  if (raw === "lxc_template" || raw === "docker_image" || raw === "iso" || raw === "vm_disk" || raw === "floppy") return raw;
   return "iso";
 }
 
 function isAllowedManagedFile(filename: string, type: ManagedFileType) {
   const lower = filename.toLowerCase();
   if (type === "iso") return lower.endsWith(".iso") || lower.endsWith(".img");
+  if (type === "floppy") return isFloppyFilename(lower);
   if (type === "lxc_template") {
     return lower.endsWith(".tar.gz") || lower.endsWith(".tar.xz") || lower.endsWith(".tar.zst") || lower.endsWith(".tar");
   }
@@ -2331,7 +2348,27 @@ async function getApiLibvirtQemuIdentity(): Promise<{ uid: number; gid: number }
   return apiLibvirtQemuIdentity;
 }
 
+/** Reject an image that is not a usable floppy (size), with the message shown to the user. */
+async function assertFloppyImageFile(filePath: string): Promise<void> {
+  const stat = await fs.promises.stat(filePath);
+  const check = validateFloppyImage(path.basename(filePath), stat.size);
+  if (!check.ok) throw Object.assign(new Error(check.error), { statusCode: 400 });
+}
+
+/** Pass-through stream that aborts once more than `maxBytes` went through. */
+function byteLimit(maxBytes: number, message: string) {
+  let seen = 0;
+  return new Transform({
+    transform(chunk: Buffer, _enc: BufferEncoding, cb: (err?: Error | null, data?: Buffer) => void) {
+      seen += chunk.length;
+      if (seen > maxBytes) cb(Object.assign(new Error(message), { statusCode: 413 }));
+      else cb(null, chunk);
+    },
+  });
+}
+
 async function ensureLibvirtManagedFileAccess(filePath: string, type: ManagedFileType): Promise<void> {
+  if (type === "floppy") type = "iso"; // same read-only media permissions
   if (type !== "iso" && type !== "vm_disk") return;
   // Never change owners or modes inside a container filesystem. The runner's
   // lxcRootfsGuard.ts does the full check; uploads only need the naming rule.
@@ -2427,7 +2464,7 @@ async function listManagedFiles() {
     });
   }
 
-  for (const type of ["iso", "lxc_template", "docker_image", "vm_disk"] as ManagedFileType[]) {
+  for (const type of MANAGED_FILE_TYPES) {
     const dir = getManagedStorageDir(type);
     await fs.promises.mkdir(dir, { recursive: true });
     const files = await fs.promises.readdir(dir).catch(() => []);
@@ -2435,6 +2472,7 @@ async function listManagedFiles() {
       if (!isAllowedManagedFile(filename, type)) continue;
       const stat = await fs.promises.stat(path.join(dir, filename)).catch(() => null);
       if (!stat?.isFile()) continue;
+      if (type === "floppy" && stat.size > FLOPPY_MAX_BYTES) continue;
       const key = `${type}:${filename}`;
       if (seen.has(key)) continue;
       const meta = metaMap.get(`${type}:${filename}`);
@@ -2452,25 +2490,20 @@ async function listManagedFiles() {
     }
   }
 
-  const managedTypeToPoolContent: Record<ManagedFileType, string> = {
-    iso: "iso",
-    lxc_template: "template",
-    docker_image: "template",
-    vm_disk: "disk",
-  };
-
   for (const pool of allPools) {
     const poolContent = JSON.parse(pool.content || "[]") as string[];
     const files = await fs.promises.readdir(pool.path).catch(() => []);
     for (const filename of files) {
-      for (const type of ["iso", "lxc_template", "docker_image", "vm_disk"] as ManagedFileType[]) {
-        if (!poolContent.includes(managedTypeToPoolContent[type])) continue;
+      for (const type of MANAGED_FILE_TYPES) {
+        if (!poolContent.includes(MANAGED_TYPE_POOL_CONTENT[type])) continue;
         if (!isAllowedManagedFile(filename, type)) continue;
         const key = `${type}:${filename}`;
         if (seen.has(key)) continue;
         const fullPath = path.join(pool.path, filename);
         const stat = await fs.promises.stat(fullPath).catch(() => null);
         if (!stat?.isFile()) continue;
+        // An ISO pool holds both CD and floppy media and ".img" fits both.
+        if ((type === "iso" || type === "floppy") && !poolFileMatchesMediaType(type, filename, stat.size)) continue;
         seen.add(key);
         result.push({
           filename,
@@ -2528,12 +2561,7 @@ async function resolveManagedFilePath(fileRef: string, fileType: ManagedFileType
 
   addCandidate(getManagedStorageDir(fileType));
 
-  const requiredContent: Record<ManagedFileType, string> = {
-    iso: "iso",
-    lxc_template: "template",
-    docker_image: "template",
-    vm_disk: "disk",
-  };
+  const requiredContent = MANAGED_TYPE_POOL_CONTENT;
   const poolRows = [
     ...(db.prepare("SELECT path, content FROM datacenter_storage_pools").all() as Array<{ path: string; content: string }>),
     ...(db.prepare("SELECT path, content FROM storage_pools").all() as Array<{ path: string; content: string }>),
@@ -2553,6 +2581,13 @@ async function resolveManagedFilePath(fileRef: string, fileType: ManagedFileType
 
 function resolveManagedIsoPath(isoFile: string) {
   return resolveManagedFilePath(isoFile, "iso");
+}
+
+/** Resolve a library floppy image and re-check its size (a pool file may have been replaced). */
+async function resolveManagedFloppyPath(floppyFile: string) {
+  const resolved = await resolveManagedFilePath(floppyFile, "floppy");
+  await assertFloppyImageFile(resolved);
+  return resolved;
 }
 
 function managedFileAbsolutePath(entry: { filename: string; type: ManagedFileType; storagePool?: string }) {
@@ -4245,6 +4280,8 @@ async function saveManagedDownload(url: string, fileType: ManagedFileType, displ
   if (!isAllowedManagedFile(filename, fileType)) {
     if (fileType === "iso" && (extensionSource.toLowerCase().endsWith(".iso") || extensionSource.toLowerCase().endsWith(".img"))) {
       filename = `${requestedName}${path.extname(extensionSource)}`;
+    } else if (fileType === "floppy" && isFloppyFilename(extensionSource)) {
+      filename = `${requestedName}${path.extname(extensionSource)}`;
     } else if (fileType === "vm_disk") {
       if (extensionSource.toLowerCase().endsWith(".qcow2")) filename = `${requestedName}.qcow2`;
       else if (extensionSource.toLowerCase().endsWith(".img")) filename = `${requestedName}.img`;
@@ -4282,10 +4319,19 @@ async function saveManagedDownload(url: string, fileType: ManagedFileType, displ
   }
 
   try {
-    await pipeline(
-      Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream),
-      fs.createWriteStream(temporary),
-    );
+    if (fileType === "floppy") {
+      await pipeline(
+        Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream),
+        byteLimit(FLOPPY_MAX_BYTES, "Floppy image too large (maximum 2.88 MB)"),
+        fs.createWriteStream(temporary),
+      );
+      await assertFloppyImageFile(temporary);
+    } else {
+      await pipeline(
+        Readable.fromWeb(response.body as unknown as import("stream/web").ReadableStream),
+        fs.createWriteStream(temporary),
+      );
+    }
     await fs.promises.rename(temporary, destination);
     await ensureLibvirtManagedFileAccess(destination, fileType);
   } catch (error) {
@@ -4418,6 +4464,8 @@ async function saveManagedDownloadWithProgress(taskId: string, url: string, file
   if (!isAllowedManagedFile(filename, fileType)) {
     if (fileType === "iso" && (extensionSource.toLowerCase().endsWith(".iso") || extensionSource.toLowerCase().endsWith(".img"))) {
       filename = `${requestedName}${path.extname(extensionSource)}`;
+    } else if (fileType === "floppy" && isFloppyFilename(extensionSource)) {
+      filename = `${requestedName}${path.extname(extensionSource)}`;
     } else if (fileType === "vm_disk") {
       if (extensionSource.toLowerCase().endsWith(".qcow2")) filename = `${requestedName}.qcow2`;
       else if (extensionSource.toLowerCase().endsWith(".img")) filename = `${requestedName}.img`;
@@ -4449,6 +4497,7 @@ async function saveManagedDownloadWithProgress(taskId: string, url: string, file
 
   try {
     await withUrlDownloadSlot(taskId, () => downloadUrlToFileWithProgress(taskId, url, temporary));
+    if (fileType === "floppy") await assertFloppyImageFile(temporary);
     await fs.promises.rename(temporary, destination);
     await ensureLibvirtManagedFileAccess(destination, fileType);
   } catch (error) {
@@ -5276,7 +5325,8 @@ app.get("/api/internal/storage/isos", async (req, reply) => {
 app.get("/api/internal/storage/isos/:filename/download", async (req, reply) => {
   requireInternalNodeToken(req);
   const { filename } = req.params as { filename: string };
-  const resolvedPath = await resolveManagedFilePath(filename, "iso");
+  const fileType = (req.query as { type?: string }).type === "floppy" ? "floppy" : "iso";
+  const resolvedPath = await resolveManagedFilePath(filename, fileType);
   const stat = await fs.promises.stat(resolvedPath);
   reply.header("Content-Type", "application/octet-stream");
   reply.header("Content-Length", stat.size);
@@ -5287,12 +5337,15 @@ app.get("/api/internal/storage/isos/:filename/download", async (req, reply) => {
 // Receive a managed ISO as a binary stream (cross-node copy target).
 app.post("/api/internal/storage/isos/upload", async (req, reply) => {
   requireInternalNodeToken(req);
-  const { filename, storagePool } = req.query as { filename?: string; storagePool?: string };
+  const { filename, storagePool, type } = req.query as { filename?: string; storagePool?: string; type?: string };
   if (!filename) return reply.status(400).send({ error: "filename is required" });
+  const fileType: ManagedFileType = type === "floppy" ? "floppy" : "iso";
   const safeName = sanitizeManagedFilename(filename);
-  if (!isAllowedManagedFile(safeName, "iso")) return reply.status(400).send({ error: "Unsupported ISO extension" });
-  // Optional target pool (local or shared). Defaults to the managed ISO dir.
-  let destDir = getManagedStorageDir("iso");
+  if (!isAllowedManagedFile(safeName, fileType)) {
+    return reply.status(400).send({ error: fileType === "floppy" ? "Unsupported floppy image extension (.img, .ima, .vfd, .flp)" : "Unsupported ISO extension" });
+  }
+  // Optional target pool (local or shared). Defaults to the managed ISO/floppy dir.
+  let destDir = getManagedStorageDir(fileType);
   let poolName: string | undefined;
   if (storagePool) {
     const pool = resolveManagedStoragePool(storagePool);
@@ -5305,14 +5358,19 @@ app.post("/api/internal/storage/isos/upload", async (req, reply) => {
   const destPath = path.join(destDir, safeName);
   const tempPath = `${destPath}.part-${randomUUID()}`;
   try {
-    await pipeline(req.body as NodeJS.ReadableStream, fs.createWriteStream(tempPath, { flags: "wx" }));
+    if (fileType === "floppy") {
+      await pipeline(req.body as NodeJS.ReadableStream, byteLimit(FLOPPY_MAX_BYTES, "Floppy image too large (maximum 2.88 MB)"), fs.createWriteStream(tempPath, { flags: "wx" }));
+      await assertFloppyImageFile(tempPath);
+    } else {
+      await pipeline(req.body as NodeJS.ReadableStream, fs.createWriteStream(tempPath, { flags: "wx" }));
+    }
     await fs.promises.rename(tempPath, destPath);
   } finally {
     await fs.promises.unlink(tempPath).catch(() => {});
   }
-  await ensureLibvirtManagedFileAccess(destPath, "iso");
+  await ensureLibvirtManagedFileAccess(destPath, fileType);
   const stat = await fs.promises.stat(destPath);
-  db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 0, ?)").run(safeName, safeName, stat.size, poolName ?? null);
+  db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, ?, ?, NULL, 0, ?)").run(safeName, safeName, fileType, stat.size, poolName ?? null);
   return { ok: true, filename: safeName, sizeBytes: stat.size, storagePool: poolName ?? null };
 });
 
@@ -5693,6 +5751,22 @@ app.post("/api/internal/vms/:name/iso/eject", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name } = req.params as { name: string };
   return callRunner("qemu_eject_iso", { name });
+});
+
+app.post("/api/internal/vms/:name/floppy/attach", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const parsed = AttachFloppySchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const floppyPath = await resolveManagedFloppyPath(parsed.data.floppyFile);
+  return callRunner("qemu_attach_floppy", { name, floppyPath, readonly: parsed.data.readonly });
+});
+
+app.post("/api/internal/vms/:name/floppy/eject", async (req, reply) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  const { remove } = (req.body ?? {}) as { remove?: boolean };
+  return callRunner("qemu_eject_floppy", { name, remove: remove === true });
 });
 
 // ── Internal: VM hardware (disks + NICs) ───────────────────────────────────
@@ -6648,7 +6722,7 @@ app.get("/api/nodes/:name/storage/isos", async (req, reply) => {
   type ManagedIsoEntry = {
     filename: string;
     displayName?: string;
-    type: "iso";
+    type: "iso" | "floppy";
     sizeBytes: number;
     ownerId?: number;
     ownerUsername?: string;
@@ -6659,6 +6733,7 @@ app.get("/api/nodes/:name/storage/isos", async (req, reply) => {
   const toManagedIsoEntry = (entry: {
     filename: string;
     displayName?: string;
+    type: string;
     sizeBytes: number;
     ownerId?: number;
     ownerUsername?: string;
@@ -6668,7 +6743,7 @@ app.get("/api/nodes/:name/storage/isos", async (req, reply) => {
   }): ManagedIsoEntry => ({
     filename: entry.filename,
     displayName: entry.displayName,
-    type: "iso",
+    type: entry.type === "floppy" ? "floppy" : "iso",
     sizeBytes: entry.sizeBytes,
     ownerId: entry.ownerId,
     ownerUsername: entry.ownerUsername,
@@ -6677,16 +6752,18 @@ app.get("/api/nodes/:name/storage/isos", async (req, reply) => {
     createdAt: entry.createdAt,
   });
   const sharedPoolNames = new Set(listDatacenterStoragePoolRows().map((row) => row.name));
+  // ISO + floppy install media (the create wizard filters by type).
+  const isInstallMedia = (entry: { type?: string }) => entry.type === "iso" || entry.type === "floppy";
   const localSharedIsos: ManagedIsoEntry[] = (await listManagedFiles())
-    .filter((entry) => entry.type === "iso")
+    .filter(isInstallMedia)
     .map((entry) => toManagedIsoEntry(entry))
     .filter((entry) => !!entry.storagePool && sharedPoolNames.has(entry.storagePool));
   if (node.isLocal) {
     return (await listManagedFiles())
-      .filter((entry) => entry.type === "iso")
+      .filter(isInstallMedia)
       .map((entry) => toManagedIsoEntry(entry));
   }
-  const remote = await fetchRemoteNode<ManagedIsoEntry[]>(node, "/api/internal/storage/isos");
+  const remote = (await fetchRemoteNode<ManagedIsoEntry[]>(node, "/api/internal/storage/isos")).filter(isInstallMedia);
   const merged = new Map<string, ManagedIsoEntry>();
   for (const entry of [...remote, ...localSharedIsos]) {
     merged.set(`${entry.type}:${entry.storagePool ?? "local"}:${entry.filename}`, entry);
@@ -7318,6 +7395,45 @@ app.post("/api/vms/:name/iso/eject", async (req, reply) => {
     return node && !node.isLocal
       ? fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/iso/eject`, { method: "POST" })
       : callRunner("qemu_eject_iso", { name });
+  });
+});
+
+// Floppy drive A: — same media permission as the CD-ROM. The runner swaps the
+// medium live when the running VM already has a drive; otherwise the drive is
+// added to the definition and the result says it applies at next start.
+app.post("/api/vms/:name/floppy/attach", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  requireResourcePermission(req, "vm", name, "media");
+  const parsed = AttachFloppySchema.safeParse(req.body);
+  if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  const ip = getClientIp(req);
+  const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "vm.floppy.attach", label: `Insert floppy into VM ${name}`, resourceType: "vm", resourceName: name, message: path.basename(parsed.data.floppyFile) });
+  return runInstantTask(task, ip, async () => {
+    const node = await getResourceNodeAsync("vm", name);
+    if (node && !node.isLocal) {
+      return fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/attach`, {
+        method: "POST",
+        body: JSON.stringify(parsed.data),
+      });
+    }
+    const floppyPath = await resolveManagedFloppyPath(parsed.data.floppyFile);
+    return callRunner("qemu_attach_floppy", { name, floppyPath, readonly: parsed.data.readonly });
+  });
+});
+
+app.post("/api/vms/:name/floppy/eject", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  requireResourcePermission(req, "vm", name, "media");
+  const remove = ((req.body ?? {}) as { remove?: boolean }).remove === true;
+  const ip = getClientIp(req);
+  const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: remove ? "vm.floppy.remove" : "vm.floppy.eject", label: `${remove ? "Remove floppy drive from" : "Eject floppy from"} VM ${name}`, resourceType: "vm", resourceName: name, message: remove ? "Removing drive A:" : "Ejecting floppy" });
+  return runInstantTask(task, ip, async () => {
+    const node = await getResourceNodeAsync("vm", name);
+    return node && !node.isLocal
+      ? fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/eject`, { method: "POST", body: JSON.stringify({ remove }) })
+      : callRunner("qemu_eject_floppy", { name, remove });
   });
 });
 
@@ -9206,7 +9322,7 @@ app.get("/api/storage/isos", async (req, reply) => {
       .some((row) => hasResourcePermission(userId, role, "vm", row.vm_name, "media"));
   return managedFiles.filter((entry) =>
     role === "ADMIN"
-    || (entry.type === "iso" && hasVmMediaAccess)
+    || ((entry.type === "iso" || entry.type === "floppy") && hasVmMediaAccess)
     || !entry.ownerId
     || entry.ownerId === userId
     || entry.isPublic
@@ -9249,13 +9365,7 @@ app.post("/api/storage/isos/upload", async (req, reply) => {
       updateTask(task.id, { status: "failed", error: "Storage pool not found" });
       return reply.status(404).send({ error: "Storage pool not found" });
     }
-    const requiredContent = fileType === "docker_image"
-      ? "template"
-      : fileType === "lxc_template"
-        ? "template"
-        : fileType === "vm_disk"
-          ? "disk"
-          : "iso";
+    const requiredContent = MANAGED_TYPE_POOL_CONTENT[fileType];
     if (!pool.content.includes(requiredContent)) {
       await data.file.resume();
       updateTask(task.id, { status: "failed", error: "Storage pool does not allow this file type" });
@@ -9270,7 +9380,12 @@ app.post("/api/storage/isos/upload", async (req, reply) => {
     // Stream directly to destination (local or NAS) — no local temp copy
     const stream = fs.createWriteStream(destPath);
     try {
-      await pipeline(data.file, stream);
+      if (fileType === "floppy") {
+        await pipeline(data.file, byteLimit(FLOPPY_MAX_BYTES, "Floppy image too large (maximum 2.88 MB = 2 949 120 bytes)"), stream);
+        await assertFloppyImageFile(destPath);
+      } else {
+        await pipeline(data.file, stream);
+      }
     } catch (err) {
       await fs.promises.unlink(destPath).catch(() => {});
       throw err;

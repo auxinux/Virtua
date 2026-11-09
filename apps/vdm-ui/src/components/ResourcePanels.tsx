@@ -384,7 +384,7 @@ export function VmHardwarePanel({ node, name, vm }: { node: string; name: string
   const bridges = useQuery<Array<{ name: string }>>({
     queryKey: ["vdm-node-bridges", node], queryFn: () => api.get(`/api/vdm/nodes/${encodeURIComponent(node)}/bridges`),
   });
-  const isos = useQuery<Array<{ filename: string; nodeName: string; sizeBytes: number }>>({
+  const isos = useQuery<Array<{ filename: string; nodeName: string; sizeBytes: number; type?: string }>>({
     queryKey: ["vdm-isos"], queryFn: () => api.get("/api/vdm/isos"),
   });
 
@@ -408,10 +408,29 @@ export function VmHardwarePanel({ node, name, vm }: { node: string; name: string
     mutationFn: () => api.post(`${base}/iso/eject`),
     onSuccess: refresh, onError: fail,
   });
+  // Floppy drive A:. When the running VM has no drive yet, the node adds it to
+  // the definition and answers pendingRestart (no floppy controller hot-plug).
+  const [floppyNote, setFloppyNote] = useState("");
+  const onFloppyDone = (res: unknown) => {
+    const r = (res ?? {}) as { pendingRestart?: boolean; message?: string };
+    setFloppyNote(r.pendingRestart ? (r.message ?? "Applies after the next full stop/start.") : "");
+    refresh();
+  };
+  const attachFloppy = useMutation({
+    mutationFn: (floppyFile: string) => api.post(`${base}/floppy/attach`, { floppyFile, readonly: true }),
+    onSuccess: onFloppyDone, onError: fail,
+  });
+  const ejectFloppy = useMutation({
+    mutationFn: (remove: boolean) => api.post(`${base}/floppy/eject`, { remove }),
+    onSuccess: onFloppyDone, onError: fail,
+  });
 
   const disks = (vm.disks ?? []).filter((d) => !isCdrom(d));
   const nics = vm.networks ?? [];
-  const nodeIsos = (isos.data ?? []).filter((i) => i.nodeName === node);
+  const nodeIsos = (isos.data ?? []).filter((i) => i.nodeName === node && i.type !== "floppy");
+  const nodeFloppies = (isos.data ?? []).filter((i) => i.nodeName === node && i.type === "floppy");
+  // ARM (virt), POWER, s390x have no floppy controller.
+  const floppyCapable = !vm.arch || vm.arch === "x86_64" || vm.arch === "i686";
   const running = vm.state === "running";
 
   return (
@@ -434,13 +453,46 @@ export function VmHardwarePanel({ node, name, vm }: { node: string; name: string
             )}
           </div>
           <div className="flex items-center gap-2">
-            <select className="vdm-input flex-1" defaultValue="" onChange={(e) => { if (e.target.value) { setErr(""); attachIso.mutate(e.target.value); e.target.value = ""; } }}>
+            <select aria-label="Insert an ISO" className="vdm-input flex-1" defaultValue="" onChange={(e) => { if (e.target.value) { setErr(""); attachIso.mutate(e.target.value); e.target.value = ""; } }}>
               <option value="">{nodeIsos.length ? "Insert an ISO…" : "No ISO available on this node"}</option>
               {nodeIsos.map((i) => <option key={i.filename} value={i.filename}>{i.filename} ({formatBytes(i.sizeBytes)})</option>)}
             </select>
           </div>
         </div>
       </section>
+
+      {/* ── Floppy drive A: (x86 only) ── */}
+      {floppyCapable && (
+        <section className="space-y-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Floppy drive (A:)</h3>
+          <div className="vdm-card p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-mono text-vdm-text truncate">
+                {vm.mountedFloppy || (vm.floppyDrive ? "Empty drive" : "No floppy drive")}
+              </span>
+              <div className="flex gap-2">
+                {vm.mountedFloppy && (
+                  <button className="vdm-btn-danger text-xs" disabled={ejectFloppy.isPending} onClick={() => { setErr(""); ejectFloppy.mutate(false); }}>
+                    {ejectFloppy.isPending ? "Ejecting…" : "Eject"}
+                  </button>
+                )}
+                {vm.floppyDrive && (
+                  <button className="vdm-btn-ghost text-xs" disabled={ejectFloppy.isPending} onClick={async () => {
+                    if (await confirm({ title: "Remove drive A:?", message: "The floppy drive is removed from the VM definition. The image file is kept in the library.", confirmLabel: "Remove" })) {
+                      setErr(""); ejectFloppy.mutate(true);
+                    }
+                  }}>Remove drive</button>
+                )}
+              </div>
+            </div>
+            <select aria-label="Insert a floppy" className="vdm-input w-full" defaultValue="" onChange={(e) => { if (e.target.value) { setErr(""); attachFloppy.mutate(e.target.value); e.target.value = ""; } }}>
+              <option value="">{nodeFloppies.length ? "Insert a floppy image (write-protected)…" : "No floppy image on this node"}</option>
+              {nodeFloppies.map((i) => <option key={i.filename} value={i.filename}>{i.filename} ({formatBytes(i.sizeBytes)})</option>)}
+            </select>
+            {floppyNote && <p className="text-xs text-vdm-warning">{floppyNote}</p>}
+          </div>
+        </section>
+      )}
 
       {/* ── Disks ── */}
       <section className="space-y-2">

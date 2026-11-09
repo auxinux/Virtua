@@ -6,7 +6,7 @@ import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import * as argon2 from "argon2";
-import { validatePassword, VdmPbsRestoreRequestSchema, PBS_GUEST_NAME_RE, isPbsJobDue, type PbsKeepInput } from "@auxinux/shared";
+import { validatePassword, AttachFloppySchema, isFloppyFilename, VdmPbsRestoreRequestSchema, PBS_GUEST_NAME_RE, isPbsJobDue, type PbsKeepInput } from "@auxinux/shared";
 import * as path from "path";
 import * as fs from "fs";
 import { randomUUID } from "crypto";
@@ -1273,7 +1273,7 @@ app.get("/api/vdm/nodes/:name/isos", async (req, reply) => {
 // nodeName). Only ISO, LXC template and Docker image types are returned — VM
 // disks live in the storage content view, not this library, mirroring Virtua's
 // "ISO, templates et images" view.
-const LIBRARY_FILE_TYPES = new Set(["iso", "lxc_template", "docker_image"]);
+const LIBRARY_FILE_TYPES = new Set(["iso", "floppy", "lxc_template", "docker_image"]);
 app.get("/api/vdm/isos", async (req, reply) => {
   requireAuth(req, reply);
   const nodes = db.prepare("SELECT * FROM vdm_nodes WHERE enabled = 1 ORDER BY name ASC").all() as VdmNodeRow[];
@@ -1294,7 +1294,9 @@ app.get("/api/vdm/isos", async (req, reply) => {
 // Copy an ISO from one node to another (task-tracked, streamed node-to-node).
 app.post("/api/vdm/isos/copy", async (req, reply) => {
   requireAdmin(req, reply);
-  const { sourceNode: sourceNodeName, filename, targetNode: targetNodeName, targetStoragePool, sharedStorageName } = req.body as { sourceNode: string; filename: string; targetNode: string; targetStoragePool?: string; sharedStorageName?: string };
+  const { sourceNode: sourceNodeName, filename, targetNode: targetNodeName, targetStoragePool, sharedStorageName, type } = req.body as { sourceNode: string; filename: string; targetNode: string; targetStoragePool?: string; sharedStorageName?: string; type?: string };
+  // ISO (default) or floppy image: the node resolves each in its own directory.
+  const mediaTypeQuery = type === "floppy" ? "type=floppy" : "";
   if (!sourceNodeName || !filename || !targetNodeName) return reply.status(400).send({ error: "sourceNode, filename and targetNode are required" });
   if (sourceNodeName === targetNodeName) return reply.status(400).send({ error: "Source and target nodes must be different" });
 
@@ -1320,7 +1322,7 @@ app.post("/api/vdm/isos/copy", async (req, reply) => {
 
       updateTask(task.id, "running", 30, "Downloading ISO from source node...");
       const base = sourceNode.api_url.replace(/\/+$/, "");
-      const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download`;
+      const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download${mediaTypeQuery ? `?${mediaTypeQuery}` : ""}`;
       const res = await fetch(url, {
         headers: { "x-auxinux-node-token": decryptSecret(sourceNode.auth_token) },
         signal: controller.signal,
@@ -1333,7 +1335,7 @@ app.post("/api/vdm/isos/copy", async (req, reply) => {
 
       updateTask(task.id, "running", 60, `Uploading ISO to ${targetPool} on ${targetNodeName}...`);
       const targetBase = targetNode.api_url.replace(/\/+$/, "");
-      const uploadUrl = `${targetBase}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}&storagePool=${encodeURIComponent(targetPool)}`;
+      const uploadUrl = `${targetBase}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}&storagePool=${encodeURIComponent(targetPool)}${mediaTypeQuery ? `&${mediaTypeQuery}` : ""}`;
       const uploadRes = await fetch(uploadUrl, {
         method: "POST",
         headers: {
@@ -1383,9 +1385,10 @@ app.delete("/api/vdm/nodes/:name/storage/isos/:filename", async (req, reply) => 
 app.get("/api/vdm/nodes/:name/isos/:filename/download", async (req, reply) => {
   requireAuth(req, reply);
   const { name, filename } = req.params as { name: string; filename: string };
+  const { type } = req.query as { type?: string };
   const node = getEnabledNode(name);
   const base = node.api_url.replace(/\/+$/, "");
-  const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download`;
+  const url = `${base}/api/internal/storage/isos/${encodeURIComponent(filename)}/download${type === "floppy" ? "?type=floppy" : ""}`;
   const res = await fetch(url, { headers: { "x-auxinux-node-token": decryptSecret(node.auth_token) } });
   if (!res.ok || !res.body) {
     const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
@@ -1398,17 +1401,18 @@ app.get("/api/vdm/nodes/:name/isos/:filename/download", async (req, reply) => {
 });
 
 // ── Managed-file helpers (mirror of the node's api helpers) ────────────────
-type VdmManagedFileType = "iso" | "lxc_template" | "docker_image" | "vm_disk";
+type VdmManagedFileType = "iso" | "floppy" | "lxc_template" | "docker_image" | "vm_disk";
 function vdmSanitizeManagedFilename(input: string) {
   return path.basename(input).replace(/[^\w.+-]/g, "_");
 }
 function vdmResolveManagedFileType(raw?: string): VdmManagedFileType {
-  if (raw === "lxc_template" || raw === "docker_image" || raw === "iso" || raw === "vm_disk") return raw;
+  if (raw === "lxc_template" || raw === "docker_image" || raw === "iso" || raw === "vm_disk" || raw === "floppy") return raw;
   return "iso";
 }
 function vdmIsAllowedManagedFile(filename: string, type: VdmManagedFileType) {
   const lower = filename.toLowerCase();
   if (type === "iso") return lower.endsWith(".iso") || lower.endsWith(".img");
+  if (type === "floppy") return isFloppyFilename(lower);
   if (type === "lxc_template") return lower.endsWith(".tar.gz") || lower.endsWith(".tar.xz") || lower.endsWith(".tar.zst") || lower.endsWith(".tar");
   if (type === "vm_disk") return lower.endsWith(".qcow2") || lower.endsWith(".img") || lower.endsWith(".raw") || lower.endsWith(".vmdk") || lower.endsWith(".vhd") || lower.endsWith(".vhdx");
   return lower.endsWith(".tar");
@@ -1433,7 +1437,8 @@ app.post("/api/vdm/nodes/:name/storage/isos/upload", async (req, reply) => {
     try {
       updateTask(task.id, "running", 20, "Uploading file to node...");
       const base = node.api_url.replace(/\/+$/, "");
-      const uploadUrl = `${base}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}${storagePool ? `&storagePool=${encodeURIComponent(storagePool)}` : ""}`;
+      // The node enforces the floppy size limit (2.88 MB) while streaming.
+      const uploadUrl = `${base}/api/internal/storage/isos/upload?filename=${encodeURIComponent(filename)}${storagePool ? `&storagePool=${encodeURIComponent(storagePool)}` : ""}${fileType === "floppy" ? "&type=floppy" : ""}`;
       const uploadRes = await fetch(uploadUrl, {
         method: "POST",
         headers: {
@@ -1983,6 +1988,20 @@ app.post("/api/vdm/vms/:node/:name/iso/:op", async (req, reply) => {
   if (op !== "attach" && op !== "eject") return reply.status(400).send({ error: "op must be attach or eject" });
   const node = getEnabledNode(nodeName);
   return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/iso/${op}`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
+});
+
+// Floppy drive A: (insert/eject/remove), relayed like the CD-ROM. The node
+// validates the image (library, ≤ 2.88 MB) and refuses non-x86 VMs.
+app.post("/api/vdm/vms/:node/:name/floppy/:op", async (req, reply) => {
+  requireAdmin(req, reply);
+  const { node: nodeName, name, op } = req.params as { node: string; name: string; op: string };
+  if (op !== "attach" && op !== "eject") return reply.status(400).send({ error: "op must be attach or eject" });
+  if (op === "attach") {
+    const parsed = AttachFloppySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  }
+  const node = getEnabledNode(nodeName);
+  return fetchNode(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/${op}`, { method: "POST", body: JSON.stringify(req.body ?? {}) });
 });
 
 // ── VM hardware: disks, NICs, USB — relayed to the owning node ─────────────

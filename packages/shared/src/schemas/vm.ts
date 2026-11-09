@@ -1,4 +1,9 @@
 import { z } from "zod";
+import { archSupportsFloppy, isFloppyFilename } from "./floppy";
+
+/** Boot devices: "fd" = floppy first (BIOS/SeaBIOS only; OVMF cannot boot a floppy). */
+export const VmBootDeviceSchema = z.enum(["hd", "cdrom", "network", "fd"]);
+export type VmBootDevice = z.infer<typeof VmBootDeviceSchema>;
 
 const vmNameRegex = /^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/;
 const macRegex = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
@@ -13,13 +18,15 @@ export const CreateVmSchema = z.object({
   storagePool: z.string().optional(),
   os: z.string().min(1),
   isoFile: z.string().optional(),
+  /** Floppy image (drive A:) from the library; x86 only. */
+  floppyFile: z.string().max(255).refine(isFloppyFilename, { message: "floppyFile must be a .img, .ima, .vfd or .flp image" }).optional(),
   bridge: z.string().default("virbr0"),
   mac: z.string().regex(macRegex, "MAC address must use aa:bb:cc:dd:ee:ff format").optional(),
   arch: z.enum(["x86_64", "aarch64"]).default("x86_64"),
   machine: z.string().default("q35"),
   uefi: z.boolean().default(false),
   secureBoot: z.boolean().default(false),
-  bootDevice: z.enum(["hd", "cdrom", "network"]).default("hd"),
+  bootDevice: VmBootDeviceSchema.default("hd"),
   tpmEnabled: z.boolean().default(false),
   qemuAgentEnabled: z.boolean().default(true),
   videoModel: z.enum(["vga", "virtio", "qxl"]).default("vga"),
@@ -28,6 +35,15 @@ export const CreateVmSchema = z.object({
   tags: z.array(z.string()).optional(),
 }).refine((value) => !(value.diskGb !== undefined && value.existingPath), {
   message: "diskGb and existingPath cannot be used together",
+}).refine((value) => !value.floppyFile || archSupportsFloppy(value.arch), {
+  message: "Floppy drives are only available on x86 VMs (aarch64 machines have no floppy controller)",
+  path: ["floppyFile"],
+}).refine((value) => value.bootDevice !== "fd" || !!value.floppyFile, {
+  message: "bootDevice fd requires a floppy image",
+  path: ["bootDevice"],
+}).refine((value) => value.bootDevice !== "fd" || (!value.uefi && !value.secureBoot), {
+  message: "UEFI firmware cannot boot from a floppy: use BIOS (uefi off) to boot from drive A:",
+  path: ["bootDevice"],
 });
 
 export const UpdateVmConfigSchema = z.object({
@@ -40,7 +56,7 @@ export const UpdateVmConfigSchema = z.object({
   restartOnCrash: z.boolean().nullable().optional(),
   uefi: z.boolean().optional(),
   secureBoot: z.boolean().optional(),
-  bootDevice: z.enum(["hd", "cdrom", "network"]).optional(),
+  bootDevice: VmBootDeviceSchema.optional(),
   tpmEnabled: z.boolean().optional(),
   qemuAgentEnabled: z.boolean().optional(),
   videoModel: z.enum(["vga", "virtio", "qxl"]).optional(),

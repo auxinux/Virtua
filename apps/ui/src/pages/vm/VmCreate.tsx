@@ -15,13 +15,14 @@ interface CreateVmPayload {
   storagePool?: string;
   os: string;
   isoFile?: string;
+  floppyFile?: string;
   bridge: string;
   mac?: string;
   arch: "x86_64" | "aarch64";
   machine: string;
   uefi: boolean;
   secureBoot: boolean;
-  bootDevice: "hd" | "cdrom" | "network";
+  bootDevice: "hd" | "cdrom" | "network" | "fd";
   tpmEnabled: boolean;
   qemuAgentEnabled: boolean;
   videoModel: "vga" | "virtio" | "qxl";
@@ -77,6 +78,7 @@ export default function VmCreate() {
     storagePool: "",
     os: "linux",
     isoFile: "",
+    floppyFile: "",
     bridge: "virbr0", // overridden once bridge list loads
     mac: "",
     arch: "x86_64",
@@ -169,6 +171,8 @@ export default function VmCreate() {
       arch: tpl.architecture === "arm64" ? "aarch64" : "x86_64",
       machine: tpl.architecture === "arm64" ? "virt" : current.machine,
       isoFile: "",
+      floppyFile: "",
+      bootDevice: current.bootDevice === "fd" ? "hd" : current.bootDevice,
     }));
   };
 
@@ -187,11 +191,22 @@ export default function VmCreate() {
     }));
   };
 
+  // UEFI (OVMF) cannot boot a floppy: leaving BIOS drops "floppy first".
+  const leaveFloppyBoot = (bootDevice: CreateVmPayload["bootDevice"]) => (bootDevice === "fd" ? "hd" : bootDevice);
+
   const setUefi = (uefi: boolean) =>
-    setForm((current) => ({ ...current, uefi, ...(uefi ? {} : { secureBoot: false }) }));
+    setForm((current) => ({
+      ...current,
+      uefi,
+      ...(uefi ? { bootDevice: leaveFloppyBoot(current.bootDevice) } : { secureBoot: false }),
+    }));
 
   const setSecureBoot = (secureBoot: boolean) =>
-    setForm((current) => ({ ...current, secureBoot, ...(secureBoot ? { uefi: true } : {}) }));
+    setForm((current) => ({
+      ...current,
+      secureBoot,
+      ...(secureBoot ? { uefi: true, bootDevice: leaveFloppyBoot(current.bootDevice) } : {}),
+    }));
 
   const setArch = (arch: "x86_64" | "aarch64") => {
     setForm((current) => ({
@@ -199,6 +214,8 @@ export default function VmCreate() {
       arch,
       machine: MACHINE_OPTIONS[arch][0],
       uefi: arch === "aarch64" ? true : current.uefi,
+      // ARM64 machines have no floppy controller.
+      ...(arch === "aarch64" ? { floppyFile: "", bootDevice: leaveFloppyBoot(current.bootDevice) } : {}),
     }));
   };
 
@@ -244,6 +261,7 @@ export default function VmCreate() {
       diskGb: noDisk || useExistingDisk ? undefined : form.diskGb,
       existingPath: useExistingDisk ? (form.existingPath ?? "").trim() : undefined,
       storagePool: noDisk || useExistingDisk ? undefined : form.storagePool,
+      floppyFile: form.floppyFile || undefined,
     });
   };
 
@@ -257,6 +275,8 @@ export default function VmCreate() {
   const templateIsoNames = new Set(isoTemplates.map((it) => it.filename));
   const serverIsos = isos.filter((i) => i.type === "iso" && !templateIsoNames.has(i.filename));
   const archIsoTemplates = isoTemplates.filter((it) => archMatches(it.architecture));
+  const floppyImages = isos.filter((i) => i.type === "floppy");
+  const floppyAvailable = form.arch === "x86_64";
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -512,6 +532,33 @@ export default function VmCreate() {
             <p className="text-xs text-text-500 mt-1">Les ISO de templates sont filtrées selon l'architecture choisie ci-dessus.</p>
           </div>
 
+          <div>
+            <label className="label">💾 {t("vm.floppyImage", "Disquette A: (optionnel)")}</label>
+            <select
+              className="input"
+              value={form.floppyFile}
+              onChange={(e) => {
+                const floppy = e.target.value;
+                setForm((f) => ({
+                  ...f,
+                  floppyFile: floppy,
+                  bootDevice: !floppy && f.bootDevice === "fd" ? "hd" : f.bootDevice,
+                }));
+              }}
+              disabled={!!selectedTemplate || !floppyAvailable}
+            >
+              <option value="">— {t("vm.noFloppy", "Aucune disquette")} —</option>
+              {floppyImages.map((img) => (
+                <option key={img.filename} value={img.filename}>{img.displayName || img.filename}</option>
+              ))}
+            </select>
+            <p className="text-xs text-text-500 mt-1">
+              {floppyAvailable
+                ? t("vm.floppyHelp", "Image .img/.ima/.vfd (1,44 Mo, 2,88 Mo…) de la bibliothèque ISO : DOS, pilotes F6 de Windows XP, etc. Insérée protégée en écriture.")
+                : t("vm.floppyUnavailableArm", "Pas de lecteur de disquette sur ARM64 (aucun contrôleur de disquette).")}
+            </p>
+          </div>
+
           <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="label">{t("vm.firstBootDevice")}</label>
@@ -519,7 +566,11 @@ export default function VmCreate() {
                 <option value="hd">{t("vm.bootDisk")}</option>
                 <option value="cdrom">{t("vm.bootCdrom")}</option>
                 <option value="network">{t("vm.bootNetwork")} (PXE)</option>
+                <option value="fd" disabled={!form.floppyFile || form.uefi}>{t("vm.bootFloppy", "Disquette (A:)")}</option>
               </select>
+              {form.floppyFile && form.uefi && (
+                <p className="mt-1.5 text-xs text-text-500">{t("vm.floppyBootNeedsBios", "Le démarrage sur disquette exige le BIOS (l'UEFI ne sait pas démarrer une disquette).")}</p>
+              )}
               {form.bootDevice === "network" && form.uefi && (
                 <p className="mt-1.5 text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-2 py-1.5">
                   ⚠ PXE UEFI : utilise le modèle NIC <strong>e1000</strong> (onglet Réseau). VirtIO n'a pas de ROM PXE UEFI — SCCM/WDS ne sera pas contacté.

@@ -38,6 +38,7 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
   // VM
   const [osType, setOsType] = useState("linux");
   const [isoFile, setIsoFile] = useState("");
+  const [floppyFile, setFloppyFile] = useState("");
   // LXC
   const [templateName, setTemplateName] = useState("");
   const [password, setPassword] = useState("");
@@ -70,6 +71,7 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
           os: osType || "linux",
           ...(storageKind === "local" ? { storagePool } : { sharedStorageName }),
           ...(isoFile ? { isoFile } : {}),
+          ...(floppyFile ? { floppyFile } : {}),
           ...(bridge ? { bridge } : {}),
         };
       } else if (type === "lxc") {
@@ -171,6 +173,13 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
               <select className="vdm-input" value={isoFile} onChange={(e) => setIsoFile(e.target.value)}>
                 <option value="">None</option>
                 {(isos.data ?? []).filter((f) => f.type === "iso").map((f) => <option key={f.filename} value={f.filename}>{f.displayName ?? f.filename}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="vdm-label">Floppy A: (optional)</label>
+              <select className="vdm-input" value={floppyFile} onChange={(e) => setFloppyFile(e.target.value)}>
+                <option value="">None</option>
+                {(isos.data ?? []).filter((f) => f.type === "floppy").map((f) => <option key={f.filename} value={f.filename}>{f.displayName ?? f.filename}</option>)}
               </select>
             </div>
           </>

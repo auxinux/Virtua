@@ -12,6 +12,7 @@ export * from "./types/acl";
 export * from "./types/datacenter";
 export * from "./schemas/auth";
 export * from "./schemas/vm";
+export * from "./schemas/floppy";
 export * from "./schemas/lxc";
 export * from "./schemas/docker";
 export * from "./schemas/storage";

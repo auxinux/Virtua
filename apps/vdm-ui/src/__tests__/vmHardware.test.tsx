@@ -13,7 +13,10 @@ vi.mock("@/api/client", () => ({
     get: vi.fn(async (path: string) => {
       if (path.includes("/bridges")) return [{ name: "vmbr0" }, { name: "vmbr1" }];
       if (path.includes("/storage")) return [{ name: "local", type: "dir" }];
-      if (path === "/api/vdm/isos") return [{ filename: "debian.iso", nodeName: "n1", sizeBytes: 1024 ** 3 }];
+      if (path === "/api/vdm/isos") return [
+        { filename: "debian.iso", nodeName: "n1", sizeBytes: 1024 ** 3, type: "iso" },
+        { filename: "xp-f6.img", nodeName: "n1", sizeBytes: 1474560, type: "floppy" },
+      ];
       return [];
     }),
     post: (url: string, body?: unknown) => post(url, body),
@@ -35,11 +38,11 @@ const vm = {
   networks: [{ index: 0, mac: "aa:bb:cc:dd:ee:ff", model: "virtio", source: "vmbr0", type: "bridge" }],
 } as unknown as VdmVmInfo;
 
-function renderPanel() {
+function renderPanel(override: Partial<VdmVmInfo> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <VmHardwarePanel node="n1" name="vm1" vm={vm} />
+      <VmHardwarePanel node="n1" name="vm1" vm={{ ...vm, ...override }} />
     </QueryClientProvider>,
   );
 }
@@ -90,8 +93,39 @@ describe("VmHardwarePanel", () => {
     // The ISO list loads asynchronously; setting a value before its <option>
     // exists silently leaves the select empty.
     await screen.findByRole("option", { name: /debian\.iso/ });
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "debian.iso" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Insert an ISO" }), { target: { value: "debian.iso" } });
     await waitFor(() => expect(post).toHaveBeenCalled());
     expect(post.mock.calls[0][0]).toBe("/api/vdm/vms/n1/vm1/iso/attach");
+  });
+
+  it("keeps floppy images out of the ISO picker", async () => {
+    renderPanel();
+    await screen.findByRole("option", { name: /debian\.iso/ });
+    const isoSelect = screen.getByRole("combobox", { name: "Insert an ISO" });
+    expect(isoSelect.textContent).not.toContain("xp-f6.img");
+  });
+
+  it("inserts a floppy write-protected through the VDM relay", async () => {
+    renderPanel();
+    await screen.findByRole("option", { name: /xp-f6\.img/ });
+    fireEvent.change(screen.getByRole("combobox", { name: "Insert a floppy" }), { target: { value: "xp-f6.img" } });
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    const [url, body] = post.mock.calls[0];
+    expect(url).toBe("/api/vdm/vms/n1/vm1/floppy/attach");
+    expect(body).toEqual({ floppyFile: "xp-f6.img", readonly: true });
+  });
+
+  it("ejects the floppy through the VDM relay", async () => {
+    renderPanel({ mountedFloppy: "xp-f6.img", floppyDrive: true });
+    fireEvent.click(await screen.findByText("Eject", { selector: "button" }));
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    expect(post.mock.calls[0]).toEqual(["/api/vdm/vms/n1/vm1/floppy/eject", { remove: false }]);
+  });
+
+  it("hides the floppy drive on ARM64 VMs (no floppy controller)", async () => {
+    renderPanel({ arch: "aarch64" });
+    await screen.findByRole("option", { name: /debian\.iso/ });
+    expect(screen.queryByText("Floppy drive (A:)")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Insert a floppy" })).toBeNull();
   });
 });

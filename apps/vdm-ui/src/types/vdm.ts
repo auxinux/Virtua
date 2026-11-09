@@ -116,6 +116,10 @@ export interface VdmVmInfo extends VdmVm {
   networks?: Array<{ index?: number; mac: string; model: string; source: string; type?: string }>;
   usbDevices?: Array<{ vendorId?: string; productId?: string; description?: string }>;
   mountedIso?: string | null;
+  /** Image in floppy drive A: (basename), null when empty or no drive. */
+  mountedFloppy?: string | null;
+  floppyDrive?: boolean;
+  floppyReadonly?: boolean | null;
 }
 
 export interface VdmSnapshot {

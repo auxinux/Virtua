@@ -9,6 +9,16 @@ import type { ProgressEmitter } from "../runner.js";
 import { assertOutsideLxcRootfs, isProtectedHostDir } from "./lxcRootfsGuard.js";
 import { buildPveQemuConf, buildPveVmXml, parseLibvirtForPve, parsePveVmConfig, parseSnapshotRef, validatePbsConnection, type PruneKeep } from "./pbsConfig.js";
 import { backupToPbs, prunePbsGroup, readPbsBlob, restorePbsArchive } from "./pbsClient.js";
+import {
+  applyFloppyToDomainXml,
+  buildFloppyDiskXml,
+  assertFloppyBootable,
+  assertFloppySupported,
+  bootOrderXmlLines,
+  domainArchMachine,
+  findFloppyDisk,
+  type BootDevice,
+} from "./floppy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -259,6 +269,8 @@ export async function handleQemu(action: string, params: unknown, emit?: Progres
     case "qemu_update_network": return updateNetwork(p);
     case "qemu_attach_iso": return attachIso(p.name as string, p.isoPath as string);
     case "qemu_eject_iso": return ejectIso(p.name as string);
+    case "qemu_attach_floppy": return attachFloppy(p.name as string, p.floppyPath as string, (p.readonly as boolean | undefined) ?? true);
+    case "qemu_eject_floppy": return ejectFloppy(p.name as string, (p.remove as boolean | undefined) ?? false);
     case "qemu_usb_attach": return attachUsbDevice(p);
     case "qemu_usb_detach": return detachUsbDevice(p);
     case "qemu_snapshot_create": return createSnapshot(p.name as string, p.snapName as string, p.description as string);
@@ -1069,16 +1081,22 @@ function ensureTpm(xml: string, enabled: boolean) {
   return withoutTpm.replace("</devices>", `    <tpm model="tpm-crb"><backend type="emulator" version="2.0"/></tpm>\n  </devices>`);
 }
 
-function applyBootOrder(xml: string, primary: "hd" | "cdrom" | "network") {
-  const rest = ["hd", "cdrom", "network"].filter((entry) => entry !== primary);
-  const bootLines = [primary, ...rest].map((device) => `    <boot dev="${device}"/>`).join("\n");
+function validateBootDevice(value: string): BootDevice {
+  if (!["hd", "cdrom", "network", "fd"].includes(value)) {
+    throw new Error("Invalid bootDevice: must be hd, cdrom, network, or fd");
+  }
+  return value as BootDevice;
+}
+
+function applyBootOrder(xml: string, primary: BootDevice) {
+  const bootLines = bootOrderXmlLines(primary);
   const cleaned = xml.replace(/\s*<boot dev=['"][^'"]+['"]\s*\/>\n?/g, "\n");
   return cleaned.replace(/<os\b([^>]*)>([\s\S]*?)<\/os>/i, (_full, attrs, inner) => {
     return `<os${attrs}>${inner.replace(/\n\s*\n/g, "\n")}\n${bootLines}\n  </os>`;
   });
 }
 
-async function defineBootOrder(name: string, primary: "hd" | "cdrom" | "network") {
+async function defineBootOrder(name: string, primary: BootDevice) {
   const xml = await dumpDomainXmlForDefine(name, true);
   const updated = applyBootOrder(xml, primary);
   const tmp = `/tmp/auxinux-boot-order-${name}-${Date.now()}.xml`;
@@ -1274,6 +1292,8 @@ async function createVm(p: Record<string, unknown>) {
   const storagePool = p.storagePool ? validatePath(p.storagePool as string, "storagePool") : undefined;
   const isoFileRaw = (p.isoFile as string | undefined)?.trim();
   const isoFile = isoFileRaw ? validatePath(isoFileRaw, "isoFile") : undefined;
+  const floppyFileRaw = (p.floppyFile as string | undefined)?.trim();
+  const floppyFile = floppyFileRaw ? await validateFloppyImagePath(floppyFileRaw) : undefined;
   const bridge = validateBridge((p.bridge as string) ?? "virbr0");
   const macRaw = (p.mac as string | undefined)?.trim();
   const mac = macRaw ? validateMac(macRaw) : undefined;
@@ -1283,11 +1303,12 @@ async function createVm(p: Record<string, unknown>) {
   if (secureBoot) requireQ35ForSecureBoot(machine);
   // secureBoot implies UEFI: SeaBIOS has no Secure Boot at all.
   const uefi = ((p.uefi as boolean) ?? (arch === "aarch64")) || secureBoot;
-  const bootDeviceRaw = ((p.bootDevice as string | undefined) ?? (isoFile ? "cdrom" : "hd"));
-  if (!["hd", "cdrom", "network"].includes(bootDeviceRaw)) {
-    throw new Error("Invalid bootDevice: must be hd, cdrom, or network");
+  const bootDevice = validateBootDevice((p.bootDevice as string | undefined) ?? (isoFile ? "cdrom" : "hd"));
+  if (floppyFile) assertFloppySupported(arch, machine);
+  if (bootDevice === "fd") {
+    if (!floppyFile) throw new Error("bootDevice fd requires a floppy image");
+    assertFloppyBootable(uefi);
   }
-  const bootDevice = bootDeviceRaw as "hd" | "cdrom" | "network";
   const tpmEnabled = (p.tpmEnabled as boolean) ?? false;
   const qemuAgentEnabled = (p.qemuAgentEnabled as boolean) ?? true;
   const requestedVideoModel = p.videoModel as string | undefined;
@@ -1332,8 +1353,7 @@ async function createVm(p: Record<string, unknown>) {
     uefi
       ? `    <type arch="${xmlEscape(arch)}" machine="${xmlEscape(machine)}">hvm</type>\n${loaderLine}`
       : `    <type arch="${xmlEscape(arch)}" machine="${xmlEscape(machine)}">hvm</type>`,
-    `    <boot dev="${bootDevice}"/>`,
-    ...["hd", "cdrom", "network"].filter((entry) => entry !== bootDevice).map((entry) => `    <boot dev="${entry}"/>`),
+    bootOrderXmlLines(bootDevice),
     `  </os>`,
     `  <features><acpi/><apic/>${secureBoot ? `<smm state="on"/>` : ""}</features>`,
     `  <pm><suspend-to-mem enabled="no"/><suspend-to-disk enabled="no"/></pm>`,
@@ -1364,6 +1384,7 @@ async function createVm(p: Record<string, unknown>) {
         `    </disk>`,
       ].join("\n");
     })() : "",
+    floppyFile ? buildFloppyDiskXml({ path: floppyFile, readonly: true }) : "",
     `    <interface type="bridge">`,
     mac ? `      <mac address="${xmlEscape(mac)}"/>` : "",
     `      <source bridge="${xmlEscape(bridge)}"/>`,
@@ -1605,7 +1626,7 @@ async function getVmInfo(name: string) {
   const autostart = parseField(info, "Autostart") === "enable";
   const machine = xml.match(/machine=['"]([^'"]+)['"]/)?.[1] ?? "";
   const arch = xml.match(/arch=['"]([^'"]+)['"]/)?.[1] ?? "";
-  const bootOrder = [...xml.matchAll(/<boot dev=['"]([^'"]+)['"]\s*\/>/g)].map((match) => match[1]) as Array<"hd" | "cdrom" | "network">;
+  const bootOrder = [...xml.matchAll(/<boot dev=['"]([^'"]+)['"]\s*\/>/g)].map((match) => match[1]) as BootDevice[];
   const tpmEnabled = /<tpm\b/i.test(xml);
   const qemuAgentEnabled = /<channel\b[\s\S]*?<target[^>]*name=['"]org\.qemu\.guest_agent\.0['"]/i.test(xml);
   const videoModel = (xml.match(/<video\b[\s\S]*?<model[^>]*type=['"]([^'"]+)['"]/i)?.[1] ?? "vga") as "vga" | "virtio" | "qxl";
@@ -1657,6 +1678,10 @@ async function getVmInfo(name: string) {
   // Surface the currently-mounted ISO (cdrom with a source) for the resource API.
   const cdrom = parseDiskBlocks(xml).find((d) => d.deviceType === "cdrom" && !!d.source);
   const mountedIso = cdrom?.source ? path.basename(cdrom.source) : null;
+  // Drive A: as the guest sees it right now (live XML), so a hot change shows up.
+  const floppy = findFloppyDisk(liveXml) ?? findFloppyDisk(xml);
+  const mountedFloppy = floppy?.source ? path.basename(floppy.source) : null;
+  const floppyDrive = !!floppy;
 
   const uefi = /<loader\b/i.test(xml);
   const secureBoot = /<loader[^>]*\bsecure=['"]yes['"]/i.test(xml);
@@ -1664,7 +1689,7 @@ async function getVmInfo(name: string) {
     name, state, vcpus,
     currentMemoryKiB: curMem, maxMemoryKiB: maxMem,
     memoryMb: Math.round(maxMem / 1024), usedMemoryMb: Math.round(curMem / 1024),
-    uuid, autostart, machine, arch, uefi, secureBoot, bootOrder, tpmEnabled, qemuAgentEnabled, videoModel, disks, networks, usbDevices, mountedIso, vncPort, vncHost: "127.0.0.1", spicePort: spice.port, spiceTlsPort: spice.tlsPort, spiceHost: spice.host, spiceEnabled: spice.enabled, os: "Unknown",
+    uuid, autostart, machine, arch, uefi, secureBoot, bootOrder, tpmEnabled, qemuAgentEnabled, videoModel, disks, networks, usbDevices, mountedIso, mountedFloppy, floppyDrive, floppyReadonly: floppy?.readonly ?? null, vncPort, vncHost: "127.0.0.1", spicePort: spice.port, spiceTlsPort: spice.tlsPort, spiceHost: spice.host, spiceEnabled: spice.enabled, os: "Unknown",
   };
 }
 
@@ -2123,7 +2148,7 @@ async function updateVmConfig(p: Record<string, unknown>) {
   }
 
   if (typeof p.bootDevice === "string") {
-    xml = applyBootOrder(xml, p.bootDevice as "hd" | "cdrom" | "network");
+    xml = applyBootOrder(xml, validateBootDevice(p.bootDevice));
   }
 
   if (typeof p.tpmEnabled === "boolean") {
@@ -2163,6 +2188,12 @@ async function updateVmConfig(p: Record<string, unknown>) {
       }
     }
     xml = ensureSmmFeature(xml, wantSecure);
+  }
+
+  // Floppy-first must stay bootable whatever else changed (UEFI toggled on, …).
+  if (xml.match(/<boot dev=['"]([^'"]+)['"]/)?.[1] === "fd") {
+    if (!findFloppyDisk(xml)) throw new Error("Cannot boot from floppy: the VM has no floppy drive (attach a floppy image first)");
+    assertFloppyBootable(/<loader\b/i.test(xml));
   }
 
   const tmp = `/tmp/auxinux-update-vm-${name}-${Date.now()}.xml`;
@@ -2553,6 +2584,106 @@ async function ejectIso(name: string) {
     await fs.unlink(tmp).catch(() => {});
   }
   return { ok: true };
+}
+
+// ── Floppy drive A: ────────────────────────────────────────────────────────
+// A running guest can swap the medium of an existing drive (change-media), but
+// a floppy controller cannot be hot-plugged: when the running VM has no fda,
+// the drive is added to the persistent definition and appears at next start.
+
+const FLOPPY_EXTENSIONS_RE = /\.(img|ima|vfd|flp)$/i;
+const FLOPPY_MAX_BYTES = 2880 * 1024;
+
+async function validateFloppyImagePath(raw: string): Promise<string> {
+  const floppyPath = validatePath(raw, "floppyPath");
+  if (!FLOPPY_EXTENSIONS_RE.test(floppyPath)) {
+    throw new Error("Invalid floppy image: expected a .img, .ima, .vfd or .flp file");
+  }
+  await assertOutsideLxcRootfs(floppyPath, "floppy image access");
+  const stat = await fs.stat(floppyPath).catch(() => null);
+  if (!stat?.isFile()) throw new Error(`Floppy image not found: ${floppyPath}`);
+  if (stat.size === 0) throw new Error("Floppy image is empty");
+  if (stat.size > FLOPPY_MAX_BYTES) {
+    throw new Error(`Floppy image too large: ${stat.size} bytes (maximum ${FLOPPY_MAX_BYTES} bytes = 2.88 MB)`);
+  }
+  return floppyPath;
+}
+
+async function ensureLibvirtFloppyAccess(filePath: string, writable: boolean): Promise<void> {
+  if (writable) return ensureLibvirtDiskAccess(filePath);
+  return ensureLibvirtIsoAccess(filePath);
+}
+
+async function redefineWithFloppy(name: string, change: { path: string | null; readonly?: boolean; remove?: boolean }) {
+  await withVmDefineLock(name, async () => {
+    const xml = await dumpDomainXmlForDefine(name, true);
+    let updated = applyFloppyToDomainXml(xml, change);
+    // Removing the drive while it is the first boot device would leave an
+    // unbootable order: fall back to the disk.
+    if (change.remove && updated.match(/<boot dev=['"]([^'"]+)['"]/)?.[1] === "fd") {
+      updated = applyBootOrder(updated, "hd");
+    }
+    const tmp = `/tmp/auxinux-floppy-${name}-${Date.now()}.xml`;
+    await fs.writeFile(tmp, updated);
+    try {
+      await virsh("define", tmp);
+    } finally {
+      await fs.unlink(tmp).catch(() => {});
+    }
+  });
+}
+
+async function attachFloppy(name: string, floppyPathRaw: string, readonly: boolean) {
+  validateVmName(name);
+  const floppyPath = await validateFloppyImagePath(floppyPathRaw ?? "");
+  const inactiveXml = await dumpDomainXmlForDefine(name, true);
+  const { arch, machine } = domainArchMachine(inactiveXml);
+  assertFloppySupported(arch, machine);
+  await ensureLibvirtFloppyAccess(floppyPath, !readonly);
+
+  const state = await getDomainState(name);
+  const live = state === "running" || state === "paused";
+  if (!live) {
+    await redefineWithFloppy(name, { path: floppyPath, readonly });
+    return { ok: true, live: false };
+  }
+
+  const liveFloppy = findFloppyDisk(await virsh("dumpxml", name));
+  if (!liveFloppy) {
+    await redefineWithFloppy(name, { path: floppyPath, readonly });
+    return {
+      ok: true,
+      live: false,
+      pendingRestart: true,
+      message: "The VM has no floppy drive yet: drive A: was added and will appear after the next full stop/start",
+    };
+  }
+
+  // Swap the medium in the existing drive (live + persistent).
+  await virsh("change-media", name, liveFloppy.device, floppyPath, liveFloppy.source ? "--update" : "--insert", "--live", "--config", "--force");
+  if (liveFloppy.readonly !== readonly) {
+    // The write-protect tab cannot change on a live drive; persist it for next start.
+    await redefineWithFloppy(name, { path: floppyPath, readonly });
+    return { ok: true, live: true, pendingRestart: true, message: "Medium changed; the write-protect setting applies after the next full stop/start" };
+  }
+  return { ok: true, live: true };
+}
+
+async function ejectFloppy(name: string, remove: boolean) {
+  validateVmName(name);
+  const state = await getDomainState(name);
+  const live = state === "running" || state === "paused";
+  if (live) {
+    const liveFloppy = findFloppyDisk(await virsh("dumpxml", name));
+    if (liveFloppy?.source) {
+      await virsh("change-media", name, liveFloppy.device, "--eject", "--live", "--config", "--force");
+    }
+  }
+  const inactiveFloppy = findFloppyDisk(await dumpDomainXmlForDefine(name, true));
+  if (inactiveFloppy && (remove || inactiveFloppy.source)) {
+    await redefineWithFloppy(name, { path: null, remove });
+  }
+  return { ok: true, ...(live && remove ? { pendingRestart: true, message: "Drive A: is removed after the next full stop/start" } : {}) };
 }
 
 async function createSnapshot(name: string, snapName: string, description: string) {

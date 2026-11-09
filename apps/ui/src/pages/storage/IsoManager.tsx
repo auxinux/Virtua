@@ -8,10 +8,23 @@ import { formatBytes } from "../../utils/formatBytes";
 import { useAuth } from "../../utils/useAuth";
 import type { DatacenterStorageEntry, DockerHubDetail, DockerImage, DockerRegistryImage, IsoFile, LxcTemplate, StoragePool, TaskProgress } from "@auxinux/shared";
 
-type FileType = "iso" | "lxc_template" | "docker_image" | "vm_disk";
+type FileType = "iso" | "floppy" | "lxc_template" | "docker_image" | "vm_disk";
+
+/** Raw floppy images: 2.88 MB (ED) is the largest drive QEMU emulates. */
+const FLOPPY_MAX_BYTES = 2880 * 1024;
+const FLOPPY_SIZE_LABELS: Record<number, string> = {
+  [360 * 1024]: "360 KB",
+  [720 * 1024]: "720 KB",
+  [1200 * 1024]: "1.2 MB",
+  [1440 * 1024]: "1.44 MB",
+  [1680 * 1024]: "1.68 MB DMF",
+  [1720 * 1024]: "1.72 MB",
+  [2880 * 1024]: "2.88 MB",
+};
 
 const TYPE_LABELS: Record<FileType, string> = {
   iso: "ISO",
+  floppy: "Floppy Image",
   lxc_template: "LXC Template",
   docker_image: "Docker Image Archive",
   vm_disk: "VM Disk Image",
@@ -19,6 +32,7 @@ const TYPE_LABELS: Record<FileType, string> = {
 
 const TYPE_ICONS: Record<FileType, string> = {
   iso: "💿",
+  floppy: "🖫",
   lxc_template: "📦",
   docker_image: "🐳",
   vm_disk: "💾",
@@ -92,6 +106,11 @@ function ManagedFilesTable({
             <tr key={`${file.type}:${file.filename}`} className="border-b border-surface-700 hover:bg-surface-700/30 transition-colors">
               <td className="px-4 py-3 text-text-200 font-medium">
                 {TYPE_ICONS[file.type]} {file.displayName || file.filename}
+                {file.type === "floppy" && (
+                  <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-300 border border-amber-800/40">
+                    {FLOPPY_SIZE_LABELS[file.sizeBytes] ?? "floppy"}
+                  </span>
+                )}
               </td>
               <td className="px-4 py-3 font-mono text-xs text-text-400">{file.filename}</td>
               <td className="px-4 py-3 font-mono text-text-300">{file.sizeBytes ? formatBytes(file.sizeBytes) : "—"}</td>
@@ -402,6 +421,11 @@ export default function IsoManager() {
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (tab === "floppy" && file.size > FLOPPY_MAX_BYTES) {
+      setUploadError(t("storage.floppyTooLarge", "Image too large for a floppy: {{size}} (max 2.88 MB). Use the ISO or VM disk library instead.", { size: formatBytes(file.size) }));
+      e.target.value = "";
+      return;
+    }
     setUploadError(null);
     setUploadMoving(false);
     setUploadProgress({ percent: 0, loadedBytes: 0, totalBytes: file.size });
@@ -452,7 +476,7 @@ export default function IsoManager() {
     });
   }, [localPools, sharedPools, t]);
 
-  const desiredPoolContent = tab === "iso"
+  const desiredPoolContent = tab === "iso" || tab === "floppy"
     ? "iso"
     : tab === "vm_disk"
       ? "disk"
@@ -505,13 +529,14 @@ export default function IsoManager() {
 
   const tabs: Array<{ key: FileType; label: string; icon: string }> = [
     { key: "iso", label: t("storage.isoType"), icon: "💿" },
+    { key: "floppy", label: t("storage.floppyType", "Floppy"), icon: "🖫" },
     { key: "lxc_template", label: t("storage.lxcTemplateType"), icon: "📦" },
     { key: "vm_disk", label: t("storage.vmDiskType"), icon: "💾" },
     { key: "docker_image", label: `${t("storage.dockerHubSearch")} / ${t("storage.dockerArchiveType")}`, icon: "🐳" },
   ];
 
   const visibleTabs = useMemo(
-    () => tabs.filter((entry) => entry.key === "iso" || canManageExtendedLibrary),
+    () => tabs.filter((entry) => entry.key === "iso" || entry.key === "floppy" || canManageExtendedLibrary),
     [canManageExtendedLibrary, tabs],
   );
 
@@ -548,7 +573,7 @@ export default function IsoManager() {
   }, [uploadProgress]);
 
   useEffect(() => {
-    if (tab !== "iso" && !canManageExtendedLibrary) {
+    if (tab !== "iso" && tab !== "floppy" && !canManageExtendedLibrary) {
       setTab("iso");
     }
   }, [canManageExtendedLibrary, tab]);
@@ -659,6 +684,25 @@ export default function IsoManager() {
             <h2 className="text-sm font-semibold text-text-200">{t("storage.isoLibrary")}</h2>
             <p className="text-sm text-text-400 mt-1">
               {t("storage.isoLibraryDescription")}
+            </p>
+          </div>
+          <ManagedFilesTable
+            files={filteredFiles}
+            onDelete={setDeleteTarget}
+            onToggleVisibility={(file) => toggleVisibility.mutate(file)}
+            canDelete={canDeleteFiles}
+            canManageVisibility={isAdmin}
+            t={t}
+          />
+        </div>
+      )}
+
+      {tab === "floppy" && (
+        <div className="space-y-4">
+          <div className="card p-5">
+            <h2 className="text-sm font-semibold text-text-200">{t("storage.floppyLibrary", "Floppy images")}</h2>
+            <p className="text-sm text-text-400 mt-1">
+              {t("storage.floppyLibraryDescription", "Raw floppy images (.img, .ima, .vfd, .flp — 1.2, 1.44, 1.68 or 2.88 MB) inserted into a VM's drive A: from its Hardware tab: DOS, old OS installers, driver disks such as Windows XP F6 drivers. x86 VMs only.")}
             </p>
           </div>
           <ManagedFilesTable
@@ -995,6 +1039,7 @@ export default function IsoManager() {
             <div className="text-text-300">{t("storage.selectFile")}</div>
             <div className="text-xs text-text-500 mt-1">
               {tab === "iso" && "*.iso, *.img"}
+              {tab === "floppy" && "*.img, *.ima, *.vfd, *.flp (≤ 2.88 MB)"}
               {tab === "vm_disk" && "*.qcow2, *.img, *.raw, *.vmdk, *.vhd, *.vhdx"}
               {tab === "lxc_template" && "*.tar.gz, *.tar.xz, *.tar.zst, *.tar"}
               {tab === "docker_image" && "*.tar"}
@@ -1006,6 +1051,8 @@ export default function IsoManager() {
               accept={
                 tab === "iso"
                   ? ".iso,.img"
+                  : tab === "floppy"
+                    ? ".img,.ima,.vfd,.flp"
                   : tab === "vm_disk"
                     ? ".qcow2,.img,.raw,.vmdk,.vhd,.vhdx"
                     : tab === "lxc_template"
@@ -1061,6 +1108,7 @@ export default function IsoManager() {
             <label className="label">{t("storage.fileType")}</label>
             <select className="input" value={tab} onChange={(e) => setTab(e.target.value as FileType)}>
               <option value="iso">{t("storage.isoType")}</option>
+              <option value="floppy">{t("storage.floppyType", "Floppy")}</option>
               <option value="lxc_template">{t("storage.lxcTemplateType")}</option>
               <option value="vm_disk">{t("storage.vmDiskType")}</option>
               <option value="docker_image">{t("storage.dockerArchiveType")}</option>

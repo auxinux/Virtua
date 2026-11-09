@@ -38,6 +38,7 @@ function Icon({ path, className = "w-4 h-4" }: { path: string; className?: strin
 
 const ICONS = {
   iso: "M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0H3",
+  floppy: "M4.5 3.75h12l3 3v12.75a.75.75 0 0 1-.75.75H4.5a.75.75 0 0 1-.75-.75V4.5a.75.75 0 0 1 .75-.75Zm3 0v4.5h7.5v-4.5M7.5 20.25v-6h9v6",
   copy: "M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75m9 10.5h3.375c.621 0 1.125-.504 1.125-1.125V4.875c0-.621-.504-1.125-1.125-1.125h-9.75A1.125 1.125 0 0 0 8.25 4.875V7.5",
   download: "M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3",
   upload: "M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5",
@@ -158,6 +159,7 @@ function UploadModal({ open, onClose, nodes, storages, onSubmit }: {
           <label className="vdm-label">Type</label>
           <select className="vdm-input" value={type} onChange={(e) => setType(e.target.value)}>
             <option value="iso">ISO image</option>
+            <option value="floppy">Floppy image (.img/.ima/.vfd, ≤ 2.88 MB)</option>
             <option value="lxc_template">LXC template</option>
             <option value="vm_disk">VM disk</option>
           </select>
@@ -204,6 +206,7 @@ function UrlModal({ open, onClose, nodes, storages, onSubmit }: {
           <label className="vdm-label">Type</label>
           <select className="vdm-input" value={type} onChange={(e) => setType(e.target.value)}>
             <option value="iso">ISO image</option>
+            <option value="floppy">Floppy image (.img/.ima/.vfd, ≤ 2.88 MB)</option>
             <option value="lxc_template">LXC template</option>
             <option value="vm_disk">VM disk</option>
           </select>
@@ -293,7 +296,7 @@ export default function IsosPage() {
   const storagesQuery = useQuery<VdmSharedStorage[]>({ queryKey: ["vdm-storage"], queryFn: () => api.get("/api/vdm/storage") });
 
   const copyMut = useMutation({
-    mutationFn: (p: { sourceNode: string; filename: string; targetNode: string; targetStoragePool?: string; sharedStorageName?: string }) => api.post("/api/vdm/isos/copy", p),
+    mutationFn: (p: { sourceNode: string; filename: string; targetNode: string; targetStoragePool?: string; sharedStorageName?: string; type?: string }) => api.post("/api/vdm/isos/copy", p),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["vdm-tasks-recent"] }); navigate("/tasks"); },
   });
   const uploadMut = useMutation({
@@ -328,7 +331,7 @@ export default function IsosPage() {
     if (!needle) return true;
     return `${iso.filename} ${iso.nodeDisplayName} ${iso.nodeName}`.toLowerCase().includes(needle);
   });
-  const downloadUrl = (iso: VdmIso) => `/api/vdm/nodes/${encodeURIComponent(iso.nodeName)}/isos/${encodeURIComponent(iso.filename)}/download`;
+  const downloadUrl = (iso: VdmIso) => `/api/vdm/nodes/${encodeURIComponent(iso.nodeName)}/isos/${encodeURIComponent(iso.filename)}/download${iso.type === "floppy" ? "?type=floppy" : ""}`;
 
   return (
     <div className="space-y-4 max-w-6xl">
@@ -359,6 +362,7 @@ export default function IsosPage() {
       <div className="flex gap-1 border-b border-vdm-border">
         {([
           { id: "iso", label: "ISO" },
+          { id: "floppy", label: "Disquette" },
           { id: "lxc_template", label: "Template LXC" },
           { id: "docker_image", label: "Image Docker" },
         ] as const).map((tab) => (
@@ -385,7 +389,7 @@ export default function IsosPage() {
                 <tr key={`${iso.nodeName}:${iso.filename}`} className="hover:bg-vdm-bg/40">
                   <td>
                     <div className="flex items-center gap-2">
-                      <Icon path={ICONS.iso} className="w-4 h-4 text-vdm-accent" />
+                      <Icon path={iso.type === "floppy" ? ICONS.floppy : ICONS.iso} className={`w-4 h-4 ${iso.type === "floppy" ? "text-vdm-warning" : "text-vdm-accent"}`} />
                       <span className="font-mono text-xs text-vdm-text truncate max-w-56" title={iso.filename}>{iso.filename}</span>
                     </div>
                   </td>
@@ -421,7 +425,7 @@ export default function IsosPage() {
 
       <CopyIsoModal open={!!copyTarget} iso={copyTarget} nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
         onClose={() => setCopyTarget(null)}
-        onSubmit={(t, p, s) => copyTarget && copyMut.mutate({ sourceNode: copyTarget.nodeName, filename: copyTarget.filename, targetNode: t, targetStoragePool: p, sharedStorageName: s })} />
+        onSubmit={(t, p, s) => copyTarget && copyMut.mutate({ sourceNode: copyTarget.nodeName, filename: copyTarget.filename, targetNode: t, targetStoragePool: p, sharedStorageName: s, type: copyTarget.type ?? "iso" })} />
       <UploadModal open={showUpload} nodes={nodesQuery.data ?? []} storages={storagesQuery.data ?? []}
         onClose={() => setShowUpload(false)}
         onSubmit={(n, f, t, s) => uploadMut.mutate({ node: n, file: f, type: t, storagePool: s })} />

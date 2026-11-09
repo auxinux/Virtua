@@ -61,7 +61,13 @@ export interface VmInfo {
   arch: string;
   uefi?: boolean;
   secureBoot?: boolean;
-  bootOrder?: Array<"hd" | "cdrom" | "network">;
+  bootOrder?: Array<"hd" | "cdrom" | "network" | "fd">;
+  /** Basename of the image in floppy drive A:, null when the drive is empty or absent. */
+  mountedFloppy?: string | null;
+  /** True when the VM has a floppy drive (fda), even if empty. */
+  floppyDrive?: boolean;
+  /** Write-protect state of drive A: (null when there is no drive). */
+  floppyReadonly?: boolean | null;
   tpmEnabled?: boolean;
   qemuAgentEnabled?: boolean;
   videoModel?: "vga" | "virtio" | "qxl";

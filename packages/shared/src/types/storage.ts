@@ -82,7 +82,7 @@ export interface IsoFile {
   id?: number;
   filename: string;
   displayName?: string;
-  type: "iso" | "lxc_template" | "docker_image" | "vm_disk";
+  type: "iso" | "floppy" | "lxc_template" | "docker_image" | "vm_disk";
   sizeBytes: number;
   ownerId?: number;
   ownerUsername?: string;
