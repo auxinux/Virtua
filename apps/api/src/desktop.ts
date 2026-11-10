@@ -30,6 +30,9 @@ import {
   DesktopResourceIdSchema,
   DesktopCreateResourceSchema,
   DesktopUpdateResourceSchema,
+  DesktopQuickCreateSchema,
+  DesktopLaunchDisposableSchema,
+  DesktopDisposableActionSchema,
   DESKTOP_RESOURCE_TYPES,
   type DesktopResourceType,
   type DesktopResourcePermissions,
@@ -37,6 +40,14 @@ import {
   type DesktopCreateResourceInput,
   type DesktopUpdateResourceInput,
   type DesktopCreateOptions,
+  type DesktopQuickCreateInput,
+  type DesktopLaunchDisposableInput,
+  type DesktopDisposableBase,
+  type DisposableAction,
+  type BaseInfo,
+  type CreateVmInput,
+  CreateVmSchema,
+  archToQemu,
 } from "@auxinux/shared";
 import { auditLog } from "./db.js";
 import {
@@ -85,9 +96,32 @@ export interface DesktopResourceRow {
   qemuGuestAgentEnabled?: boolean;
   qemuGuestAgentRunning?: boolean;
   qemuGuestAgentStatus?: "running" | "stopped" | "not-installed" | "unknown";
+  /** VM hardware (VMs only): chipset family (q35 / pc / virt), CPU choice, system disk bus. */
+  machine?: string;
+  cpuModel?: string;
+  periodSpeed?: boolean;
+  diskBus?: string;
+  /** Image in floppy drive A: (null = empty or no drive). */
+  floppy?: string | null;
+  /** Disposable overlay on a base (null = ordinary VM). */
+  disposable?: { baseId: string; baseLabel: string; strict: boolean } | null;
+  /** Quick-create unattended installation in progress. */
+  autoInstall?: boolean;
 }
 
-export type DesktopPerm = "view" | "console" | "power" | "snapshot" | "modify" | "delete";
+export type DesktopPerm = "view" | "console" | "power" | "media" | "snapshot" | "modify" | "delete";
+
+/** The desktop caller as an actor of the shared services (same user + role as the web panel). */
+export interface DesktopActor { userId: number; role: Role; username: string; ip: string }
+
+/** What a PATCH changed that only applies later (same runner answers as the web routes). */
+export interface DesktopUpdateOutcome {
+  node: string;
+  name: string;
+  /** a change waits for the next full stop/start (floppy drive added/removed while running…) */
+  pendingRestart?: boolean;
+  messages?: string[];
+}
 
 export interface DesktopDeps {
   app: FastifyInstance;
@@ -110,11 +144,20 @@ export interface DesktopDeps {
     => Promise<{ node: string; name: string; displayName?: string }>;
   /** Apply a partial update to a resource (fields filtered per type server-side). */
   updateResource: (res: { type: DesktopResourceType; node: string; name: string }, patch: DesktopUpdateResourceInput, ctx: { userId: number; role: Role; username: string })
-    => Promise<{ node: string; name: string }>;
+    => Promise<DesktopUpdateOutcome>;
   /** Delete a resource cleanly per type. */
   deleteResource: (res: { type: DesktopResourceType; node: string; name: string }, ctx: { userId: number; role: Role }) => Promise<void>;
   /** Catalog for the desktop's "new resource" form (nodes/images/networks/defaults). */
-  getCreateOptions: (type: DesktopResourceType) => Promise<DesktopCreateOptions>;
+  getCreateOptions: (type: DesktopResourceType, ctx: { userId: number; role: Role }) => Promise<DesktopCreateOptions>;
+  /** Quick create (POST /api/vms/quick-create's service). Local node only. */
+  quickCreate: (actor: DesktopActor, input: DesktopQuickCreateInput) => Promise<{ taskId?: string; node: string; name: string }>;
+  /** Disposable bases of the node (GET /api/disposable/bases's service). */
+  listDisposableBases: () => Promise<BaseInfo[]>;
+  /** Launch a disposable VM (POST /api/disposable/launch's service). Local node only. */
+  launchDisposable: (actor: DesktopActor, input: DesktopLaunchDisposableInput) => Promise<{ node: string; name: string }>;
+  /** Stop action of a disposable VM (POST /api/vms/:name/disposable/:action's service, which checks the per-action permission). */
+  disposableAction: (actor: DesktopActor, res: { type: DesktopResourceType; node: string; name: string }, action: DisposableAction)
+    => Promise<{ status: number; body: unknown }>;
   /** Recent server-side operations the caller is allowed to see. */
   listRecentTasks: (userId: number, role: Role) => DesktopTaskInfo[];
   /** A single task by id (ownership-scoped); null if absent or not visible. */
@@ -137,6 +180,52 @@ interface DeviceRow { id: string; user_id: number; name: string; installation_id
 interface RefreshRow { id: string; device_id: string; token_hash: string; expires_at: string; revoked: number; }
 
 interface DesktopAuthContext { userId: number; role: Role; username: string; displayName: string | null; deviceId: string; }
+
+/**
+ * The POST /api/vms body for a desktop "new VM" request, validated by the very
+ * schema the web route uses (hardware rules included: IDE needs pc, period
+ * speed needs a period CPU, x86-only choices refused on ARM64…).
+ * `auto` chipset = q35, or i440FX when the IDE bus needs it (as the web wizard
+ * switches it); ARM64 is always `virt`.
+ */
+export function desktopVmCreateInput(input: DesktopCreateResourceInput, storagePool: string):
+  { ok: true; data: CreateVmInput } | { ok: false; error: string } {
+  // secureBoot requires UEFI firmware — enabling it implies uefi=true.
+  // arm64 always boots UEFI (mirrors the web wizard's setArch()).
+  const arch = input.architecture ? archToQemu(input.architecture) : undefined;
+  if (arch === "aarch64" && input.machine && input.machine !== "auto") {
+    return { ok: false, error: "machine: ARM64 VMs use the virt machine (q35 / pc are x86 chipsets)" };
+  }
+  const machine = arch === "aarch64" ? "virt"
+    : input.machine && input.machine !== "auto" ? input.machine
+    : input.diskBus === "ide" && !input.secureBoot ? "pc"
+    : "q35";
+  const parsed = CreateVmSchema.safeParse({
+    name: input.name,
+    vcpus: input.cpu ?? 2,
+    memoryMb: input.memory ?? 2048,
+    diskGb: input.disk ?? 20,
+    storagePool,
+    os: "linux",
+    isoFile: input.image,
+    ...(input.network ? { bridge: input.network } : {}),
+    ...(arch ? { arch } : {}),
+    machine,
+    ...(input.secureBoot !== undefined ? { secureBoot: input.secureBoot } : {}),
+    ...(input.secureBoot || arch === "aarch64" ? { uefi: true } : {}),
+    ...(input.tpm2 !== undefined ? { tpmEnabled: input.tpm2 } : {}),
+    ...(input.qemuGuestAgent !== undefined ? { qemuAgentEnabled: input.qemuGuestAgent } : {}),
+    ...(input.autostart !== undefined ? { autostart: input.autostart } : {}),
+    ...(input.gpuModel ? { videoModel: input.gpuModel } : {}),
+    ...(input.cpuModel ? { cpuModel: input.cpuModel } : {}),
+    ...(input.periodSpeed !== undefined ? { periodSpeed: input.periodSpeed } : {}),
+    ...(input.diskBus ? { diskBus: input.diskBus } : {}),
+    ...(input.networkModel ? { networkModel: input.networkModel } : {}),
+    ...(input.floppyId ? { floppyFile: input.floppyId } : {}),
+  });
+  if (!parsed.success) return { ok: false, error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
+  return { ok: true, data: parsed.data };
+}
 
 /** Map a forbidden/unauthorized error without leaking internals. */
 function fail(status: number, message: string): never {
@@ -557,6 +646,13 @@ export function registerDesktopApi(deps: DesktopDeps): void {
           qemuGuestAgentEnabled: r.qemuGuestAgentEnabled ?? false,
           qemuGuestAgentRunning: r.qemuGuestAgentRunning ?? false,
           qemuGuestAgentStatus: r.qemuGuestAgentStatus ?? "unknown",
+          machine: r.machine,
+          cpuModel: r.cpuModel,
+          periodSpeed: r.periodSpeed,
+          diskBus: r.diskBus,
+          floppy: r.floppy ?? null,
+          disposable: r.disposable ?? null,
+          autoInstall: r.autoInstall ?? false,
         }
       : {};
     return {
@@ -601,7 +697,7 @@ export function registerDesktopApi(deps: DesktopDeps): void {
     const type = rawType as DesktopResourceType;
     // Only users who may create this type get a (useful) catalog.
     if (!deps.userCanCreate(ctx.userId, ctx.role, type)) fail(403, "Forbidden");
-    const options = await deps.getCreateOptions(type);
+    const options = await deps.getCreateOptions(type, { userId: ctx.userId, role: ctx.role });
     return reply.send(options);
   }));
 
@@ -642,7 +738,8 @@ export function registerDesktopApi(deps: DesktopDeps): void {
       });
     } catch (err) {
       audit(ctx, req, `desktop.${input.type}.create`, { resourceType: input.type, resourceName: input.name, result: "error" });
-      fail(502, (err as { desktopError?: boolean }).desktopError ? (err as Error).message : "Create failed");
+      const desktopError = (err as { desktopError?: boolean }).desktopError;
+      fail(desktopError ? (err as { statusCode?: number }).statusCode ?? 502 : 502, desktopError ? (err as Error).message : "Create failed");
     }
   }));
 
@@ -651,6 +748,10 @@ export function registerDesktopApi(deps: DesktopDeps): void {
     const res = requireResourceByHandle(ctx, (req.params as { id: string }).id, "modify");
     const parsed = DesktopUpdateResourceSchema.safeParse(req.body);
     if (!parsed.success) fail(400, "Invalid request");
+    const hardwareFields = (["machine", "cpuModel", "periodSpeed", "floppyId"] as const).filter((key) => parsed.data[key] !== undefined);
+    if (res.type !== "vm" && hardwareFields.length > 0) fail(400, `${hardwareFields.join(", ")}: VM only`);
+    // Drive A: is removable media: same `media` right as the web floppy routes.
+    if (parsed.data.floppyId !== undefined && !deps.hasResourcePermission(ctx.userId, ctx.role, res.type, res.name, "media")) fail(403, "Forbidden");
     try {
       const updated = await deps.updateResource(res, parsed.data, { userId: ctx.userId, role: ctx.role, username: ctx.username });
       // Keep the SAME opaque id stable across a rename: re-point the handle row
@@ -660,7 +761,14 @@ export function registerDesktopApi(deps: DesktopDeps): void {
       const all = await deps.listResourcesForDesktop();
       const live = all.find((r) => r.type === res.type && r.node === updated.node && r.name === updated.name);
       const row: DesktopResourceRow = live ?? { type: res.type, node: updated.node, name: updated.name, state: "unknown" };
-      return reply.send({ ok: true, resource: { ...serializeResource(ctx, row), id } });
+      // Chipset / CPU / period speed are written to the definition: a running
+      // VM picks them up at its next full stop/start (as in the web panel).
+      const messages = [...(updated.messages ?? [])];
+      const running = row.state === "running" || row.state === "paused";
+      const hardwareChanged = parsed.data.cpuModel !== undefined || parsed.data.periodSpeed !== undefined || (parsed.data.machine !== undefined && parsed.data.machine !== "auto");
+      if (hardwareChanged && running) messages.push("Hardware changes apply at the next full stop/start");
+      const pendingRestart = !!updated.pendingRestart || (hardwareChanged && running);
+      return reply.send({ ok: true, resource: { ...serializeResource(ctx, row), id }, pendingRestart, ...(messages.length > 0 ? { messages } : {}) });
     } catch (err) {
       audit(ctx, req, `desktop.${res.type}.update`, { resourceType: res.type, resourceName: res.name, result: "error" });
       const status = (err as { statusCode?: number }).statusCode ?? 502;
@@ -678,6 +786,93 @@ export function registerDesktopApi(deps: DesktopDeps): void {
     } catch (err) {
       audit(ctx, req, `desktop.${res.type}.delete`, { resourceType: res.type, resourceName: res.name, result: "error" });
       fail(502, (err as { desktopError?: boolean }).desktopError ? (err as Error).message : "Delete failed");
+    }
+  }));
+
+  // ── QUICK CREATE / DISPOSABLE VMs ───────────────────────────────────────────
+  // Thin wrappers over the web panel's services (same validation, RBAC, quota,
+  // tasks and audit); only the opaque handles and defaults are desktop-side.
+  const actorOf = (ctx: DesktopAuthContext, req: FastifyRequest): DesktopActor =>
+    ({ userId: ctx.userId, role: ctx.role, username: ctx.username, ip: deps.getClientIp(req) });
+
+  /** Turn a service/runner failure into a clean desktop error (message kept when it is one of ours). */
+  const failFrom = (err: unknown, fallback: string): never => {
+    const desktopError = (err as { desktopError?: boolean }).desktopError;
+    fail(desktopError ? (err as { statusCode?: number }).statusCode ?? 502 : 502, desktopError ? (err as Error).message : fallback);
+  };
+
+  /** A resource just created on `node`: its live entry, else a minimal one. */
+  const freshResource = async (ctx: DesktopAuthContext, node: string, name: string) => {
+    const all = await deps.listResourcesForDesktop();
+    const live = all.find((r) => r.type === "vm" && r.node === node && r.name === name);
+    return serializeResource(ctx, live ?? { type: "vm", node, name, state: "unknown" });
+  };
+
+  app.post("/api/desktop/quick-create", lifecycleRateLimit, handle(async (req, reply) => {
+    const ctx = authDesktop(req);
+    const parsed = DesktopQuickCreateSchema.safeParse(req.body);
+    if (!parsed.success) fail(400, "Invalid request");
+    if (!deps.userCanCreate(ctx.userId, ctx.role, "vm")) {
+      audit(ctx, req, "desktop.vm.quick-create", { resourceType: "vm", resourceName: parsed.data.name, result: "error", details: "forbidden" });
+      fail(403, "Forbidden");
+    }
+    try {
+      const created = await deps.quickCreate(actorOf(ctx, req), parsed.data);
+      audit(ctx, req, "desktop.vm.quick-create", { resourceType: "vm", resourceName: created.name, details: parsed.data.os });
+      return reply.status(202).send({ taskId: created.taskId, resourceId: handleFor("vm", created.node, created.name), name: created.name });
+    } catch (err) {
+      audit(ctx, req, "desktop.vm.quick-create", { resourceType: "vm", resourceName: parsed.data.name, result: "error" });
+      failFrom(err, "Quick create failed");
+    }
+  }));
+
+  app.get("/api/desktop/disposable/bases", handle(async (req, reply) => {
+    authDesktop(req);
+    const bases = await deps.listDisposableBases();
+    const out: DesktopDisposableBase[] = bases.map((b) => ({
+      id: b.id, label: b.label, os: b.os, architecture: b.architecture,
+      cpu: b.cpu, memoryMib: b.memoryMib, diskGib: b.diskGib, size: b.sizeBytes, inUse: b.inUse,
+    }));
+    return reply.send(out);
+  }));
+
+  app.post("/api/desktop/disposable/launch", lifecycleRateLimit, handle(async (req, reply) => {
+    const ctx = authDesktop(req);
+    const parsed = DesktopLaunchDisposableSchema.safeParse(req.body);
+    if (!parsed.success) fail(400, "Invalid request");
+    if (!deps.userCanCreate(ctx.userId, ctx.role, "vm")) {
+      audit(ctx, req, "desktop.vm.disposable.launch", { resourceType: "vm", result: "error", details: `base=${parsed.data.baseId} forbidden` });
+      fail(403, "Forbidden");
+    }
+    try {
+      const launched = await deps.launchDisposable(actorOf(ctx, req), parsed.data);
+      audit(ctx, req, "desktop.vm.disposable.launch", { resourceType: "vm", resourceName: launched.name, details: `base=${parsed.data.baseId}${parsed.data.strict ? " strict" : ""}` });
+      return reply.send(await freshResource(ctx, launched.node, launched.name));
+    } catch (err) {
+      audit(ctx, req, "desktop.vm.disposable.launch", { resourceType: "vm", result: "error", details: `base=${parsed.data.baseId}` });
+      failFrom(err, "Launch failed");
+    }
+  }));
+
+  app.post("/api/desktop/resources/:id/disposable/:action", lifecycleRateLimit, handle(async (req, reply) => {
+    const ctx = authDesktop(req);
+    const params = req.params as { id: string; action: string };
+    // `view` here; the service then requires delete / modify per action (as on the web).
+    const res = requireResourceByHandle(ctx, params.id, "view");
+    if (res.type !== "vm") fail(400, "Only VMs can be disposable");
+    const action = DesktopDisposableActionSchema.safeParse(params.action);
+    if (!action.success) fail(400, `Invalid action. Allowed: ${DesktopDisposableActionSchema.options.join(", ")}`);
+    try {
+      const result = await deps.disposableAction(actorOf(ctx, req), res, action.data);
+      audit(ctx, req, `desktop.vm.disposable.${action.data}`, { resourceType: "vm", resourceName: res.name });
+      if (result.status === 202) {
+        // convert: long copy, tracked as a task.
+        return reply.status(202).send({ ok: true, taskId: (result.body as { id?: string } | null)?.id, task: result.body });
+      }
+      return reply.send({ ok: true, result: result.body });
+    } catch (err) {
+      audit(ctx, req, `desktop.vm.disposable.${action.data}`, { resourceType: "vm", resourceName: res.name, result: "error" });
+      failFrom(err, "Disposable action failed");
     }
   }));
 

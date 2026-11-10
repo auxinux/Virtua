@@ -154,3 +154,32 @@ export function refineHardware(choice: HardwareChoice, ctx: z.RefinementCtx): vo
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem.message, path: [problem.field] });
   }
 }
+
+/** Disk buses offered for a new VM's system disk. */
+export const DISK_BUSES = ["virtio", "sata", "ide", "scsi"] as const;
+
+export interface HardwareChoices {
+  /** `auto` = the default chipset of the arch (q35 on x86, virt on ARM64). */
+  machines: string[];
+  cpus: string[];
+  diskBuses: string[];
+  networkModels: string[];
+  /** Whether period speed (286 … Pentium 4 at their own pace) exists here. */
+  periodSpeed: boolean;
+}
+
+/**
+ * Every hardware id a node of QEMU arch `arch` (x86_64/aarch64) accepts, as
+ * offered to clients (Virtua Desktop's cloud mode): the same ids the API
+ * validates with `hardwareProblems`.
+ */
+export function hardwareChoicesForArch(arch: string): HardwareChoices {
+  const arm = arch === "aarch64";
+  return {
+    machines: arm ? ["auto"] : ["auto", ...X86_MACHINE_TYPES],
+    cpus: [...cpuModelsForArch(arch)],
+    diskBuses: DISK_BUSES.filter((bus) => !arm || !X86_ONLY_DISK_BUSES.includes(bus)),
+    networkModels: NETWORK_MODELS.filter((model) => !arm || !X86_ONLY_NETWORK_MODELS.includes(model)),
+    periodSpeed: !arm,
+  };
+}

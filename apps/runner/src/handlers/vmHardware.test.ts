@@ -6,6 +6,7 @@ import {
   buildCpuXml,
   domainCpuModel,
   domainIcountShift,
+  domainListHardware,
   domainVirtType,
   mergeVirtuaMetadata,
   readVirtuaMetadata,
@@ -187,5 +188,37 @@ describe("applyMachineType", () => {
     expect(() => applyMachineType(secure, "pc")).toThrow(/Secure Boot/);
     const arm = q35Domain.replace("arch='x86_64' machine='pc-q35-10.0'", "arch='aarch64' machine='virt'");
     expect(() => applyMachineType(arm, "pc")).toThrow(/x86/);
+  });
+});
+
+describe("domainListHardware", () => {
+  it("reads the chipset, CPU choice, system disk bus and floppy of a period PC", () => {
+    const xml = `<domain type='qemu'>
+  <metadata>
+    <virtua:vm xmlns:virtua="https://auxinux.ca/virtua/1.0">
+      <virtua:cpu model="386" periodSpeed="yes"/>
+    </virtua:vm>
+  </metadata>
+  <os><type arch='x86_64' machine='pc-i440fx-10.0'>hvm</type></os>
+  <devices>
+    <disk type='file' device='cdrom'><target dev='hdc' bus='ide'/></disk>
+    <disk type='file' device='disk'><source file='/var/lib/libvirt/images/dos.qcow2'/><target dev='hda' bus='ide'/></disk>
+    <disk type="file" device="floppy"><source file="/srv/floppies/dos622-1.img"/><target dev="fda" bus="fdc"/></disk>
+  </devices>
+</domain>`;
+    expect(domainListHardware(xml)).toEqual({
+      machine: "pc-i440fx-10.0",
+      cpuModel: "386",
+      periodSpeed: true,
+      diskBus: "ide",
+      mountedFloppy: "dos622-1.img",
+    });
+  });
+
+  it("defaults a plain KVM domain (no metadata, empty floppy drive)", () => {
+    const xml = `<domain type='kvm'><os><type arch='x86_64' machine='pc-q35-10.0'>hvm</type></os><devices>
+<disk type='file' device='disk'><target dev='vda' bus='virtio'/></disk>
+<disk type='file' device='floppy'><target dev='fda' bus='fdc'/></disk></devices></domain>`;
+    expect(domainListHardware(xml)).toEqual({ machine: "pc-q35-10.0", cpuModel: "auto", periodSpeed: false, diskBus: "virtio", mountedFloppy: null });
   });
 });

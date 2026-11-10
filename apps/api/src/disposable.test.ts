@@ -34,19 +34,17 @@ function setup(options: { admin?: boolean; local?: boolean } = {}) {
       if (action === "qemu_disposable_launch") return { ok: true, name: "jetable-debian13-1", baseId: "debian13-amd64-1" };
       return { ok: true };
     }) as DisposableRouteDeps["callRunner"],
-    requireAuth: (req) => {
-      (req as unknown as { session: unknown }).session = { userId: 7, role: options.admin ? "ADMIN" : "USER", username: "u" };
-    },
+    requireAuth: () => {},
     requireAdmin: () => {
       if (!options.admin) throw Object.assign(new Error("Forbidden"), { statusCode: 403 });
     },
-    requireResourcePermission: (_req, _type, name, permission) => {
+    actorOf: () => ({ userId: 7, role: options.admin ? "ADMIN" : "USER", username: "u", ip: "127.0.0.1" }),
+    hasVmPermission: (_actor, name, permission) => {
       permissionChecks.push(`${name}:${permission}`);
+      return true;
     },
     checkVmCreateAllowed: () => ({ ok: true }),
     checkPermission: () => ({ ok: true }),
-    replyQuotaError: (reply, result) => reply.status(403).send({ error: result.reason }),
-    getClientIp: () => "127.0.0.1",
     resolveVmDiskPool: (name) => (name === "local" ? { path: "/var/lib/auxinux/pools/local" } : undefined),
     isLocalVm: async () => options.local !== false,
     localNodeName: () => "node1",

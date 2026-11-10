@@ -163,6 +163,37 @@ export function replaceCpuXml(xml: string, cpuXml: string): string {
   return xml.replace(/(<\/os>)/i, `$1\n  ${cpuXml}`);
 }
 
+/** Hardware of a domain as shown in the VM list (cheap: from the XML already dumped). */
+export function domainListHardware(xml: string): {
+  machine: string;
+  cpuModel: string;
+  periodSpeed: boolean;
+  diskBus: string | null;
+  mountedFloppy: string | null;
+} {
+  const meta = readVirtuaMetadata(xml);
+  const typeTag = xml.match(/<type\b[^>]*>/i)?.[0] ?? "";
+  let diskBus: string | null = null;
+  let mountedFloppy: string | null = null;
+  for (const match of xml.matchAll(/<disk\b[\s\S]*?<\/disk>/gi)) {
+    const block = match[0];
+    const device = block.match(/<disk\b[^>]*\bdevice=['"]([^'"]+)['"]/i)?.[1] ?? "disk";
+    if (device === "disk" && diskBus === null) {
+      diskBus = block.match(/<target[^>]*\bbus=['"]([^'"]+)['"]/i)?.[1] ?? null;
+    } else if (device === "floppy" && mountedFloppy === null) {
+      const source = block.match(/<source[^>]*\bfile=['"]([^'"]+)['"]/i)?.[1];
+      if (source) mountedFloppy = source.split("/").pop() ?? null;
+    }
+  }
+  return {
+    machine: typeTag.match(/\bmachine=['"]([^'"]+)['"]/)?.[1] ?? "",
+    cpuModel: meta.cpuModel ?? "auto",
+    periodSpeed: !!meta.periodSpeed && domainVirtType(xml) === "qemu",
+    diskBus,
+    mountedFloppy,
+  };
+}
+
 /** CPU choice of a domain: the Virtua metadata, else "auto". */
 export function domainCpuModel(xml: string): string {
   return readVirtuaMetadata(xml).cpuModel ?? "auto";

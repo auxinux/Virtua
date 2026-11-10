@@ -48,10 +48,9 @@ describe("POST /api/vms/quick-create", () => {
         if (action === "qemu_vms") return [{ name: "debian-13" }];
         return { ok: true };
       }) as QuickCreateDeps["callRunner"],
-      requireAuth: (req) => { (req as unknown as { session: unknown }).session = { userId: 3 }; },
+      requireAuth: () => {},
+      actorOf: () => ({ userId: 3, role: "USER", username: "u", ip: "127.0.0.1" }),
       checkVmCreateAllowed: () => ({ ok: true }),
-      replyQuotaError: (reply, r) => reply.status(403).send({ error: r.reason }),
-      getClientIp: () => "127.0.0.1",
       resolveVmDiskPool: (name) => (name === "local" ? { path: "/pools/local" } : undefined),
       localNodeName: () => "node1",
       createTask: () => ({ id: "t1" }),

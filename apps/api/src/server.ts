@@ -25,10 +25,10 @@ import {
 } from "./db.js";
 import { startCrashWatcher, markExpectedTransition } from "./crashWatcher.js";
 import { callRunner, type RunnerProgress } from "./runnerClient.js";
-import { registerDesktopApi, type DesktopResourceRow } from "./desktop.js";
+import { desktopVmCreateInput, registerDesktopApi, type DesktopResourceRow } from "./desktop.js";
 import { registerVirtuaOsApi } from "./virtuaos.js";
-import { registerDisposableRoutes } from "./disposable.js";
-import { registerQuickCreateRoutes } from "./quickCreate.js";
+import { ApiError, createDisposableService, registerDisposableRoutes, type ApiActor, type DisposableRouteDeps } from "./disposable.js";
+import { createQuickCreateService, nodeQemuArch, registerQuickCreateRoutes, type QuickCreateDeps } from "./quickCreate.js";
 import { createBackpressureForwarder, rawDataToBuffer } from "./wsPipe.js";
 import {
   generateNumericCode, maskPhone, maskEmail, isLikelyPhone, isLikelyEmail, normalizePhone,
@@ -52,7 +52,8 @@ import type { ZodTypeAny, infer as zodInfer } from "zod";
 import { clientHost, isLoopbackHost, webOrigin } from "./wsHost.js";
 import {
   LoginSchema, CreateUserSchema, UpdateUserSchema, UpdateUserLimitsSchema, validatePassword,
-  AttachFloppySchema, FLOPPY_MAX_BYTES, isFloppyFilename, validateFloppyImage,
+  AttachFloppySchema, FLOPPY_MAX_BYTES, isFloppyFilename, validateFloppyImage, archSupportsFloppy,
+  hardwareChoicesForArch, machineFamily, type NetworkModel,
   CreateVmSchema, UpdateVmConfigSchema, AttachDiskSchema, AttachNetworkSchema, UpdateNetworkSchema, CreateSnapshotSchema, BackupVmSchema,
   UsbDeviceAssignmentSchema, PartitionDiskSchema,
   CreateLxcSchema, UpdateLxcConfigSchema, BackupLxcSchema, LxcNicSchema, GpuDeviceAssignmentSchema, DockerConnectNetworkSchema,
@@ -7207,41 +7208,48 @@ app.put("/api/vms/:name/config", async (req, reply) => {
 
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "vm.config.update", label: `Update VM config ${name}`, resourceType: "vm", resourceName: name, message: "Updating configuration" });
-  return runInstantTask(task, ip, async () => {
-    const node = await getResourceNodeAsync("vm", name);
-    if (node && !node.isLocal) {
-      await fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/config`, {
-        method: "PUT",
-        body: JSON.stringify(parsed.data),
-      });
-    } else {
-      // La reprise après panne est propre à Virtua (pas de notion équivalente
-      // côté libvirt) : elle est stockée en base et n'est pas envoyée au runner.
-      const { restartOnCrash, ...runnerConfig } = parsed.data;
-      if (restartOnCrash !== undefined) setGuestCrashPolicy(db, "vm", name, restartOnCrash);
-      if (
-        runnerConfig.vcpus !== undefined ||
-        runnerConfig.memoryMb !== undefined ||
-        runnerConfig.autostart !== undefined ||
-        runnerConfig.uefi !== undefined ||
-        runnerConfig.secureBoot !== undefined ||
-        runnerConfig.bootDevice !== undefined ||
-        runnerConfig.tpmEnabled !== undefined ||
-        runnerConfig.qemuAgentEnabled !== undefined ||
-        runnerConfig.videoModel !== undefined ||
-        runnerConfig.machine !== undefined ||
-        runnerConfig.cpuModel !== undefined ||
-        runnerConfig.periodSpeed !== undefined
-      ) {
-        await callRunner("qemu_update_config", { name, ...runnerConfig });
-      }
-      if (parsed.data.description !== undefined || parsed.data.tags !== undefined) {
-        db.prepare("UPDATE qemu_vms SET description = COALESCE(?, description), tags = COALESCE(?, tags) WHERE vm_name = ?").run(parsed.data.description ?? null, parsed.data.tags ? JSON.stringify(parsed.data.tags) : null, name);
-      }
-    }
-    return { ok: true };
-  });
+  return runInstantTask(task, ip, () => applyVmConfig(name, parsed.data));
 });
+
+/**
+ * Apply a validated UpdateVmConfigSchema change to a VM on whichever node
+ * hosts it (PUT /api/vms/:name/config and the desktop PATCH). Hardware
+ * changes (chipset, CPU, period speed, firmware) apply at the next start.
+ */
+async function applyVmConfig(name: string, config: zodInfer<typeof UpdateVmConfigSchema>): Promise<{ ok: true }> {
+  const node = await getResourceNodeAsync("vm", name);
+  if (node && !node.isLocal) {
+    await fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/config`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+  } else {
+    // La reprise après panne est propre à Virtua (pas de notion équivalente
+    // côté libvirt) : elle est stockée en base et n'est pas envoyée au runner.
+    const { restartOnCrash, ...runnerConfig } = config;
+    if (restartOnCrash !== undefined) setGuestCrashPolicy(db, "vm", name, restartOnCrash);
+    if (
+      runnerConfig.vcpus !== undefined ||
+      runnerConfig.memoryMb !== undefined ||
+      runnerConfig.autostart !== undefined ||
+      runnerConfig.uefi !== undefined ||
+      runnerConfig.secureBoot !== undefined ||
+      runnerConfig.bootDevice !== undefined ||
+      runnerConfig.tpmEnabled !== undefined ||
+      runnerConfig.qemuAgentEnabled !== undefined ||
+      runnerConfig.videoModel !== undefined ||
+      runnerConfig.machine !== undefined ||
+      runnerConfig.cpuModel !== undefined ||
+      runnerConfig.periodSpeed !== undefined
+    ) {
+      await callRunner("qemu_update_config", { name, ...runnerConfig });
+    }
+    if (config.description !== undefined || config.tags !== undefined) {
+      db.prepare("UPDATE qemu_vms SET description = COALESCE(?, description), tags = COALESCE(?, tags) WHERE vm_name = ?").run(config.description ?? null, config.tags ? JSON.stringify(config.tags) : null, name);
+    }
+  }
+  return { ok: true };
+}
 
 app.get("/api/vms/:name/stats", async (req, reply) => {
   requireAuth(req, reply);
@@ -7406,6 +7414,30 @@ app.post("/api/vms/:name/iso/eject", async (req, reply) => {
   });
 });
 
+/** Runner answer of a floppy change: `pendingRestart` when it only applies at the next full stop/start. */
+type FloppyChangeResult = { ok: boolean; live?: boolean; pendingRestart?: boolean; message?: string };
+
+/** Insert a library floppy image in drive A: of a VM, on whichever node hosts it. */
+async function attachVmFloppy(name: string, data: { floppyFile: string; readonly?: boolean }): Promise<FloppyChangeResult> {
+  const node = await getResourceNodeAsync("vm", name);
+  if (node && !node.isLocal) {
+    return fetchRemoteNode<FloppyChangeResult>(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/attach`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+  const floppyPath = await resolveManagedFloppyPath(data.floppyFile);
+  return callRunner<FloppyChangeResult>("qemu_attach_floppy", { name, floppyPath, readonly: data.readonly });
+}
+
+/** Eject the floppy of drive A: (or remove the drive), on whichever node hosts the VM. */
+async function ejectVmFloppy(name: string, remove: boolean): Promise<FloppyChangeResult> {
+  const node = await getResourceNodeAsync("vm", name);
+  return node && !node.isLocal
+    ? fetchRemoteNode<FloppyChangeResult>(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/eject`, { method: "POST", body: JSON.stringify({ remove }) })
+    : callRunner<FloppyChangeResult>("qemu_eject_floppy", { name, remove });
+}
+
 // Floppy drive A: — same media permission as the CD-ROM. The runner swaps the
 // medium live when the running VM already has a drive; otherwise the drive is
 // added to the definition and the result says it applies at next start.
@@ -7417,17 +7449,7 @@ app.post("/api/vms/:name/floppy/attach", async (req, reply) => {
   if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "vm.floppy.attach", label: `Insert floppy into VM ${name}`, resourceType: "vm", resourceName: name, message: path.basename(parsed.data.floppyFile) });
-  return runInstantTask(task, ip, async () => {
-    const node = await getResourceNodeAsync("vm", name);
-    if (node && !node.isLocal) {
-      return fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/attach`, {
-        method: "POST",
-        body: JSON.stringify(parsed.data),
-      });
-    }
-    const floppyPath = await resolveManagedFloppyPath(parsed.data.floppyFile);
-    return callRunner("qemu_attach_floppy", { name, floppyPath, readonly: parsed.data.readonly });
-  });
+  return runInstantTask(task, ip, () => attachVmFloppy(name, parsed.data));
 });
 
 app.post("/api/vms/:name/floppy/eject", async (req, reply) => {
@@ -7437,12 +7459,7 @@ app.post("/api/vms/:name/floppy/eject", async (req, reply) => {
   const remove = ((req.body ?? {}) as { remove?: boolean }).remove === true;
   const ip = getClientIp(req);
   const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: remove ? "vm.floppy.remove" : "vm.floppy.eject", label: `${remove ? "Remove floppy drive from" : "Eject floppy from"} VM ${name}`, resourceType: "vm", resourceName: name, message: remove ? "Removing drive A:" : "Ejecting floppy" });
-  return runInstantTask(task, ip, async () => {
-    const node = await getResourceNodeAsync("vm", name);
-    return node && !node.isLocal
-      ? fetchRemoteNode(node, `/api/internal/vms/${encodeURIComponent(name)}/floppy/eject`, { method: "POST", body: JSON.stringify({ remove }) })
-      : callRunner("qemu_eject_floppy", { name, remove });
-  });
+  return runInstantTask(task, ip, () => ejectVmFloppy(name, remove));
 });
 
 // Guest tools (VirtIO drivers + agents for Windows guests). One click: insert
@@ -7466,21 +7483,28 @@ function resolveVmDiskPool(name: string) {
   return { path: pool.path };
 }
 
+/** The web session as an actor of the shared services (disposable, quick create). */
+function sessionActor(req: FastifyRequest): ApiActor {
+  return { userId: req.session.userId!, role: req.session.role!, username: req.session.username ?? "unknown", ip: getClientIp(req) };
+}
+
+/** VM quota + `allow_vm_create`: what POST /api/vms checks, for any actor. */
+function checkVmCreateAllowed(actor: { userId: number; role: string }) {
+  const quota = checkQuota(db, actor.userId, actor.role, "vms");
+  if (!quota.ok) return quota;
+  return checkPermission(db, actor.userId, actor.role, "allow_vm_create");
+}
+
 // Disposable VMs (beta): bases, launch, stop actions — see disposable.ts.
-registerDisposableRoutes(app, {
+const disposableDeps: DisposableRouteDeps = {
   db,
   callRunner,
   requireAuth,
   requireAdmin,
-  requireResourcePermission: (req, type, name, permission) => requireResourcePermission(req, type, name, permission),
-  checkVmCreateAllowed: (req) => {
-    const quota = checkQuota(db, req.session.userId!, req.session.role!, "vms");
-    if (!quota.ok) return quota;
-    return checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_create");
-  },
-  checkPermission: (req, action) => checkPermission(db, req.session.userId!, req.session.role!, action),
-  replyQuotaError,
-  getClientIp,
+  actorOf: sessionActor,
+  hasVmPermission: (actor, name, permission) => hasResourcePermission(actor.userId, actor.role, "vm", name, permission),
+  checkVmCreateAllowed,
+  checkPermission: (actor, action) => checkPermission(db, actor.userId, actor.role, action),
   resolveVmDiskPool,
   isLocalVm: async (name) => {
     const node = await getResourceNodeAsync("vm", name);
@@ -7488,7 +7512,7 @@ registerDisposableRoutes(app, {
   },
   localNodeName: getLocalNodeName,
   forgetVm: forgetDeletedVm,
-  createTask: (req, options) => createTask(req.session.userId!, req.session.username ?? "unknown", options),
+  createTask: (actor, options) => createTask(actor.userId, actor.username, options),
   runInstantTask: (task, ip, fn) => runInstantTask(task as BackgroundTask, ip, fn),
   runTrackedTask: (task, ip, fn) => runTrackedTask(task as BackgroundTask, ip, ({ update }) => fn({ update: (patch) => update(patch as Partial<BackgroundTask>) })),
   publicTask: (task) => sanitizeTask(getTaskRecord(task.id) ?? (task as BackgroundTask)),
@@ -7496,23 +7520,21 @@ registerDisposableRoutes(app, {
   downloadToFile: (taskId, url, file) => withUrlDownloadSlot(taskId, () => downloadUrlToFileWithProgress(taskId, url, file)),
   depotBase: getTemplateDepotBase,
   scratchDir: VM_TEMPLATES_DIR,
-});
+};
+registerDisposableRoutes(app, disposableDeps);
+/** Same service as /api/disposable/* and /api/vms/:name/disposable/* (used by the desktop API). */
+const disposableService = createDisposableService(disposableDeps);
 
 // Quick create (unattended Windows 11 / Debian 13) — see quickCreate.ts.
-registerQuickCreateRoutes(app, {
+const quickCreateDeps: QuickCreateDeps = {
   db,
   callRunner,
   requireAuth,
-  checkVmCreateAllowed: (req) => {
-    const quota = checkQuota(db, req.session.userId!, req.session.role!, "vms");
-    if (!quota.ok) return quota;
-    return checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_create");
-  },
-  replyQuotaError,
-  getClientIp,
+  actorOf: sessionActor,
+  checkVmCreateAllowed,
   resolveVmDiskPool,
   localNodeName: getLocalNodeName,
-  createTask: (req, options) => createTask(req.session.userId!, req.session.username ?? "unknown", options),
+  createTask: (actor, options) => createTask(actor.userId, actor.username, options),
   runTrackedTask: (task, ip, fn) => runTrackedTask(task as BackgroundTask, ip, ({ update }) => fn({ update: (patch) => update(patch as Partial<BackgroundTask>) })),
   publicTask: (task) => sanitizeTask(getTaskRecord(task.id) ?? (task as BackgroundTask)),
   listLibraryIsos: async () => (await listManagedFiles())
@@ -7536,7 +7558,10 @@ registerQuickCreateRoutes(app, {
   downloadToFile: (taskId, url, file) => withUrlDownloadSlot(taskId, () => downloadUrlToFileWithProgress(taskId, url, file)),
   depotBase: getTemplateDepotBase,
   netbootDir: path.join(path.dirname(ISOS_DIR), "netboot"),
-});
+};
+registerQuickCreateRoutes(app, quickCreateDeps);
+/** Same service as POST /api/vms/quick-create (used by the desktop API). */
+const quickCreateService = createQuickCreateService(quickCreateDeps);
 
 // Unattended installs finish on their own (Debian powers off, Windows' agent
 // answers): the runner checks them, the API audits and forgets builder VMs
@@ -9435,21 +9460,26 @@ app.get("/api/storage/vm-disks/available", async (req, reply) => {
 });
 
 // ── ISO Routes ─────────────────────────────────────────────────────────────
-app.get("/api/storage/isos", async (req, reply) => {
-  requireUiSection(req, "isoLibrary");
-  const managedFiles = await listManagedFiles();
-  const userId = req.session.userId!;
-  const role = req.session.role!;
+/**
+ * Library files a user may see and use: ADMIN all; otherwise unowned, own or
+ * public files, plus every ISO/floppy once the user has media rights on a VM.
+ */
+function visibleManagedFiles<T extends { type: string; ownerId?: number; isPublic: boolean }>(userId: number, role: string, files: T[]): T[] {
   const hasVmMediaAccess = role === "ADMIN"
     || (db.prepare("SELECT vm_name FROM qemu_vms ORDER BY vm_name").all() as Array<{ vm_name: string }>)
       .some((row) => hasResourcePermission(userId, role, "vm", row.vm_name, "media"));
-  return managedFiles.filter((entry) =>
+  return files.filter((entry) =>
     role === "ADMIN"
     || ((entry.type === "iso" || entry.type === "floppy") && hasVmMediaAccess)
     || !entry.ownerId
     || entry.ownerId === userId
     || entry.isPublic
   );
+}
+
+app.get("/api/storage/isos", async (req, reply) => {
+  requireUiSection(req, "isoLibrary");
+  return visibleManagedFiles(req.session.userId!, req.session.role!, await listManagedFiles());
 });
 
 app.post("/api/storage/isos/upload", async (req, reply) => {
@@ -12034,6 +12064,30 @@ function defaultStoragePoolName(): string {
   const row = db.prepare("SELECT name FROM storage_pools WHERE enabled = 1 ORDER BY (name = 'local') DESC, name LIMIT 1").get() as { name: string } | undefined;
   return row?.name ?? "local";
 }
+/** First enabled pool allowed to hold VM disks ("local" first): where desktop quick create / disposables go. */
+function defaultVmDiskPoolName(): string | undefined {
+  const rows = db.prepare("SELECT name FROM storage_pools WHERE enabled = 1 ORDER BY (name = 'local') DESC, name").all() as Array<{ name: string }>;
+  return rows.find((row) => resolveVmDiskPool(row.name))?.name;
+}
+/** Run a shared web service for the desktop: its refusals keep their status and message. */
+async function runServiceForDesktop<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof ApiError) desktopErr(error.message, error.statusCode);
+    desktopErrFromRunner(error);
+  }
+}
+/** Desktop quick create / disposables run on the node serving this API (like the web routes). */
+function requireLocalDesktopNode(node: string | undefined, what: string): string {
+  const local = getLocalNodeName();
+  if (node && node !== local) desktopErr(`${what} is only available on the node serving this API (${local}), not on ${node}`, 400);
+  return local;
+}
+/** Library floppy images a desktop user may insert (same visibility as the web library). */
+async function desktopVisibleFloppies(userId: number, role: string) {
+  return visibleManagedFiles(userId, role, await listManagedFiles()).filter((entry) => entry.type === "floppy");
+}
 function desktopUsernameById(id?: number | null): string | undefined {
   if (!id) return undefined;
   const r = db.prepare("SELECT username FROM users WHERE id = ?").get(id) as { username: string } | undefined;
@@ -12106,7 +12160,7 @@ async function applyDesktopVmNetworkModel(
   targetNode: DatacenterNode,
   key: string,
   network: string | undefined,
-  networkModel: "virtio" | "e1000" | "rtl8139" | undefined,
+  networkModel: NetworkModel | undefined,
 ): Promise<void> {
   if (network === undefined && networkModel === undefined) return;
   type VmNic = { mac?: string };
@@ -12126,7 +12180,7 @@ async function applyDesktopVmNetworkModel(
 }
 
 /** Build the create-options catalog (nodes/images/networks/defaults) for a type. */
-async function buildDesktopCreateOptions(type: "vm" | "lxc" | "docker"): Promise<import("@auxinux/shared").DesktopCreateOptions> {
+async function buildDesktopCreateOptions(type: "vm" | "lxc" | "docker", ctx: { userId: number; role: string }): Promise<import("@auxinux/shared").DesktopCreateOptions> {
   // n.isLocal only means "the datacenter node this API process happens to run
   // on" — meaningless to a Desktop Client user, whose own machine is never a
   // node in the cluster. Don't leak that internal distinction into the label.
@@ -12142,12 +12196,27 @@ async function buildDesktopCreateOptions(type: "vm" | "lxc" | "docker"): Promise
 
   if (type === "vm") {
     defaults = { cpu: 2, memory: 2048, disk: 20, network: "virbr0" };
-    const managed = await listManagedFiles().catch(() => [] as Array<{ filename: string; displayName?: string; type: string }>);
+    const managed = await listManagedFiles().catch(() => [] as Awaited<ReturnType<typeof listManagedFiles>>);
     images = managed
       .filter((f) => f.type === "iso")
       .map((f) => ({ id: f.filename, name: f.filename, label: f.displayName ?? f.filename, type: "iso", node: localNode }));
     const bridges = await callRunner<Array<{ name: string }>>("network_bridges_list").catch(() => []);
     networks = bridges.map((b) => ({ id: b.name, name: b.name, label: b.name, type: "bridge", node: localNode }));
+    // Hardware ids of this node's architecture (the same ones the web wizard offers).
+    const arch = nodeQemuArch();
+    const hasVmPool = !!defaultVmDiskPoolName();
+    return {
+      nodes, images, networks, defaults,
+      hardware: hardwareChoicesForArch(arch),
+      ...(archSupportsFloppy(arch)
+        ? {
+            floppies: visibleManagedFiles(ctx.userId, ctx.role, managed)
+              .filter((f) => f.type === "floppy")
+              .map((f) => ({ id: f.filename, name: f.filename, label: f.displayName ?? f.filename })),
+          }
+        : {}),
+      features: { quickCreate: hasVmPool, disposable: hasVmPool },
+    };
   } else if (type === "lxc") {
     defaults = { cpu: 2, memory: 1024, disk: 8, network: "lxcbr0" };
     const templates = await callRunner<Array<{ name: string; dist: string; release: string; arch: string; variant: string; description?: string; cached?: boolean }>>("lxc_templates", { refresh: false }).catch(() => []);
@@ -12200,7 +12269,7 @@ registerDesktopApi({
   getClientIp,
   hasResourcePermission: (userId, role, type, name, perm) => hasResourcePermission(userId, role, type, name, perm),
   userCanCreate: (userId, role, type) => userCanCreateResource(userId, role, type),
-  getCreateOptions: (type) => buildDesktopCreateOptions(type),
+  getCreateOptions: (type, ctx) => buildDesktopCreateOptions(type, ctx),
   getWebSessionUser: (req) =>
     req.session?.userId
       ? { userId: req.session.userId, role: (req.session.role as "ADMIN" | "USER") ?? "USER", username: req.session.username ?? "" }
@@ -12248,6 +12317,14 @@ registerDesktopApi({
             // Static allocated size (not live usage) — already on the list item.
             cpuCores: typeof v.vcpus === "number" ? v.vcpus : undefined,
             memoryMib: typeof v.memoryMb === "number" ? v.memoryMb : undefined,
+            // Hardware (runner list; absent from an older remote node).
+            machine: typeof v.machine === "string" && v.machine ? machineFamily(v.machine) : undefined,
+            cpuModel: typeof v.cpuModel === "string" ? v.cpuModel : undefined,
+            periodSpeed: typeof v.periodSpeed === "boolean" ? v.periodSpeed : undefined,
+            diskBus: typeof v.diskBus === "string" ? v.diskBus : undefined,
+            floppy: typeof v.mountedFloppy === "string" ? v.mountedFloppy : null,
+            disposable: (v.disposable as DesktopResourceRow["disposable"]) ?? null,
+            autoInstall: !!v.autoInstall,
           };
           out.push(row);
           if (state === "running") enrich.push((async () => {
@@ -12381,35 +12458,18 @@ registerDesktopApi({
     desktopTombstones.clear(input.type, targetNode.name, input.name);
 
     if (input.type === "vm") {
-      // secureBoot requires UEFI firmware — enabling it implies uefi=true.
-      // arm64 always boots UEFI (mirrors the web wizard's setArch()).
-      const arch = input.architecture ? archToQemu(input.architecture) : undefined;
-      const payload = CreateVmSchema.parse({
-        name: input.name,
-        vcpus: input.cpu ?? 2,
-        memoryMb: input.memory ?? 2048,
-        diskGb: input.disk ?? 20,
-        storagePool: defaultStoragePoolName(),
-        os: "linux",
-        isoFile: input.image,
-        ...(input.network ? { bridge: input.network } : {}),
-        ...(arch ? { arch, machine: arch === "aarch64" ? "virt" : "q35" } : {}),
-        ...(input.secureBoot !== undefined ? { secureBoot: input.secureBoot } : {}),
-        ...(input.secureBoot || arch === "aarch64" ? { uefi: true } : {}),
-        ...(input.tpm2 !== undefined ? { tpmEnabled: input.tpm2 } : {}),
-        ...(input.qemuGuestAgent !== undefined ? { qemuAgentEnabled: input.qemuGuestAgent } : {}),
-        ...(input.autostart !== undefined ? { autostart: input.autostart } : {}),
-        ...(input.gpuModel ? { videoModel: input.gpuModel } : {}),
-      });
+      if (input.floppyId) {
+        const visible = await desktopVisibleFloppies(ctx.userId, ctx.role);
+        if (!visible.some((f) => f.filename === input.floppyId)) desktopErr("Floppy image not found in the library", 404);
+      }
+      // Same schema (hardware rules included) as POST /api/vms.
+      const parsedVm = desktopVmCreateInput(input, defaultStoragePoolName());
+      if (!parsedVm.ok) desktopErr(parsedVm.error, 400);
+      const payload = parsedVm.data;
       if (targetNode.isLocal) await callRunner("qemu_create", await prepareVmCreatePayload(payload));
       else await fetchRemoteNode(targetNode, "/api/internal/vms", { method: "POST", body: JSON.stringify(payload) });
       db.prepare("INSERT INTO qemu_vms (vm_name, user_id, node_name) VALUES (?, ?, ?) ON CONFLICT(vm_name) DO UPDATE SET user_id = excluded.user_id, node_name = excluded.node_name")
         .run(payload.name, ctx.userId, targetNode.name);
-      if (input.networkModel) {
-        // Best-effort: the VM already exists at this point, so a NIC-model
-        // mismatch here shouldn't fail the whole creation.
-        await applyDesktopVmNetworkModel(targetNode, payload.name, undefined, input.networkModel).catch(() => undefined);
-      }
       return { node: targetNode.name, name: payload.name };
     }
 
@@ -12457,7 +12517,7 @@ registerDesktopApi({
 
   // Apply a partial update. Only fields that map cleanly per type are accepted;
   // renaming / image changes after creation are rejected (unsafe).
-  updateResource: async (res, patch) => {
+  updateResource: async (res, patch, ctx) => {
     if (isResourceLocked(res.type, res.name)) desktopErr("Ressource verrouillée : déverrouillez-la avant de la modifier.", 423);
     const dc = listDatacenterNodes().find((n) => n.name === res.node);
     const remote = dc && !dc.isLocal ? dc : null;
@@ -12494,14 +12554,36 @@ registerDesktopApi({
       if (patch.qemuGuestAgent !== undefined) cfg.qemuAgentEnabled = patch.qemuGuestAgent;
       if (patch.autostart !== undefined) cfg.autostart = patch.autostart;
       if (patch.gpuModel !== undefined) cfg.videoModel = patch.gpuModel;
+      // Chipset / CPU / period speed: written to the definition, live at the next start.
+      // `auto` chipset = unchanged.
+      if (patch.machine !== undefined && patch.machine !== "auto") cfg.machine = patch.machine;
+      if (patch.cpuModel !== undefined) cfg.cpuModel = patch.cpuModel;
+      if (patch.periodSpeed !== undefined) cfg.periodSpeed = patch.periodSpeed;
       if (Object.keys(cfg).length > 0) {
-        const v = UpdateVmConfigSchema.parse(cfg);
-        if (remote) await fetchRemoteNode(remote, `/api/internal/vms/${encodeURIComponent(key)}/config`, { method: "PUT", body: JSON.stringify(v) });
-        else await callRunner("qemu_update_config", { name: key, ...v });
+        // Same rules as PUT /api/vms/:name/config: allow_vm_modify + UpdateVmConfigSchema.
+        const permCheck = checkPermission(db, ctx.userId, ctx.role, "allow_vm_modify");
+        if (!permCheck.ok) desktopErr(permCheck.reason ?? "Forbidden", 403);
+        const v = UpdateVmConfigSchema.safeParse(cfg);
+        if (!v.success) desktopErr(v.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "), 400);
+        await applyVmConfig(key, v.data).catch(desktopErrFromRunner);
       }
       if (patch.network !== undefined || patch.networkModel !== undefined) {
         if (!dc) desktopErr("Target node not found", 404);
         await applyDesktopVmNetworkModel(dc, key, patch.network, patch.networkModel);
+      }
+      // Drive A: (`media` right checked by the desktop route) — same calls as /api/vms/:name/floppy/*.
+      if (patch.floppyId !== undefined) {
+        let floppy: FloppyChangeResult;
+        if (patch.floppyId === "") {
+          floppy = await ejectVmFloppy(key, false).catch(desktopErrFromRunner);
+        } else {
+          const visible = await desktopVisibleFloppies(ctx.userId, ctx.role);
+          if (!visible.some((f) => f.filename === patch.floppyId)) desktopErr("Floppy image not found in the library", 404);
+          const attach = AttachFloppySchema.safeParse({ floppyFile: patch.floppyId });
+          if (!attach.success) desktopErr(attach.error.issues.map((i) => i.message).join("; "), 400);
+          floppy = await attachVmFloppy(key, attach.data).catch(desktopErrFromRunner);
+        }
+        return { node: res.node, name: key, pendingRestart: !!floppy.pendingRestart, ...(floppy.message ? { messages: [floppy.message] } : {}) };
       }
       return { node: res.node, name: key };
     }
@@ -12586,6 +12668,41 @@ registerDesktopApi({
     if (!t) return null;
     if (role !== "ADMIN" && t.ownerUserId !== userId) return null; // not visible → treat as absent
     return toDesktopTaskInfo(t);
+  },
+
+  // Quick create / disposable VMs: the web routes' services, local node only.
+  quickCreate: async (actor, input) => {
+    const node = requireLocalDesktopNode(input.node, "Quick create");
+    const storagePool = defaultVmDiskPoolName();
+    if (!storagePool) desktopErr("No storage pool of this node may hold VM disks", 409);
+    const result = await runServiceForDesktop(() => quickCreateService.quickCreate(actor, { os: input.os, name: input.name, storagePool }));
+    desktopTombstones.clear("vm", node, result.body.name);
+    return { taskId: result.body.id, node, name: result.body.name };
+  },
+  listDisposableBases: () => runServiceForDesktop(() => disposableService.listBases()),
+  launchDisposable: async (actor, input) => {
+    const node = requireLocalDesktopNode(undefined, "Disposable VMs");
+    const storagePool = defaultVmDiskPoolName();
+    if (!storagePool) desktopErr("No storage pool of this node may hold VM disks", 409);
+    const result = await runServiceForDesktop(() => disposableService.launch(actor, {
+      baseId: input.baseId,
+      storagePool,
+      strict: input.strict ?? false,
+      // `user` = the node's default NAT bridge; `isolated` = no network card.
+      noNetwork: input.network === "isolated",
+    }));
+    desktopTombstones.clear("vm", node, result.body.name);
+    return { node, name: result.body.name };
+  },
+  disposableAction: async (actor, res, action) => {
+    requireLocalDesktopNode(res.node, "Disposable VMs");
+    const result = await runServiceForDesktop(() => disposableService.action(actor, res.name, action));
+    if (action === "discard") {
+      // Gone like a delete: drop the handle and mask it until the listing catches up.
+      db.prepare("DELETE FROM desktop_resource_handles WHERE resource_type = 'vm' AND node_name = ? AND resource_name = ?").run(res.node, res.name);
+      desktopTombstones.mark("vm", res.node, res.name);
+    }
+    return result;
   },
 
   // One-time console ticket reusing the existing WS infra (term/vnc/spice).

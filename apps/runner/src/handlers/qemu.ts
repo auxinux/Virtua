@@ -25,6 +25,7 @@ import {
   applyMachineType,
   buildCpuXml,
   domainCpuModel,
+  domainListHardware,
   domainVirtType,
   readVirtuaMetadata,
   replaceCpuXml,
@@ -420,6 +421,9 @@ async function listVms() {
         memoryMb: Math.round(maxMem / 1024), usedMemoryMb: Math.round(usedMem / 1024),
         uuid, autostart, qemuAgentEnabled,
         disposable: readVirtuaMetadata(xml).disposable ?? null,
+        // machine, cpuModel, periodSpeed, diskBus, mountedFloppy
+        ...domainListHardware(xml),
+        autoInstall: await readAutoInstallSummary(name),
       };
     } catch {
       return { name, state: "unknown", vcpus: 0, maxMemoryKiB: 0, usedMemoryKiB: 0, memoryMb: 0, usedMemoryMb: 0, uuid: "", autostart: false, qemuAgentEnabled: false };

@@ -26,6 +26,7 @@ import {
   windowsLanguage,
   type QuickCreateOs,
 } from "@auxinux/shared";
+import { ApiError, sendServiceResult, type ApiActor, type ServiceResult } from "./disposable.js";
 
 type Task = { id: string };
 
@@ -33,12 +34,13 @@ export interface QuickCreateDeps {
   db: Database.Database;
   callRunner: <T = unknown>(action: string, params?: unknown, timeoutMs?: number) => Promise<T>;
   requireAuth: (req: FastifyRequest, reply: FastifyReply) => void;
-  checkVmCreateAllowed: (req: FastifyRequest) => { ok: boolean; reason?: string };
-  replyQuotaError: (reply: FastifyReply, result: { ok: boolean; reason?: string }) => unknown;
-  getClientIp: (req: FastifyRequest) => string;
+  /** The web session's actor (called after requireAuth). */
+  actorOf: (req: FastifyRequest) => ApiActor;
+  /** VM quota + `allow_vm_create`. */
+  checkVmCreateAllowed: (actor: ApiActor) => { ok: boolean; reason?: string };
   resolveVmDiskPool: (name: string) => { path: string } | undefined;
   localNodeName: () => string;
-  createTask: (req: FastifyRequest, options: { kind: "create"; action: string; label: string; resourceType?: string; resourceName?: string; message?: string }) => Task;
+  createTask: (actor: ApiActor, options: { kind: "create"; action: string; label: string; resourceType?: string; resourceName?: string; message?: string }) => Task;
   runTrackedTask: (task: Task, ip: string, fn: (helpers: { update: (patch: Record<string, unknown>) => void }) => Promise<unknown>) => Promise<void>;
   publicTask: (task: Task) => unknown;
   /** Library ISOs with their absolute path and size. */
@@ -119,6 +121,21 @@ export function uniqueVmName(wanted: string, taken: Set<string>): string {
 }
 
 export function registerQuickCreateRoutes(app: FastifyInstance, deps: QuickCreateDeps) {
+  const service = createQuickCreateService(deps);
+  app.post("/api/vms/quick-create", async (req, reply) => {
+    deps.requireAuth(req, reply);
+    return sendServiceResult(reply, () => service.quickCreate(deps.actorOf(req), req.body));
+  });
+}
+
+export type QuickCreateService = ReturnType<typeof createQuickCreateService>;
+
+/**
+ * Quick create for any caller (web session, Virtua Desktop): validation,
+ * quota/permission, then a tracked task (media download + runner create).
+ * Answers 202 with the public task and the VM name actually used.
+ */
+export function createQuickCreateService(deps: Omit<QuickCreateDeps, "requireAuth" | "actorOf">) {
   const arch = nodeQemuArch(deps.hostArch);
 
   async function debianNetboot(taskId: string, update: (patch: Record<string, unknown>) => void) {
@@ -165,25 +182,24 @@ export function registerQuickCreateRoutes(app: FastifyInstance, deps: QuickCreat
     return deps.downloadIso(taskId, `${dirUrl}${encodeURIComponent(best.name)}`, best.name, best.name);
   }
 
-  app.post("/api/vms/quick-create", async (req, reply) => {
-    deps.requireAuth(req, reply);
-    const parsed = QuickCreateSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
-    const allowed = deps.checkVmCreateAllowed(req);
-    if (!allowed.ok) return deps.replyQuotaError(reply, allowed);
+  async function quickCreate(actor: ApiActor, body: unknown): Promise<ServiceResult<Record<string, unknown> & { id: string; name: string }>> {
+    const parsed = QuickCreateSchema.safeParse(body);
+    if (!parsed.success) throw new ApiError(400, parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+    const allowed = deps.checkVmCreateAllowed(actor);
+    if (!allowed.ok) throw new ApiError(403, allowed.reason ?? "Forbidden");
     const input = parsed.data;
     const os: QuickCreateOs = input.os;
-    if (os === "windows11" && arch !== "x86_64") return reply.status(400).send({ error: "Windows 11 quick create needs an x86-64 node" });
+    if (os === "windows11" && arch !== "x86_64") throw new ApiError(400, "Windows 11 quick create needs an x86-64 node");
     const pool = deps.resolveVmDiskPool(input.storagePool);
-    if (!pool) return reply.status(400).send({ error: "Storage pool not found or not allowed to hold VM disks" });
+    if (!pool) throw new ApiError(400, "Storage pool not found or not allowed to hold VM disks");
     const profile = QUICK_CREATE_PROFILES[os];
     const existing = new Set((await deps.callRunner<Array<{ name: string }>>("qemu_vms").catch(() => [])).map((vm) => vm.name));
     const wanted = input.name ?? (input.makeBase ? `base-${os}` : os === "windows11" ? "windows-11" : "debian-13");
-    if (input.name && existing.has(input.name)) return reply.status(409).send({ error: `VM ${input.name} already exists` });
+    if (input.name && existing.has(input.name)) throw new ApiError(409, `VM ${input.name} already exists`);
     const name = uniqueVmName(wanted, existing);
-    const ip = deps.getClientIp(req);
-    const userId = req.session.userId!;
-    const task = deps.createTask(req, {
+    const ip = actor.ip;
+    const userId = actor.userId;
+    const task = deps.createTask(actor, {
       kind: "create",
       action: "vm.quick-create",
       label: `Quick create ${profile.label}${input.makeBase ? " (disposable base)" : ""}: ${name}`,
@@ -216,6 +232,8 @@ export function registerQuickCreateRoutes(app: FastifyInstance, deps: QuickCreat
       update({ message: "Unattended installation running (account virtua / virtua)" });
       return result;
     });
-    return reply.status(202).send({ ...(deps.publicTask(task) as object), name });
-  });
+    return { status: 202, body: { ...(deps.publicTask(task) as object), id: task.id, name } };
+  }
+
+  return { quickCreate, arch };
 }
