@@ -12,6 +12,22 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.11",
+      items: fr
+        ? [
+            "Nouveau : création rapide (VM → Création rapide). Windows 11 (4 vCPU, 4 Go, 80 Go) ou Debian 13 (2 vCPU, 4 Go, 60 Go) installés sans aucune question, compte virtua / virtua. Debian : dernier installateur officiel vérifié ; Windows : ISO de la bibliothèque ou du dépôt AuxiNux, pilotes VirtIO, UEFI + Secure Boot + TPM.",
+            "Nouveau (bêta) : VM jetables (VM → Jetables). Une VM prête en quelques secondes, copiée d'une base installée ; à l'arrêt : jeter, repartir à neuf, garder ou convertir en VM normale. Sandbox stricte et option sans réseau. Les bases se font à partir d'une VM arrêtée ou s'importent du dépôt (.vmtmp).",
+            "Vieux ordinateurs : type de machine modifiable (q35 ou pc / i440FX), modèle de processeur (80286 → Pentium 4, Core 2, Skylake, EPYC…), option « Vitesse d'époque » (émulation à peu près à la vitesse du processeur choisi, pour les jeux DOS), disque IDE, cartes réseau NE2000 et AMD PCnet. Préréglage « ancien ordinateur (DOS / Windows 9x) ».",
+            "Le modèle de processeur choisi est conservé à chaque démarrage (il était remplacé par celui de l'hôte).",
+          ]
+        : [
+            "New: quick create (VM → Quick create). Windows 11 (4 vCPU, 4 GB, 80 GB) or Debian 13 (2 vCPU, 4 GB, 60 GB) installed with no question at all, account virtua / virtua. Debian: latest official installer, verified; Windows: ISO from the library or the AuxiNux depot, VirtIO drivers, UEFI + Secure Boot + TPM.",
+            "New (beta): disposable VMs (VM → Disposable). A VM ready in seconds, copied from an installed base; on stop: discard, start over, keep or convert into a normal VM. Strict sandbox and no-network option. Bases are made from a stopped VM or imported from the depot (.vmtmp).",
+            "Old computers: editable machine type (q35 or pc / i440FX), CPU model (80286 → Pentium 4, Core 2, Skylake, EPYC…), \"period speed\" option (emulated at roughly the chosen CPU's speed, for DOS games), IDE disk, NE2000 and AMD PCnet network cards. \"Old computer (DOS / Windows 9x)\" preset.",
+            "The chosen CPU model is kept on every start (it used to be replaced by the host's).",
+          ],
+    },
+    {
       v: "0.8.10",
       items: fr
         ? [
