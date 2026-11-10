@@ -310,18 +310,19 @@ test("when a disposable VM stops, Virtua asks whether to throw it away", async (
   await expect(dialog).toBeHidden();
 });
 
-test("an old PC for DOS: i440FX machine, 486 CPU, IDE disk", async ({ page }) => {
+test("an old PC for DOS: i440FX machine, 286 at the speed of its time, IDE disk", async ({ page }) => {
   await localDesktop(page);
   await page.goto("/#/vms");
   await page.getByRole("button", { name: /Nouveau|Nouvelle|Creer/i }).first().click();
   await page.getByLabel("Nom", { exact: true }).fill("AuxiDos");
   await page.getByLabel("Architecture").selectOption("amd64");
   await page.getByLabel("Type de machine").selectOption("pc");
-  await page.getByLabel("Modèle de CPU").selectOption("486");
+  await page.getByLabel("Modèle de CPU").selectOption("286");
+  await page.getByLabel(/Vitesse d’époque/).check();
   await page.getByLabel(/^Bus disque/).selectOption("ide");
   await page.getByLabel(/^Carte reseau/).selectOption("ne2k_pci");
   await page.locator("form").getByRole("button", { name: /^Creer$/i }).click();
   await expect
     .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_create_vm").map((c: any) => c.args.payload)))
-    .toEqual([expect.objectContaining({ name: "AuxiDos", architecture: "amd64", machine: "pc", cpuModel: "486", diskBus: "ide", networkModel: "ne2k_pci" })]);
+    .toEqual([expect.objectContaining({ name: "AuxiDos", architecture: "amd64", machine: "pc", cpuModel: "286", periodSpeed: true, diskBus: "ide", networkModel: "ne2k_pci" })]);
 });

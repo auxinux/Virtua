@@ -362,11 +362,32 @@ pub const X86_MACHINES: [&str; 3] = ["auto", "q35", "pc"];
 
 /// CPU models offered, by architecture (QEMU names; `auto` keeps Virtua's
 /// choice: `host` with KVM/HVF, x86-64-v2 on WHPX, `max` under emulation).
-pub const X86_CPUS: [&str; 18] = [
-    "auto", "host", "max", "qemu64", "qemu32", "kvm64", "486", "pentium", "pentium2", "pentium3", "athlon",
+pub const X86_CPUS: [&str; 21] = [
+    "auto", "host", "max", "qemu64", "qemu32", "kvm64", "286", "386", "486", "pentium", "pentium2", "pentium3", "pentium4", "athlon",
     "core2duo", "Nehalem", "SandyBridge", "Haswell", "Skylake-Client", "Cascadelake-Server", "EPYC",
 ];
 pub const ARM_CPUS: [&str; 7] = ["auto", "host", "max", "cortex-a53", "cortex-a57", "cortex-a72", "neoverse-n1"];
+
+/// Period CPUs: the QEMU model used and the `-icount` shift giving roughly
+/// the speed of the time (2^shift ns per instruction). QEMU has no 286/386
+/// model (its oldest is the 486) nor a Pentium 4 (a Pentium III with SSE2).
+pub fn vintage_cpu(choice: &str) -> Option<(&'static str, u8)> {
+    Some(match choice {
+        "286" => ("486", 9),      // ~2 MIPS
+        "386" => ("486", 7),      // ~8 MIPS
+        "486" => ("486", 4),      // ~60 MIPS (486 DX2/DX4)
+        "pentium" => ("pentium", 3),
+        "pentium2" => ("pentium2", 2),
+        "pentium3" => ("pentium3", 1),
+        "pentium4" => ("pentium3,+sse2", 0),
+        _ => return None,
+    })
+}
+
+/// QEMU `-cpu` value of a choice offered in the list.
+pub fn qemu_cpu_name(choice: &str) -> &str {
+    vintage_cpu(choice).map(|(cpu, _)| cpu).unwrap_or(choice)
+}
 
 /// `value` if it is a machine type offered for `arch`, else `auto`.
 pub fn normalize_machine(arch: &str, value: Option<&str>) -> String {
@@ -408,7 +429,10 @@ pub fn machine_args_for(cmd: &mut Command, arch: &str, accel: &str, guest_os: &s
     // host thread for every vCPU because x86 memory ordering is stronger than
     // ARM's. Multi-threaded TCG is what makes a multi-vCPU x86 guest usable
     // on a Mac; QEMU only prints a warning about it.
-    let accel_arg = if accel == "tcg" {
+    let accel_arg = if accel == "tcg-period" {
+        // Period speed: `-icount` needs single-threaded TCG (QEMU refuses MTTCG).
+        "tcg,thread=single".to_string()
+    } else if accel == "tcg" {
         "tcg,thread=multi".to_string()
     } else {
         accel.to_string()
@@ -416,8 +440,8 @@ pub fn machine_args_for(cmd: &mut Command, arch: &str, accel: &str, guest_os: &s
     let explicit = cpu_choice != "auto" && !cpu_choice.is_empty();
     let cpu = match accel {
         // `host` needs hardware acceleration; under emulation it is `max`.
-        _ if explicit && cpu_choice == "host" && accel == "tcg" => "max".to_string(),
-        _ if explicit => cpu_choice.to_string(),
+        _ if explicit && cpu_choice == "host" && accel.starts_with("tcg") => "max".to_string(),
+        _ if explicit => qemu_cpu_name(cpu_choice).to_string(),
         "tcg" => "max".to_string(),
         "whpx" if tuned => format!("qemu64,{WHPX_V2_FLAGS},-hypervisor"),
         "whpx" => "qemu64,-hypervisor".to_string(),
@@ -744,6 +768,17 @@ mod tests {
         assert_eq!(normalize_machine("amd64", Some("pc")), "pc");
         assert_eq!(normalize_machine("arm64", Some("pc")), "auto");
         assert_eq!(normalize_machine("amd64", Some("isapc")), "auto");
+    }
+    #[test]
+    fn period_cpus_map_to_qemu_models_and_speeds() {
+        assert_eq!(vintage_cpu("286"), Some(("486", 9)));
+        assert_eq!(qemu_cpu_name("pentium4"), "pentium3,+sse2");
+        assert_eq!(qemu_cpu_name("Haswell"), "Haswell");
+        assert_eq!(normalize_cpu_model("amd64", Some("386")), "386");
+        let mut cmd = Command::new("qemu");
+        machine_args_for(&mut cmd, "amd64", "tcg-period", "other", false, "pc", "286");
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert!(args.contains(&"tcg,thread=single".to_string()) && args.contains(&"486".to_string()));
     }
     #[test]
     fn auxinux_is_recognised_by_os_release_or_kernel() {

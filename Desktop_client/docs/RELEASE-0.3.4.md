@@ -62,3 +62,14 @@ bloquée sur « Select a language » sur ARM64 : l'installateur tournait sur la
 console série de la machine `virt`, qui ne propose que la langue « C » et
 refusait le français préconfiguré. Il s'affiche maintenant à l'écran
 (`console=tty0`), comme sur x86.
+
+## Processeurs d'époque
+
+- Choix 80286, 80386, 80486, 80586 / Pentium, Pentium II, III et 4.
+  QEMU n'a pas de modèle 286/386 (son plus ancien est le 486) ni de
+  Pentium 4 : 286 et 386 sont un 486, le Pentium 4 un Pentium III avec SSE2.
+- **Vitesse d'époque** (x86) : la VM tourne à peu près à la vitesse de ce
+  processeur — 286 ≈ 2 MIPS, 386 ≈ 8 MIPS, 486 ≈ 60 MIPS, Pentium ≈ 125 MIPS…
+  — en émulation (QEMU `-icount`, TCG mono-fil) au lieu de l'accélération
+  matérielle : les jeux et programmes DOS calés sur la vitesse du processeur
+  ne vont plus dix fois trop vite.

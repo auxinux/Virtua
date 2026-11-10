@@ -624,6 +624,7 @@ fn quick_create_with(app: &tauri::AppHandle, os: &str, name: Option<String>, mak
         secure_boot: Some(profile.guest_os == "windows"),
         machine: None,
         cpu_model: None,
+        period_speed: None,
     };
 
     let auto = if profile.os == "debian13" {

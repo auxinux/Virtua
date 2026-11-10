@@ -77,6 +77,8 @@ export interface VirtuaResource {
   /** Local VMs: x86 chipset (`auto`, `q35`, `pc`) and QEMU CPU model. */
   machine?: string;
   cpuModel?: string;
+  /** Local VMs: period CPU run at the speed of its time (emulated, -icount). */
+  periodSpeed?: boolean;
   /** Local VMs: disposable copy of a base (copy-on-write). */
   disposable?: { baseId: string; baseLabel: string; strict: boolean };
   /** Local VMs: `windows` or `other`. */
@@ -352,6 +354,7 @@ export interface LocalVm {
   disposable?: { baseId: string; baseLabel: string; strict: boolean } | null;
   floppyPath?: string | null;
   machine?: string;
+  periodSpeed?: boolean;
   cpuModel?: string;
 }
 

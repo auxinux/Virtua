@@ -12,10 +12,13 @@ const x86Cpus = [
   { value: "qemu64", label: "qemu64 — x86-64 générique" },
   { value: "qemu32", label: "qemu32 — x86 32 bits générique" },
   { value: "kvm64", label: "kvm64" },
-  { value: "486", label: "486 — DOS, Windows 3.x" },
-  { value: "pentium", label: "Pentium — Windows 95" },
+  { value: "286", label: "80286 — DOS (approché : 486 ralenti à ~2 MIPS)" },
+  { value: "386", label: "80386 — DOS, Windows 3.x (approché : 486 ralenti à ~8 MIPS)" },
+  { value: "486", label: "80486 — DOS, Windows 3.x/95" },
+  { value: "pentium", label: "80586 / Pentium — Windows 95" },
   { value: "pentium2", label: "Pentium II — Windows 98" },
   { value: "pentium3", label: "Pentium III — Windows 98/2000/XP" },
+  { value: "pentium4", label: "Pentium 4 — Windows XP (Pentium III + SSE2)" },
   { value: "athlon", label: "AMD Athlon" },
   { value: "core2duo", label: "Core 2 Duo — Windows XP/Vista/7" },
   { value: "Nehalem", label: "Nehalem (Core i7, 2008)" },
@@ -44,3 +47,6 @@ export const legacyNetworkOptions = [
   { value: "ne2k_pci", label: "NE2000 (PCI) — DOS, Windows 3.x/9x" },
   { value: "pcnet", label: "AMD PCnet — Windows 9x/NT, vieux Linux" },
 ];
+
+/** CPUs that can run at the speed of their time ("Vitesse d'époque"). */
+export const periodCpus = new Set(["286", "386", "486", "pentium", "pentium2", "pentium3", "pentium4"]);

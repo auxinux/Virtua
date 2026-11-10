@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { cpuOptions, legacyNetworkOptions, machineOptions } from "@/hardwareOptions";
+import { cpuOptions, legacyNetworkOptions, machineOptions, periodCpus } from "@/hardwareOptions";
 import { QuickCreatePanel } from "@/components/QuickCreatePanel";
 import { Boxes, Container, Loader2, Monitor, Plus, Play, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
@@ -154,6 +154,7 @@ function CreateResourceDialog({
     diskBus: "virtio",
     machine: "auto",
     cpuModel: "auto",
+    periodSpeed: false,
     guestOs: "other",
     virtioDrivers: false,
     cpu: "2",
@@ -281,6 +282,7 @@ function CreateResourceDialog({
         diskBus: form.type === "vm" && usageMode === "local" ? form.diskBus : undefined,
         machine: form.type === "vm" && usageMode === "local" ? form.machine : undefined,
         cpuModel: form.type === "vm" && usageMode === "local" ? form.cpuModel : undefined,
+        periodSpeed: form.type === "vm" && usageMode === "local" && periodCpus.has(form.cpuModel) ? form.periodSpeed : undefined,
         guestOs: form.type === "vm" && usageMode === "local" ? form.guestOs : undefined,
         virtioDrivers: form.type === "vm" && usageMode === "local" ? form.virtioDrivers : undefined,
         cpu: Number(form.cpu),
@@ -507,6 +509,12 @@ function CreateResourceDialog({
                       {cpuOptions(form.architecture).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </label>
+                  {form.architecture !== "arm64" && periodCpus.has(form.cpuModel) ? (
+                    <label className="flex items-start gap-2 text-xs text-virtua-muted sm:col-span-2">
+                      <input type="checkbox" className="mt-0.5" checked={form.periodSpeed} onChange={(event) => setField("periodSpeed", event.target.checked)} />
+                      <span><span className="text-virtua-text">Vitesse d’époque</span> — la VM tourne à peu près à la vitesse de ce processeur (émulé, sans accélération matérielle) : les jeux DOS ne vont plus trop vite.</span>
+                    </label>
+                  ) : null}
                 </>
               ) : null}
             </>

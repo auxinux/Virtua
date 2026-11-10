@@ -98,6 +98,7 @@ function mapLocalVm(vm: LocalVm): VirtuaResource {
     floppyImage: vm.floppyPath || undefined,
     machine: vm.machine ?? "auto",
     cpuModel: vm.cpuModel ?? "auto",
+    periodSpeed: Boolean(vm.periodSpeed),
     disposable: vm.disposable ?? undefined,
     guestOs: vm.guestOs ?? "other",
     windowsSetupBypass: vm.windowsSetupBypass ?? true,
@@ -353,6 +354,7 @@ export const localVirtua = {
           secureBoot: payload.secureBoot ?? false,
           machine: payload.machine,
           cpuModel: payload.cpuModel,
+          periodSpeed: payload.periodSpeed,
         },
       });
       updateTask(taskId, { status: "completed", progress: 100 });
@@ -409,7 +411,7 @@ export const localVirtua = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; floppyImage?: string; machine?: string; cpuModel?: string; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; floppyImage?: string; machine?: string; cpuModel?: string; periodSpeed?: boolean; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
     const taskId = pushTask({ label: "Modification VM locale", target: resourceId, status: "running", progress: 25 });
     try {
       const vm = await invoke<LocalVm>("local_update_vm", {
@@ -421,6 +423,7 @@ export const localVirtua = {
           floppyImage: payload.floppyImage,
           machine: payload.machine,
           cpuModel: payload.cpuModel,
+          periodSpeed: payload.periodSpeed,
           guestOs: payload.guestOs,
           windowsSetupBypass: payload.windowsSetupBypass,
           cpu: payload.cpu,

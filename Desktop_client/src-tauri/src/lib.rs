@@ -363,6 +363,10 @@ struct LocalVm {
     /// QEMU CPU model, or `auto` (Virtua's choice for the accelerator).
     #[serde(default = "default_auto")]
     cpu_model: String,
+    /// Period CPU (286 … Pentium 4) run at roughly its own speed: emulated
+    /// (TCG) with `-icount`, so DOS games are not ten times too fast.
+    #[serde(default)]
+    period_speed: bool,
     created_at: String,
     updated_at: String,
 }
@@ -389,6 +393,8 @@ struct LocalCreateVmPayload {
     machine: Option<String>,
     #[serde(default)]
     cpu_model: Option<String>,
+    #[serde(default)]
+    period_speed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +407,7 @@ struct LocalUpdateVmPayload {
     floppy_image: Option<String>,
     machine: Option<String>,
     cpu_model: Option<String>,
+    period_speed: Option<bool>,
     guest_os: Option<String>,
     windows_setup_bypass: Option<bool>,
     cpu: Option<u16>,
@@ -2351,6 +2358,7 @@ fn import_template_archive(
         floppy_path: None,
         machine: default_auto(),
         cpu_model: default_auto(),
+        period_speed: false,
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2860,6 +2868,7 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         floppy_path: None,
         machine: platform::normalize_machine(&architecture, payload.machine.as_deref()),
         cpu_model: platform::normalize_cpu_model(&architecture, payload.cpu_model.as_deref()),
+        period_speed: payload.period_speed.unwrap_or(false),
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2915,6 +2924,9 @@ fn local_update_vm_blocking(id: String, payload: LocalUpdateVmPayload) -> Result
     }
     if let Some(cpu) = payload.cpu_model {
         vm.cpu_model = platform::normalize_cpu_model(&vm.architecture, Some(cpu.trim()));
+    }
+    if let Some(period) = payload.period_speed {
+        vm.period_speed = period;
     }
 
     if let Some(image) = payload.floppy_image {
@@ -3567,10 +3579,14 @@ fn build_qemu_command(
         // a bare `-smp 8` (8 sockets on older QEMU) left most vCPUs idle.
         .arg(format!("{0},sockets=1,cores={0},threads=1", vm.cpu.max(1)));
 
+    let period = vm.period_speed
+        .then(|| platform::vintage_cpu(&vm.cpu_model))
+        .flatten()
+        .filter(|_| vm.architecture == "amd64");
     platform::machine_args_for(
         &mut command,
         &vm.architecture,
-        &plan.accelerator,
+        if period.is_some() { "tcg-period" } else { &plan.accelerator },
         &vm.guest_os,
         plan.tuned,
         &vm.machine,
@@ -3634,6 +3650,11 @@ fn build_qemu_command(
         vm.iso_path.as_deref(),
         vm.driver_iso_path.as_deref(),
     )?;
+    if let Some((_, shift)) = period {
+        // 2^shift ns per instruction; sleep=on idles the host instead of
+        // racing ahead when the guest is faster than its period.
+        command.arg("-icount").arg(format!("shift={shift},sleep=on"));
+    }
     append_floppy_args(&mut command, &vm.architecture, &vm.machine, vm.floppy_path.as_deref(), vm.iso_path.as_deref())?;
     if vm.disposable.as_ref().is_some_and(|d| d.strict) {
         // Strict sandbox: every write goes to a temporary file QEMU drops on exit.
@@ -4669,7 +4690,8 @@ mod local_mode_tests {
         let mut dos = sample_vm("amd64", "std");
         dos.disk_path = disk.clone();
         dos.machine = "pc".into();
-        dos.cpu_model = "486".into();
+        dos.cpu_model = "286".into();
+        dos.period_speed = true;
         dos.disk_bus = "ide".into();
         dos.network_model = "ne2k_pci".into();
         dos.floppy_path = std::env::var("VIRTUA_FLOPPY").ok();
@@ -4761,6 +4783,24 @@ mod local_mode_tests {
         let mut ports = sample_ports();
         ports.uefi = Some(UefiFirmware { code: "/fw/code.fd".into(), vars: "/fw/vars.fd".into(), secure_boot: true, smm: true });
         assert!(build_qemu_command("qemu", &vm, &ports, &plan).is_err());
+    }
+
+    #[test]
+    fn period_speed_runs_the_vintage_cpu_emulated_and_throttled() {
+        let mut vm = sample_vm("amd64", "std");
+        vm.machine = "pc".into();
+        vm.cpu_model = "386".into();
+        vm.period_speed = true;
+        let mut plan = launch_plans("amd64", "std").remove(0);
+        plan.accelerator = "kvm".into();
+        let args = command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap());
+        assert!(args.contains(&"tcg,thread=single".to_string()));
+        assert!(args.contains(&"shift=7,sleep=on".to_string()));
+        assert!(args.contains(&"486".to_string()));
+        // Without the option, the same CPU runs at full speed on KVM.
+        vm.period_speed = false;
+        let fast = command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap());
+        assert!(fast.contains(&"kvm".to_string()) && !fast.iter().any(|a| a.starts_with("shift=")));
     }
 
     #[test]
@@ -5242,6 +5282,7 @@ mod local_mode_tests {
         floppy_path: None,
         machine: default_auto(),
         cpu_model: default_auto(),
+        period_speed: false,
             created_at: "0".into(),
             updated_at: "0".into(),
         }

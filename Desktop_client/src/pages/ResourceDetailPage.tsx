@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { cpuOptions, legacyNetworkOptions, machineOptions } from "@/hardwareOptions";
+import { cpuOptions, legacyNetworkOptions, machineOptions, periodCpus } from "@/hardwareOptions";
 import { Boxes, Camera, Container, Edit3, Monitor, RotateCcw, Save, Terminal, Trash2 } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
@@ -80,6 +80,7 @@ type UpdateResourcePayload = {
   networkModel?: string;
   machine?: string;
   cpuModel?: string;
+  periodSpeed?: boolean;
   gpuModel?: string;
   diskBus?: string;
   tpm2?: boolean;
@@ -127,6 +128,7 @@ export function ResourceDetailPage({
     diskBus: resource?.diskBus ?? "virtio",
     machine: resource?.machine ?? "auto",
     cpuModel: resource?.cpuModel ?? "auto",
+    periodSpeed: Boolean(resource?.periodSpeed),
     tpm2: Boolean(resource?.tpm2),
     secureBoot: Boolean(resource?.secureBoot),
   });
@@ -162,6 +164,7 @@ export function ResourceDetailPage({
       diskBus: resource.diskBus ?? "virtio",
       machine: resource.machine ?? "auto",
       cpuModel: resource.cpuModel ?? "auto",
+      periodSpeed: Boolean(resource.periodSpeed),
       tpm2: Boolean(resource.tpm2),
       secureBoot: Boolean(resource.secureBoot),
     });
@@ -247,6 +250,7 @@ export function ResourceDetailPage({
       if (form.diskBus !== (resource.diskBus ?? "virtio")) payload.diskBus = form.diskBus;
       if (isLocal && form.machine !== (resource.machine ?? "auto")) payload.machine = form.machine;
       if (isLocal && form.cpuModel !== (resource.cpuModel ?? "auto")) payload.cpuModel = form.cpuModel;
+      if (isLocal && form.periodSpeed !== Boolean(resource.periodSpeed)) payload.periodSpeed = form.periodSpeed;
       if (form.tpm2 !== Boolean(resource.tpm2)) payload.tpm2 = form.tpm2;
       if (form.secureBoot !== Boolean(resource.secureBoot)) payload.secureBoot = form.secureBoot;
 
@@ -594,6 +598,12 @@ export function ResourceDetailPage({
                         {cpuOptions(resource.architecture).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                       </select>
                     </label>
+                    {resource.architecture !== "arm64" && periodCpus.has(form.cpuModel) ? (
+                      <label className="flex items-start gap-2 text-xs text-virtua-muted">
+                        <input type="checkbox" className="mt-0.5" disabled={!canModify} checked={form.periodSpeed} onChange={(event) => setForm((current) => ({ ...current, periodSpeed: event.target.checked }))} />
+                        <span><span className="text-virtua-text">Vitesse d’époque</span> — à peu près la vitesse de ce processeur (émulé). Au prochain démarrage.</span>
+                      </label>
+                    ) : null}
                     <label className="space-y-1 text-xs text-virtua-muted">
                       Systeme invite
                       <select className="virtua-input w-full" disabled={!canModify} value={form.guestOs} onChange={(event) => {
@@ -689,7 +699,7 @@ export function ResourceDetailPage({
                 ? ([
                     ["Bus disque", resource.diskBus ?? "virtio"],
                     ["Machine", resource.machine && resource.machine !== "auto" ? resource.machine : "q35 (auto)"],
-                    ["CPU", resource.cpuModel && resource.cpuModel !== "auto" ? resource.cpuModel : "automatique"],
+                    ["CPU", resource.cpuModel && resource.cpuModel !== "auto" ? `${resource.cpuModel}${resource.periodSpeed ? " (vitesse d’époque)" : ""}` : "automatique"],
                     ["Systeme invite", resource.guestOs === "windows" ? "Windows" : "Linux / autre"],
                     ["ISO pilotes", resource.driverImage ?? "aucune"],
                     ["Disquette A:", resource.floppyImage ?? "aucune"],

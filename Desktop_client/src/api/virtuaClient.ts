@@ -52,6 +52,7 @@ export type CreateResourcePayload = {
   /** Local mode only: x86 chipset (`auto`, `q35`, `pc`) and QEMU CPU model. */
   machine?: string;
   cpuModel?: string;
+  periodSpeed?: boolean;
   /** Local mode only: `windows` or `other`. */
   guestOs?: string;
   /** Local mode only: mount virtio-win.iso as a second CD-ROM (downloaded once). */
