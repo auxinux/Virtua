@@ -37,7 +37,7 @@ pub fn explain_connect_error(error: &std::io::Error, host: &str, port: u16, os: 
             "Aucune réponse de {host}:{port} : adresse incorrecte, machine éteinte, ou pare-feu qui bloque le port {port}."
         ),
         _ if unreachable && os == "macos" && is_private(host) => format!(
-            "macOS bloque l’accès au réseau local : Réglages Système → Confidentialité et sécurité → Réseau local → autorisez « AuxiNux Virtua Desktop Client », puis réessayez. ({error})"
+            "{host} injoignable depuis l’app ({error}). Si « curl http://{host}:{port}/api/health » répond dans le Terminal, c’est l’autorisation Réseau local de macOS : elle suit la signature de l’app, et un nouveau build la perd même si l’interrupteur reste allumé. Quittez l’app (⌘Q), Réglages Système → Confidentialité et sécurité → Réseau local → décochez puis recochez « AuxiNux Virtua Desktop Client », relancez l’app depuis /Applications (une seule copie). Si curl échoue aussi, le Mac n’atteint pas {host} (autre réseau, VPN, nœud éteint)."
         ),
         _ if unreachable => format!("{host} est injoignable depuis cet ordinateur (pas de route vers ce réseau : VPN, Wi-Fi invité, câble ?). ({error})"),
         _ => format!("Connexion à {host}:{port} impossible : {error}"),
@@ -126,7 +126,8 @@ mod tests {
         assert!(explain_connect_error(&refused, "192.168.0.20", 8441, "linux").contains("port 8441 est fermé"));
         // EHOSTUNREACH on macOS for a LAN address: the Local Network privacy switch.
         let no_route = std::io::Error::from_raw_os_error(65);
-        assert!(explain_connect_error(&no_route, "192.168.0.20", 8441, "macos").contains("Réseau local"));
+        let mac = explain_connect_error(&no_route, "192.168.0.20", 8441, "macos");
+        assert!(mac.contains("Réseau local") && mac.contains("décochez puis recochez") && mac.contains("curl http://192.168.0.20:8441/api/health"));
         assert!(!explain_connect_error(&no_route, "virtua.example.com", 8441, "macos").contains("Réseau local"));
         let timeout = std::io::Error::from(std::io::ErrorKind::TimedOut);
         assert!(explain_connect_error(&timeout, "10.0.0.2", 8441, "windows").contains("pare-feu"));
