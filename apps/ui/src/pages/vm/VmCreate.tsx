@@ -4,6 +4,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { apiGet, apiPost } from "../../api/client";
 import type { StoragePool, IsoFile, TemplateSummary } from "@auxinux/shared";
+import { cpuOptionGroups, isVintageCpu, nicModelOptions } from "./hardwareOptions";
 
 interface CreateVmPayload {
   name: string;
@@ -20,6 +21,9 @@ interface CreateVmPayload {
   mac?: string;
   arch: "x86_64" | "aarch64";
   machine: string;
+  cpuModel: string;
+  periodSpeed: boolean;
+  networkModel: string;
   uefi: boolean;
   secureBoot: boolean;
   bootDevice: "hd" | "cdrom" | "network" | "fd";
@@ -62,6 +66,12 @@ const MACHINE_OPTIONS: Record<"x86_64" | "aarch64", string[]> = {
   aarch64: ["virt"],
 };
 
+const MACHINE_LABELS: Record<string, string> = {
+  q35: "q35 (PCIe, moderne)",
+  pc: "pc — i440FX (PCI + ISA, IDE)",
+  virt: "virt",
+};
+
 export default function VmCreate() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -83,6 +93,9 @@ export default function VmCreate() {
     mac: "",
     arch: "x86_64",
     machine: "q35",
+    cpuModel: "auto",
+    periodSpeed: false,
+    networkModel: "virtio",
     uefi: false,
     secureBoot: false,
     bootDevice: "hd",
@@ -201,11 +214,55 @@ export default function VmCreate() {
       ...(uefi ? { bootDevice: leaveFloppyBoot(current.bootDevice) } : { secureBoot: false }),
     }));
 
+  // Secure Boot only exists on q35; q35 has no IDE controller (libvirt refuses it).
   const setSecureBoot = (secureBoot: boolean) =>
     setForm((current) => ({
       ...current,
       secureBoot,
-      ...(secureBoot ? { uefi: true, bootDevice: leaveFloppyBoot(current.bootDevice) } : {}),
+      ...(secureBoot ? {
+        uefi: true,
+        bootDevice: leaveFloppyBoot(current.bootDevice),
+        ...(current.arch === "x86_64" ? { machine: "q35", diskBus: current.diskBus === "ide" ? "sata" : current.diskBus } : {}),
+      } : {}),
+    }));
+
+  const setMachine = (machine: string) =>
+    setForm((current) => ({
+      ...current,
+      machine,
+      ...(machine === "q35" && current.diskBus === "ide" ? { diskBus: "sata" } : {}),
+      ...(machine === "pc" ? { secureBoot: false } : {}),
+    }));
+
+  const setDiskBus = (diskBus: string) =>
+    setForm((current) => ({
+      ...current,
+      diskBus,
+      ...(diskBus === "ide" && current.arch === "x86_64" ? { machine: "pc", secureBoot: false } : {}),
+    }));
+
+  const setCpuModel = (cpuModel: string) =>
+    setForm((current) => ({ ...current, cpuModel, periodSpeed: isVintageCpu(cpuModel) ? current.periodSpeed : false }));
+
+  // One click for DOS / Windows 3.x/9x: what those systems have drivers for.
+  const applyOldPcPreset = () =>
+    setForm((current) => ({
+      ...current,
+      os: "other",
+      arch: "x86_64",
+      machine: "pc",
+      cpuModel: "486",
+      periodSpeed: false,
+      diskBus: "ide",
+      networkModel: "ne2k_pci",
+      videoModel: "vga",
+      uefi: false,
+      secureBoot: false,
+      tpmEnabled: false,
+      qemuAgentEnabled: false,
+      vcpus: 1,
+      memoryMb: Math.min(current.memoryMb, 256),
+      diskGb: Math.min(current.diskGb ?? 2, 2),
     }));
 
   const setArch = (arch: "x86_64" | "aarch64") => {
@@ -214,8 +271,15 @@ export default function VmCreate() {
       arch,
       machine: MACHINE_OPTIONS[arch][0],
       uefi: arch === "aarch64" ? true : current.uefi,
-      // ARM64 machines have no floppy controller.
-      ...(arch === "aarch64" ? { floppyFile: "", bootDevice: leaveFloppyBoot(current.bootDevice) } : {}),
+      // ARM64 machines have no floppy controller, no IDE, no period CPUs nor PC NICs.
+      ...(arch === "aarch64" ? {
+        floppyFile: "",
+        bootDevice: leaveFloppyBoot(current.bootDevice),
+        cpuModel: ["auto", "host", "max"].includes(current.cpuModel) ? current.cpuModel : "auto",
+        periodSpeed: false,
+        diskBus: current.diskBus === "ide" ? "virtio" : current.diskBus,
+        networkModel: ["ne2k_pci", "pcnet"].includes(current.networkModel) ? "virtio" : current.networkModel,
+      } : {}),
     }));
   };
 
@@ -239,6 +303,17 @@ export default function VmCreate() {
     } else if (!noDisk) {
       if (!form.storagePool) { setError(t("vm.storagePoolRequired")); return; }
       if (!form.diskGb) { setError(t("vm.diskRequired", "Disk size is required")); return; }
+    }
+    if (!selectedTemplate) {
+      const hasDisk = !noDisk;
+      if (hasDisk && form.diskBus === "ide" && form.machine === "q35") {
+        setError(t("vm.ideNeedsPc", "Le bus IDE exige la machine i440FX (pc) : q35 n'a pas de contrôleur IDE."));
+        return;
+      }
+      if (form.periodSpeed && !isVintageCpu(form.cpuModel)) {
+        setError(t("vm.periodSpeedNeedsVintage", "La vitesse d'époque demande un processeur d'époque (286 à Pentium 4)."));
+        return;
+      }
     }
     if (selectedTemplate) {
       createFromTemplate.mutate({
@@ -428,10 +503,10 @@ export default function VmCreate() {
                 </div>
                 <div>
                   <label className="label">{t("vm.diskBus", "Type de bus disque")}</label>
-                  <select className="input" value={form.diskBus} onChange={(e) => set("diskBus", e.target.value)}>
+                  <select className="input" value={form.diskBus} onChange={(e) => setDiskBus(e.target.value)}>
                     <option value="virtio">VirtIO (recommandé Linux)</option>
                     <option value="sata">SATA (Windows/FreeBSD)</option>
-                    <option value="ide">IDE (anciens OS)</option>
+                    <option value="ide" disabled={form.arch === "aarch64"}>IDE (anciens OS, machine i440FX)</option>
                     <option value="scsi">SCSI</option>
                   </select>
                 </div>
@@ -466,10 +541,10 @@ export default function VmCreate() {
                 </div>
                 <div>
                   <label className="label">{t("vm.diskBus", "Type de bus disque")}</label>
-                  <select className="input" value={form.diskBus} onChange={(e) => set("diskBus", e.target.value)}>
+                  <select className="input" value={form.diskBus} onChange={(e) => setDiskBus(e.target.value)}>
                     <option value="virtio">VirtIO (recommandé Linux)</option>
                     <option value="sata">SATA (Windows/FreeBSD)</option>
-                    <option value="ide">IDE (anciens OS)</option>
+                    <option value="ide" disabled={form.arch === "aarch64"}>IDE (anciens OS, machine i440FX)</option>
                     <option value="scsi">SCSI</option>
                   </select>
                 </div>
@@ -490,11 +565,54 @@ export default function VmCreate() {
             </div>
             <div>
               <label className="label">{t("vm.machineType")}</label>
-              <select className="input" value={form.machine} onChange={(e) => set("machine", e.target.value)}>
-                {MACHINE_OPTIONS[form.arch].map((machine) => <option key={machine} value={machine}>{machine}</option>)}
+              <select className="input" value={form.machine} onChange={(e) => setMachine(e.target.value)}>
+                {MACHINE_OPTIONS[form.arch].map((machine) => (
+                  <option key={machine} value={machine}>{MACHINE_LABELS[machine] ?? machine}</option>
+                ))}
               </select>
+              {form.machine === "pc" && (
+                <p className="text-xs text-text-500 mt-1">{t("vm.pcMachineHelp", "Chipset PCI + ISA avec IDE : ce qu'attendent DOS, Windows 9x/XP et les vieux Linux. Pas de Secure Boot.")}</p>
+              )}
             </div>
           </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">{t("vm.cpuModel", "Processeur")}</label>
+              <select className="input" value={form.cpuModel} onChange={(e) => setCpuModel(e.target.value)}>
+                {cpuOptionGroups(form.arch).map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+              {form.arch === "aarch64" && (
+                <p className="text-xs text-text-500 mt-1">{t("vm.armCpuHelp", "Sous KVM, une VM ARM64 utilise le processeur de l'hôte.")}</p>
+              )}
+            </div>
+            <div>
+              <label className="label">{t("vm.periodSpeed", "Vitesse d'époque")}</label>
+              <label className={`flex items-center gap-2 mt-2 ${isVintageCpu(form.cpuModel) ? "cursor-pointer" : "opacity-50"}`}>
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue"
+                  checked={form.periodSpeed}
+                  disabled={!isVintageCpu(form.cpuModel)}
+                  onChange={(e) => set("periodSpeed", e.target.checked)}
+                />
+                <span className="text-sm text-text-300">{t("vm.periodSpeedToggle", "Ralentir à la vitesse du processeur d'origine")}</span>
+              </label>
+              <p className="text-xs text-text-500 mt-1">
+                {t("vm.periodSpeedHelp", "Processeur émulé (sans KVM) et cadencé à son époque, pour les jeux DOS trop rapides. Un seul cœur réellement actif.")}
+              </p>
+            </div>
+          </div>
+
+          {form.arch === "x86_64" && (
+            <button type="button" className="btn-secondary text-xs" onClick={applyOldPcPreset} disabled={!!selectedTemplate}>
+              🖥️ {t("vm.oldPcPreset", "Préréglage vieil ordinateur (DOS / Windows 9x)")}
+            </button>
+          )}
 
           <div>
             <label className="label">{t("vm.bootIso")}</label>
@@ -612,6 +730,7 @@ export default function VmCreate() {
                   checked={form.secureBoot}
                   onChange={(e) => setSecureBoot(e.target.checked)}
                   disabled={form.arch === "aarch64"}
+                  title={form.machine === "pc" ? t("vm.secureBootNeedsQ35", "Secure Boot exige la machine q35 (le cocher y repasse)") : undefined}
                 />
                 <span className="text-sm text-text-300">{t("vm.secureBoot", "Secure Boot")}</span>
               </label>
@@ -673,6 +792,12 @@ export default function VmCreate() {
               />
               <p className="text-xs text-text-500 mt-1">{t("vm.manualMacHelp")}</p>
             </div>
+            <div>
+              <label className="label">{t("vm.nicModel", "Modèle de carte réseau")}</label>
+              <select className="input" value={form.networkModel} onChange={(e) => set("networkModel", e.target.value)}>
+                {nicModelOptions(form.arch).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -696,6 +821,10 @@ export default function VmCreate() {
               {form.mac && <span>MAC: <strong className="text-text-200 font-mono">{form.mac}</strong></span>}
               <span>Boot: <strong className="text-text-200">{form.bootDevice}</strong></span>
               <span>Video: <strong className="text-text-200">{form.videoModel}</strong></span>
+              <span>{t("vm.machineType")}: <strong className="text-text-200">{form.machine}</strong></span>
+              {form.cpuModel !== "auto" && <span>CPU: <strong className="text-text-200">{form.cpuModel}</strong></span>}
+              {form.periodSpeed && <span className="text-amber-400">{t("vm.periodSpeed", "Vitesse d'époque")}</span>}
+              {form.networkModel !== "virtio" && <span>NIC: <strong className="text-text-200">{form.networkModel}</strong></span>}
               {form.uefi && <span className="text-accent-blue">UEFI</span>}
               {form.secureBoot && <span className="text-accent-blue">Secure Boot</span>}
               {form.tpmEnabled && <span className="text-emerald-400">TPM 2.0</span>}

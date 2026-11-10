@@ -46,6 +46,8 @@ const DesktopDevicesPage = lazy(() => import("./pages/DesktopDevicesPage"));
 const VmList = lazy(() => import("./pages/vm/VmList"));
 const VmDetail = lazy(() => import("./pages/vm/VmDetail"));
 const VmCreate = lazy(() => import("./pages/vm/VmCreate"));
+const DisposablePage = lazy(() => import("./pages/vm/DisposablePage"));
+const QuickCreatePage = lazy(() => import("./pages/vm/QuickCreatePage"));
 const LxcList = lazy(() => import("./pages/lxc/LxcList"));
 const LxcDetail = lazy(() => import("./pages/lxc/LxcDetail"));
 const LxcCreate = lazy(() => import("./pages/lxc/LxcCreate"));
@@ -194,6 +196,8 @@ export default function App() {
 
           <Route path="/vms" element={<ProtectedLayout><SectionRoute section="vms"><VmList /></SectionRoute></ProtectedLayout>} />
           <Route path="/vms/create" element={<ProtectedLayout><SectionRoute section="vmCreate"><VmCreate /></SectionRoute></ProtectedLayout>} />
+          <Route path="/vms/quick-create" element={<ProtectedLayout><SectionRoute section="vmCreate"><QuickCreatePage /></SectionRoute></ProtectedLayout>} />
+          <Route path="/vms/disposable" element={<ProtectedLayout><SectionRoute section="vms"><DisposablePage /></SectionRoute></ProtectedLayout>} />
           <Route path="/vms/:name" element={<ProtectedLayout><ResourceRoute resourceType="vm" paramName="name"><VmDetail /></ResourceRoute></ProtectedLayout>} />
 
           <Route path="/lxc" element={<ProtectedLayout><SectionRoute section="lxc"><LxcList /></SectionRoute></ProtectedLayout>} />

@@ -118,6 +118,15 @@ export default function VmList() {
             onChange={(e) => setSearch(e.target.value)}
             className="input text-sm w-44"
           />
+          <Link to="/vms/disposable" className="btn-secondary">
+            {t("disposable.title", "VM jetables")}
+            <span className="ml-1.5 rounded bg-amber-900/40 px-1 text-2xs uppercase text-amber-300">bêta</span>
+          </Link>
+          {capabilities?.sections.vmCreate && (
+            <Link to="/vms/quick-create" className="btn-secondary">
+              ⚡ {t("quickCreate.title", "Création rapide")}
+            </Link>
+          )}
           {capabilities?.sections.vmCreate && (
             <Link to="/vms/create" className="btn-primary">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -157,6 +166,7 @@ export default function VmList() {
                   <td className="px-4 py-3">
                     <Link to={`/vms/${vm.name}`} className="text-accent-blue-light hover:underline font-medium">
                       {vm.name}
+                      {vm.disposable && <span className="ml-2 rounded bg-amber-900/40 px-1 text-2xs uppercase text-amber-300" title={vm.disposable.baseLabel}>{t("disposable.badge", "jetable")}</span>}
                     </Link>
                     {vm.uuid && <div className="text-2xs text-text-500 font-mono">{vm.uuid.substring(0, 8)}...</div>}
                   </td>

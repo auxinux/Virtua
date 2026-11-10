@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/api/client";
 import type { VdmNode, VdmSharedStorage, VdmNodePool } from "@/types/vdm";
+import { cpuLabel, cpuModelsForArch, isVintageCpu, nicModelsForArch } from "./vmHardwareOptions";
 
 type CreateType = "vm" | "lxc" | "docker";
 
@@ -39,6 +40,12 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
   const [osType, setOsType] = useState("linux");
   const [isoFile, setIsoFile] = useState("");
   const [floppyFile, setFloppyFile] = useState("");
+  // VM hardware (old PCs): chipset, CPU, period speed, disk bus, NIC.
+  const [machine, setMachine] = useState("q35");
+  const [cpuModel, setCpuModel] = useState("auto");
+  const [periodSpeed, setPeriodSpeed] = useState(false);
+  const [diskBus, setDiskBus] = useState("virtio");
+  const [networkModel, setNetworkModel] = useState("virtio");
   // LXC
   const [templateName, setTemplateName] = useState("");
   const [password, setPassword] = useState("");
@@ -66,9 +73,11 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
       if (type === "vm") {
         if (storageKind === "local" && !storagePool) throw new Error("Select a storage pool");
         if (storageKind === "shared" && !sharedStorageName) throw new Error("Select a shared storage");
+        if (diskBus === "ide" && machine === "q35") throw new Error("The IDE disk bus needs the i440FX (pc) machine type");
         body = {
           name, vcpus: cpu, memoryMb: memory, diskGb: disk,
           os: osType || "linux",
+          machine, cpuModel, periodSpeed: periodSpeed && isVintageCpu(cpuModel), diskBus, networkModel,
           ...(storageKind === "local" ? { storagePool } : { sharedStorageName }),
           ...(isoFile ? { isoFile } : {}),
           ...(floppyFile ? { floppyFile } : {}),
@@ -168,6 +177,40 @@ export function CreateResourceModal({ open, onClose, type }: { open: boolean; on
                 <input className="vdm-input" value={osType} onChange={(e) => setOsType(e.target.value)} placeholder="linux" />
               </div>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="vdm-label">Machine type</label>
+                <select className="vdm-input" value={machine} onChange={(e) => { const m = e.target.value; setMachine(m); if (m === "q35" && diskBus === "ide") setDiskBus("sata"); }}>
+                  <option value="q35">q35 (PCIe)</option>
+                  <option value="pc">pc — i440FX (PCI + ISA, IDE)</option>
+                </select>
+              </div>
+              <div>
+                <label className="vdm-label">CPU model</label>
+                <select className="vdm-input" value={cpuModel} onChange={(e) => { const c = e.target.value; setCpuModel(c); if (!isVintageCpu(c)) setPeriodSpeed(false); }}>
+                  {cpuModelsForArch("x86_64").map((c) => <option key={c} value={c}>{cpuLabel(c)}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="vdm-label">Disk bus</label>
+                <select className="vdm-input" value={diskBus} onChange={(e) => { const b = e.target.value; setDiskBus(b); if (b === "ide") setMachine("pc"); }}>
+                  <option value="virtio">virtio</option>
+                  <option value="sata">SATA</option>
+                  <option value="ide">IDE (needs i440FX)</option>
+                  <option value="scsi">SCSI</option>
+                </select>
+              </div>
+              <div>
+                <label className="vdm-label">Network card</label>
+                <select className="vdm-input" value={networkModel} onChange={(e) => setNetworkModel(e.target.value)}>
+                  {nicModelsForArch("x86_64").map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+              </div>
+            </div>
+            <label className={`flex items-center gap-2 text-sm text-vdm-text ${isVintageCpu(cpuModel) ? "" : "opacity-50"}`}>
+              <input type="checkbox" checked={periodSpeed} disabled={!isVintageCpu(cpuModel)} onChange={(e) => setPeriodSpeed(e.target.checked)} />
+              Period speed (emulated CPU throttled to its era — DOS games)
+            </label>
             <div>
               <label className="vdm-label">Install ISO (optional)</label>
               <select className="vdm-input" value={isoFile} onChange={(e) => setIsoFile(e.target.value)}>

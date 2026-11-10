@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import { useConfirm, usePrompt } from "@/hooks/useDialog";
 import type { VdmVmInfo } from "@/types/vdm";
+import { cpuLabel, cpuModelsForArch, isVintageCpu, machineChoice, nicModelsForArch } from "./vmHardwareOptions";
 
 // =============================================================================
 //  Config editors + multi-NIC managers + LXC snapshots for the VDM detail panels
@@ -23,11 +24,22 @@ export function VmConfigForm({ node, name, vm }: { node: string; name: string; v
   const [autostart, setAutostart] = useState<boolean>(!!vm.autostart);
   const [qemuAgent, setQemuAgent] = useState<boolean>(!!vm.qemuAgentEnabled);
   const [tpm, setTpm] = useState<boolean>(!!vm.tpmEnabled);
+  const arch = typeof vm.arch === "string" ? vm.arch : "x86_64";
+  const x86 = arch !== "aarch64";
+  const initialMachine = machineChoice(vm.machine);
+  const initialCpu = typeof vm.cpuModel === "string" ? vm.cpuModel : "auto";
+  const [machine, setMachine] = useState<string>(initialMachine);
+  const [cpuModel, setCpuModel] = useState<string>(initialCpu);
+  const [periodSpeed, setPeriodSpeed] = useState<boolean>(!!vm.periodSpeed);
   const [err, setErr] = useState("");
 
   const save = useMutation({
     mutationFn: () => api.put(`/api/vdm/vms/${encodeURIComponent(node)}/${encodeURIComponent(name)}/config`, {
       vcpus, memoryMb, autostart, qemuAgentEnabled: qemuAgent, tpmEnabled: tpm,
+      // Sent only when changed: a chipset switch re-addresses every PCI device.
+      ...(x86 && (machine === "q35" || machine === "pc") && machine !== initialMachine ? { machine } : {}),
+      ...(cpuModel !== initialCpu ? { cpuModel } : {}),
+      ...(periodSpeed !== !!vm.periodSpeed ? { periodSpeed } : {}),
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["vdm-vm", node, name] }),
     onError: (e: Error) => setErr(e.message),
@@ -40,6 +52,30 @@ export function VmConfigForm({ node, name, vm }: { node: string; name: string; v
         <div><label className="vdm-label">vCPUs</label><input className="vdm-input" type="number" min={1} value={vcpus} onChange={(e) => setVcpus(parseInt(e.target.value, 10) || 1)} /></div>
         <div><label className="vdm-label">Memory (MB)</label><input className="vdm-input" type="number" min={128} step={128} value={memoryMb} onChange={(e) => setMemoryMb(parseInt(e.target.value, 10) || 512)} /></div>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        {x86 && (
+          <div><label className="vdm-label">Machine type</label>
+            <select className="vdm-input" value={machine} onChange={(e) => setMachine(e.target.value)}>
+              {machine !== "q35" && machine !== "pc" && <option value={machine}>{machine || "—"}</option>}
+              <option value="q35">q35 (PCIe)</option>
+              <option value="pc">pc — i440FX (IDE)</option>
+            </select>
+          </div>
+        )}
+        <div><label className="vdm-label">CPU model</label>
+          <select className="vdm-input" value={cpuModel} onChange={(e) => { const c = e.target.value; setCpuModel(c); if (!isVintageCpu(c)) setPeriodSpeed(false); }}>
+            {cpuModelsForArch(arch).map((c) => <option key={c} value={c}>{cpuLabel(c)}</option>)}
+          </select>
+        </div>
+      </div>
+      {x86 && (
+        <label className={`flex items-center gap-2 text-sm text-vdm-text ${isVintageCpu(cpuModel) ? "" : "opacity-50"}`}>
+          <input type="checkbox" checked={periodSpeed} disabled={!isVintageCpu(cpuModel)} onChange={(e) => setPeriodSpeed(e.target.checked)} /> Period speed (emulated, throttled CPU)
+        </label>
+      )}
+      {x86 && machine !== initialMachine && (
+        <p className="text-xs text-vdm-warning">Changing the chipset re-addresses every PCI device (applies at next start). q35 has no IDE; Secure Boot needs q35.</p>
+      )}
       <label className="flex items-center gap-2 text-sm text-vdm-text"><input type="checkbox" checked={autostart} onChange={(e) => setAutostart(e.target.checked)} /> Autostart</label>
       <label className="flex items-center gap-2 text-sm text-vdm-text"><input type="checkbox" checked={qemuAgent} onChange={(e) => setQemuAgent(e.target.checked)} /> QEMU Guest Agent</label>
       <label className="flex items-center gap-2 text-sm text-vdm-text"><input type="checkbox" checked={tpm} onChange={(e) => setTpm(e.target.checked)} /> TPM 2.0</label>
@@ -531,7 +567,7 @@ export function VmHardwarePanel({ node, name, vm }: { node: string; name: string
         <h3 className="text-xs font-semibold uppercase tracking-wider text-vdm-textMuted">Network cards</h3>
         {nics.length === 0 && <p className="text-sm text-vdm-textMuted italic">No network card.</p>}
         {nics.map((n, i) => editNic === n.mac ? (
-          <VmNicForm key={n.mac} base={base} bridges={bridges.data ?? []} nic={n} onDone={() => { setEditNic(null); refresh(); }} onCancel={() => setEditNic(null)} />
+          <VmNicForm key={n.mac} base={base} bridges={bridges.data ?? []} nic={n} arch={vm.arch} onDone={() => { setEditNic(null); refresh(); }} onCancel={() => setEditNic(null)} />
         ) : (
           <NicCard
             key={n.mac}
@@ -549,7 +585,7 @@ export function VmHardwarePanel({ node, name, vm }: { node: string; name: string
           />
         ))}
         {addNic
-          ? <VmNicForm base={base} bridges={bridges.data ?? []} onDone={() => { setAddNic(false); refresh(); }} onCancel={() => setAddNic(false)} />
+          ? <VmNicForm base={base} bridges={bridges.data ?? []} arch={vm.arch} onDone={() => { setAddNic(false); refresh(); }} onCancel={() => setAddNic(false)} />
           : <button className="vdm-btn-ghost" onClick={() => { setErr(""); setAddNic(true); }}>+ Add network card</button>}
       </section>
 
@@ -601,13 +637,13 @@ function AttachDiskForm({ base, pools, onDone, onCancel }: {
   );
 }
 
-function VmNicForm({ base, bridges, nic, onDone, onCancel }: {
-  base: string; bridges: Array<{ name: string }>; nic?: { mac: string; source: string; model: string };
+function VmNicForm({ base, bridges, nic, arch, onDone, onCancel }: {
+  base: string; bridges: Array<{ name: string }>; nic?: { mac: string; source: string; model: string }; arch?: string;
   onDone: () => void; onCancel: () => void;
 }) {
   const editing = !!nic;
   const [bridge, setBridge] = useState(nic?.source || bridges[0]?.name || "vmbr0");
-  const [model, setModel] = useState<"virtio" | "e1000" | "rtl8139">((nic?.model as "virtio") || "virtio");
+  const [model, setModel] = useState<string>(nic?.model || "virtio");
   const [mac, setMac] = useState(editing ? nic!.mac : "");
   const save = useMutation({
     mutationFn: () => {
@@ -628,8 +664,8 @@ function VmNicForm({ base, bridges, nic, onDone, onCancel }: {
           </select>
         </div>
         <div><label className="vdm-label">Model</label>
-          <select className="vdm-input" value={model} onChange={(e) => setModel(e.target.value as typeof model)}>
-            {(["virtio", "e1000", "rtl8139"] as const).map((m) => <option key={m} value={m}>{m}</option>)}
+          <select className="vdm-input" value={model} onChange={(e) => setModel(e.target.value)}>
+            {nicModelsForArch(arch).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
         </div>
         <div><label className="vdm-label">MAC {editing ? "" : "(optional)"}</label>

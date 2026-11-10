@@ -30,6 +30,8 @@ import {
 } from "lucide-react";
 import type { IsoFile, TaskProgress, VmInfo, VmRdpConsoleInfo, VmStats, VmSnapshot } from "@auxinux/shared";
 import PbsBackupButton from "../storage/PbsBackupButton";
+import { cpuLabel, cpuOptionGroups, isVintageCpu, machineChoice, nicModelOptions } from "./hardwareOptions";
+import { BetaBadge, DisposableStopChoices } from "./DisposableActions";
 
 type TabId = "summary" | "console" | "hardware" | "network" | "firewall" | "acl" | "snapshots" | "backup" | "logs" | "crashes";
 type VmDiskLibraryEntry = IsoFile & { path: string };
@@ -167,6 +169,17 @@ export default function VmDetail() {
       setTab("summary");
     }
   }, [searchParams, tab, tabs]);
+
+  // Disposable VM: ask what to do with it as soon as it stops on this page.
+  const [stopPromptOpen, setStopPromptOpen] = useState(false);
+  const previousState = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const state = vm?.state;
+    if (vm?.disposable && state === "stopped" && (previousState.current === "running" || previousState.current === "paused")) {
+      setStopPromptOpen(true);
+    }
+    previousState.current = state;
+  }, [vm?.state, vm?.disposable]);
 
   if (isLoading || !vm) {
     return <div className="flex items-center justify-center h-40"><div className="w-6 h-6 border-2 border-accent-blue border-t-transparent rounded-full animate-spin" /></div>;
@@ -311,6 +324,35 @@ export default function VmDetail() {
           )}
         </div>
       </div>
+
+      {vm.autoInstall && (
+        <div className="card p-4 border border-accent-blue/40 text-sm text-text-300">
+          ⚡ {t("quickCreate.installing", "Installation automatique de {{os}} en cours (compte virtua / virtua).", { os: vm.autoInstall.os === "windows11" ? "Windows 11" : "Debian 13" })}{" "}
+          <span className="text-text-500 text-xs">
+            {vm.autoInstall.makeBase
+              ? t("quickCreate.installingBase", "Une fois terminée, le système deviendra une base jetable et cette VM sera supprimée.")
+              : vm.autoInstall.os === "debian13"
+                ? t("quickCreate.installingDebian", "L'installateur éteint la VM à la fin ; Virtua la redémarre alors sur son disque.")
+                : t("quickCreate.installingWindows", "Les supports d'installation seront retirés dès que l'agent invité répondra.")}
+          </span>
+        </div>
+      )}
+      {vm.disposable && (
+        <div className="card p-4 border border-amber-700/40 space-y-2">
+          <div className="text-sm text-text-200 flex items-center">
+            {t("disposable.thisIs", "VM jetable")}<BetaBadge />
+            <span className="ml-2 text-text-500 text-xs">{t("disposable.base", "Base")} : {vm.disposable.baseLabel}{vm.disposable.strict ? ` · ${t("disposable.strict", "bac à sable strict")}` : ""}</span>
+          </div>
+          {vm.state === "stopped" ? (
+            <DisposableStopChoices vmName={vm.name} disposable={vm.disposable} />
+          ) : (
+            <p className="text-xs text-text-500">{t("disposable.stopToChoose", "Arrêtez-la pour la jeter, la réinitialiser ou la convertir.")}</p>
+          )}
+        </div>
+      )}
+      <Modal open={stopPromptOpen && !!vm.disposable && vm.state === "stopped"} onClose={() => setStopPromptOpen(false)} title={t("disposable.stopped", "VM jetable arrêtée")}>
+        {vm.disposable && <DisposableStopChoices vmName={vm.name} disposable={vm.disposable} onDone={() => setStopPromptOpen(false)} />}
+      </Modal>
 
       {/* Disk repair feedback */}
       <AnimatePresence>
@@ -1093,6 +1135,9 @@ function VmHardwareTab({
   const [editUefi, setEditUefi] = useState<boolean>(vm.uefi ?? false);
   const [editSecureBoot, setEditSecureBoot] = useState<boolean>(vm.secureBoot ?? false);
   const [editAutostart, setEditAutostart] = useState<boolean>(vm.autostart);
+  const [editMachine, setEditMachine] = useState<string>(machineChoice(vm.machine));
+  const [editCpuModel, setEditCpuModel] = useState<string>(vm.cpuModel ?? "auto");
+  const [editPeriodSpeed, setEditPeriodSpeed] = useState<boolean>(Boolean(vm.periodSpeed));
   const [selectedIso, setSelectedIso] = useState("");
   const [floppyOpen, setFloppyOpen] = useState(false);
   const [selectedFloppy, setSelectedFloppy] = useState("");
@@ -1128,7 +1173,10 @@ function VmHardwareTab({
     setEditUefi(vm.uefi ?? false);
     setEditSecureBoot(vm.secureBoot ?? false);
     setEditAutostart(vm.autostart);
-  }, [vm.autostart, vm.bootOrder, vm.maxMemoryKiB, vm.qemuAgentEnabled, vm.tpmEnabled, vm.vcpus, vm.videoModel, vm.uefi, vm.secureBoot]);
+    setEditMachine(machineChoice(vm.machine));
+    setEditCpuModel(vm.cpuModel ?? "auto");
+    setEditPeriodSpeed(Boolean(vm.periodSpeed));
+  }, [vm.autostart, vm.bootOrder, vm.maxMemoryKiB, vm.qemuAgentEnabled, vm.tpmEnabled, vm.vcpus, vm.videoModel, vm.uefi, vm.secureBoot, vm.machine, vm.cpuModel, vm.periodSpeed]);
 
   const attachDisk = useMutation({
     mutationFn: () => diskAttachMode === "existing"
@@ -1160,6 +1208,11 @@ function VmHardwareTab({
       uefi: editUefi,
       secureBoot: editSecureBoot && editUefi,
       autostart: editAutostart,
+      // Hardware changes are sent only when they change something: a chipset
+      // switch re-addresses every PCI device.
+      ...(floppyCapable && (editMachine === "q35" || editMachine === "pc") && editMachine !== machineChoice(vm.machine) ? { machine: editMachine } : {}),
+      ...(editCpuModel !== (vm.cpuModel ?? "auto") ? { cpuModel: editCpuModel } : {}),
+      ...(editPeriodSpeed !== Boolean(vm.periodSpeed) ? { periodSpeed: editPeriodSpeed } : {}),
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["vm", vmName] });
@@ -1388,6 +1441,8 @@ function VmHardwareTab({
           <div className="flex justify-between"><span className="text-text-500">Secure Boot</span><span className="text-text-200">{vm.secureBoot ? "Enabled" : "Disabled"}</span></div>
           <div className="flex justify-between"><span className="text-text-500">Primary Boot</span><span className="text-text-200">{vm.bootOrder?.[0] ?? "hd"}</span></div>
           <div className="flex justify-between"><span className="text-text-500">Video Model</span><span className="text-text-200">{vm.videoModel ?? "vga"}</span></div>
+          <div className="flex justify-between"><span className="text-text-500">{t("vm.machineType")}</span><span className="text-text-200">{vm.machine || "—"}</span></div>
+          <div className="flex justify-between"><span className="text-text-500">{t("vm.cpuModel", "Processeur")}</span><span className="text-text-200">{cpuLabel(vm.cpuModel)}{vm.periodSpeed ? ` · ${t("vm.periodSpeed", "Vitesse d'époque")}` : ""}</span></div>
           <div className="flex justify-between"><span className="text-text-500">TPM 2.0</span><span className="text-text-200">{vm.tpmEnabled ? "Enabled" : "Disabled"}</span></div>
           <div className="flex justify-between"><span className="text-text-500">QEMU Guest Agent</span><span className="text-text-200">{vm.qemuAgentEnabled !== false ? "Enabled" : "Disabled"}</span></div>
         </div>
@@ -1546,6 +1601,45 @@ function VmHardwareTab({
               <option value="qxl">QXL</option>
             </select>
           </div>
+          {floppyCapable && (
+            <div>
+              <label className="label">{t("vm.machineType")}</label>
+              <select
+                value={editMachine}
+                onChange={(e) => { const m = e.target.value; setEditMachine(m); if (m === "pc") setEditSecureBoot(false); }}
+                className="select"
+              >
+                {editMachine !== "q35" && editMachine !== "pc" && <option value={editMachine}>{editMachine}</option>}
+                <option value="q35">q35 (PCIe, moderne)</option>
+                <option value="pc">pc — i440FX (PCI + ISA, IDE)</option>
+              </select>
+              {editMachine !== machineChoice(vm.machine) && (
+                <p className="mt-1.5 text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded px-2 py-1.5">
+                  ⚠ {t("vm.machineChangeWarn", "Changer de chipset réattribue toutes les adresses PCI : le système invité redétecte son matériel au prochain démarrage. q35 n'a pas d'IDE ; Secure Boot exige q35.")}
+                </p>
+              )}
+            </div>
+          )}
+          <div>
+            <label className="label">{t("vm.cpuModel", "Processeur")}</label>
+            <select
+              value={editCpuModel}
+              onChange={(e) => { const cpu = e.target.value; setEditCpuModel(cpu); if (!isVintageCpu(cpu)) setEditPeriodSpeed(false); }}
+              className="select"
+            >
+              {cpuOptionGroups(vm.arch || "x86_64").map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+          {floppyCapable && (
+            <label className={`flex items-center gap-2 ${isVintageCpu(editCpuModel) ? "cursor-pointer" : "opacity-50"}`}>
+              <input type="checkbox" className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue" checked={editPeriodSpeed} disabled={!isVintageCpu(editCpuModel)} onChange={(e) => setEditPeriodSpeed(e.target.checked)} />
+              <span className="text-sm text-text-300">{t("vm.periodSpeedToggle", "Vitesse d'époque : ralentir à la vitesse du processeur d'origine (émulé, sans KVM)")}</span>
+            </label>
+          )}
           <div>
             <label className="label">Firmware</label>
             <select value={editUefi ? "uefi" : "bios"} onChange={(e) => { const uefi = e.target.value === "uefi"; setEditUefi(uefi); if (!uefi) setEditSecureBoot(false); if (uefi && editBootDevice === "fd") setEditBootDevice("hd"); }} className="select" disabled={vm.arch === "aarch64"}>
@@ -1555,7 +1649,7 @@ function VmHardwareTab({
             <p className="text-xs text-text-500 mt-1">Requires VM to be stopped. Switching UEFI→BIOS removes NVRAM variables.</p>
           </div>
           <label className={`flex items-center gap-2 ${editUefi ? "cursor-pointer" : "opacity-50"}`}>
-            <input type="checkbox" className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue" checked={editSecureBoot && editUefi} disabled={!editUefi || vm.arch === "aarch64"} onChange={(e) => setEditSecureBoot(e.target.checked)} />
+            <input type="checkbox" className="w-4 h-4 rounded border-surface-500 bg-surface-700 accent-accent-blue" checked={editSecureBoot && editUefi} disabled={!editUefi || vm.arch === "aarch64" || editMachine === "pc"} onChange={(e) => setEditSecureBoot(e.target.checked)} />
             <span className="text-sm text-text-300">Secure Boot (required by Windows 11)</span>
           </label>
           {editSecureBoot && editUefi && !vm.secureBoot && (
@@ -1787,9 +1881,7 @@ function VmNetworkTab({ vm, vmName }: { vm: VmInfo; vmName: string }) {
           <div>
             <label className="label">Model</label>
             <select value={model} onChange={(e) => setModel(e.target.value)} className="select">
-              <option value="virtio">VirtIO (recommended)</option>
-              <option value="e1000">Intel E1000</option>
-              <option value="rtl8139">Realtek RTL8139</option>
+              {nicModelOptions(vm.arch).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </div>
           <div>
@@ -1822,9 +1914,7 @@ function VmNetworkTab({ vm, vmName }: { vm: VmInfo; vmName: string }) {
           <div>
             <label className="label">Model</label>
             <select value={model} onChange={(e) => setModel(e.target.value)} className="select">
-              <option value="virtio">VirtIO (recommended)</option>
-              <option value="e1000">Intel E1000</option>
-              <option value="rtl8139">Realtek RTL8139</option>
+              {nicModelOptions(vm.arch).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </div>
           <div>

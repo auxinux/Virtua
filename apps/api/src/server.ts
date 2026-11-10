@@ -27,6 +27,8 @@ import { startCrashWatcher, markExpectedTransition } from "./crashWatcher.js";
 import { callRunner, type RunnerProgress } from "./runnerClient.js";
 import { registerDesktopApi, type DesktopResourceRow } from "./desktop.js";
 import { registerVirtuaOsApi } from "./virtuaos.js";
+import { registerDisposableRoutes } from "./disposable.js";
+import { registerQuickCreateRoutes } from "./quickCreate.js";
 import { createBackpressureForwarder, rawDataToBuffer } from "./wsPipe.js";
 import {
   generateNumericCode, maskPhone, maskEmail, isLikelyPhone, isLikelyEmail, normalizePhone,
@@ -5715,7 +5717,10 @@ app.put("/api/internal/vms/:name/config", async (req, reply) => {
     runnerConfig.bootDevice !== undefined ||
     runnerConfig.tpmEnabled !== undefined ||
     runnerConfig.qemuAgentEnabled !== undefined ||
-    runnerConfig.videoModel !== undefined
+    runnerConfig.videoModel !== undefined ||
+    runnerConfig.machine !== undefined ||
+    runnerConfig.cpuModel !== undefined ||
+    runnerConfig.periodSpeed !== undefined
   ) {
     await callRunner("qemu_update_config", { name, ...runnerConfig });
   }
@@ -7223,7 +7228,10 @@ app.put("/api/vms/:name/config", async (req, reply) => {
         runnerConfig.bootDevice !== undefined ||
         runnerConfig.tpmEnabled !== undefined ||
         runnerConfig.qemuAgentEnabled !== undefined ||
-        runnerConfig.videoModel !== undefined
+        runnerConfig.videoModel !== undefined ||
+        runnerConfig.machine !== undefined ||
+        runnerConfig.cpuModel !== undefined ||
+        runnerConfig.periodSpeed !== undefined
       ) {
         await callRunner("qemu_update_config", { name, ...runnerConfig });
       }
@@ -7442,6 +7450,121 @@ app.post("/api/vms/:name/floppy/eject", async (req, reply) => {
 // (fixed upstream URL — never user-supplied), register it, then insert it.
 const GUEST_TOOLS_ISO_FILENAME = "virtio-win.iso";
 const GUEST_TOOLS_ISO_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso";
+
+/** DB/firewall cleanup once a VM's domain is gone (shared by delete paths). */
+async function forgetDeletedVm(name: string) {
+  db.prepare("DELETE FROM qemu_vms WHERE vm_name = ?").run(name);
+  db.prepare("DELETE FROM snapshots WHERE resource_type = 'vm' AND resource_name = ?").run(name);
+  db.prepare("DELETE FROM user_resource_acl WHERE resource_type = 'vm' AND resource_name = ?").run(name);
+  db.prepare("DELETE FROM firewall_rules WHERE linked_resource_type = 'vm' AND linked_resource_name = ?").run(name);
+  await syncFirewallState();
+}
+
+function resolveVmDiskPool(name: string) {
+  const pool = resolveManagedStoragePool(name);
+  if (!pool || (!pool.content.includes("vm") && !pool.content.includes("disk"))) return undefined;
+  return { path: pool.path };
+}
+
+// Disposable VMs (beta): bases, launch, stop actions — see disposable.ts.
+registerDisposableRoutes(app, {
+  db,
+  callRunner,
+  requireAuth,
+  requireAdmin,
+  requireResourcePermission: (req, type, name, permission) => requireResourcePermission(req, type, name, permission),
+  checkVmCreateAllowed: (req) => {
+    const quota = checkQuota(db, req.session.userId!, req.session.role!, "vms");
+    if (!quota.ok) return quota;
+    return checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_create");
+  },
+  checkPermission: (req, action) => checkPermission(db, req.session.userId!, req.session.role!, action),
+  replyQuotaError,
+  getClientIp,
+  resolveVmDiskPool,
+  isLocalVm: async (name) => {
+    const node = await getResourceNodeAsync("vm", name);
+    return !node || node.isLocal;
+  },
+  localNodeName: getLocalNodeName,
+  forgetVm: forgetDeletedVm,
+  createTask: (req, options) => createTask(req.session.userId!, req.session.username ?? "unknown", options),
+  runInstantTask: (task, ip, fn) => runInstantTask(task as BackgroundTask, ip, fn),
+  runTrackedTask: (task, ip, fn) => runTrackedTask(task as BackgroundTask, ip, ({ update }) => fn({ update: (patch) => update(patch as Partial<BackgroundTask>) })),
+  publicTask: (task) => sanitizeTask(getTaskRecord(task.id) ?? (task as BackgroundTask)),
+  onRunnerProgress: onBackupProgress,
+  downloadToFile: (taskId, url, file) => withUrlDownloadSlot(taskId, () => downloadUrlToFileWithProgress(taskId, url, file)),
+  depotBase: getTemplateDepotBase,
+  scratchDir: VM_TEMPLATES_DIR,
+});
+
+// Quick create (unattended Windows 11 / Debian 13) — see quickCreate.ts.
+registerQuickCreateRoutes(app, {
+  db,
+  callRunner,
+  requireAuth,
+  checkVmCreateAllowed: (req) => {
+    const quota = checkQuota(db, req.session.userId!, req.session.role!, "vms");
+    if (!quota.ok) return quota;
+    return checkPermission(db, req.session.userId!, req.session.role!, "allow_vm_create");
+  },
+  replyQuotaError,
+  getClientIp,
+  resolveVmDiskPool,
+  localNodeName: getLocalNodeName,
+  createTask: (req, options) => createTask(req.session.userId!, req.session.username ?? "unknown", options),
+  runTrackedTask: (task, ip, fn) => runTrackedTask(task as BackgroundTask, ip, ({ update }) => fn({ update: (patch) => update(patch as Partial<BackgroundTask>) })),
+  publicTask: (task) => sanitizeTask(getTaskRecord(task.id) ?? (task as BackgroundTask)),
+  listLibraryIsos: async () => (await listManagedFiles())
+    .filter((entry) => entry.type === "iso")
+    .map((entry) => ({ filename: entry.filename, sizeBytes: entry.sizeBytes, path: managedFileAbsolutePath(entry) ?? "" }))
+    .filter((entry) => !!entry.path),
+  downloadIso: async (taskId, url, filename, displayName) => {
+    const download = await saveManagedDownloadWithProgress(taskId, url, "iso", filename);
+    db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 1, NULL)")
+      .run(download.filename, displayName, download.sizeBytes);
+    return resolveManagedIsoPath(download.filename);
+  },
+  ensureVirtioWin: async (taskId) => {
+    const existing = await resolveManagedIsoPath(GUEST_TOOLS_ISO_FILENAME).catch(() => null);
+    if (existing) return existing;
+    const download = await saveManagedDownloadWithProgress(taskId, GUEST_TOOLS_ISO_URL, "iso", GUEST_TOOLS_ISO_FILENAME);
+    db.prepare("INSERT OR REPLACE INTO iso_files (filename, display_name, type, size_bytes, owner_id, is_public, storage_pool) VALUES (?, ?, 'iso', ?, NULL, 1, NULL)")
+      .run(download.filename, "VirtIO guest tools (Windows)", download.sizeBytes);
+    return resolveManagedIsoPath(download.filename);
+  },
+  downloadToFile: (taskId, url, file) => withUrlDownloadSlot(taskId, () => downloadUrlToFileWithProgress(taskId, url, file)),
+  depotBase: getTemplateDepotBase,
+  netbootDir: path.join(path.dirname(ISOS_DIR), "netboot"),
+});
+
+// Unattended installs finish on their own (Debian powers off, Windows' agent
+// answers): the runner checks them, the API audits and forgets builder VMs
+// turned into disposable bases.
+let autoInstallTickBusy = false;
+const autoInstallTimer = setInterval(() => {
+  if (autoInstallTickBusy) return;
+  autoInstallTickBusy = true;
+  void callRunner<Array<{ name: string; outcome: string; baseId?: string; error?: string }>>("qemu_autoinstall_tick", {}, 6 * 60 * 60 * 1000)
+    .then(async (events) => {
+      for (const event of events ?? []) {
+        if (event.outcome === "base" || event.outcome === "gone") await forgetDeletedVm(event.name).catch(() => {});
+        if (event.outcome === "gone") continue;
+        auditLog(db, {
+          username: "system",
+          ip: "127.0.0.1",
+          action: event.outcome === "base" ? "vm.quick-create.base" : event.outcome === "installed" ? "vm.quick-create.installed" : "vm.quick-create.error",
+          resourceType: "vm",
+          resourceName: event.name,
+          result: event.outcome === "error" ? "error" : "success",
+          details: event.baseId ?? event.error,
+        });
+      }
+    })
+    .catch(() => { /* runner unavailable: next tick */ })
+    .finally(() => { autoInstallTickBusy = false; });
+}, 20_000);
+autoInstallTimer.unref();
 
 app.post("/api/vms/:name/guest-tools", async (req, reply) => {
   requireAuth(req, reply);

@@ -19,6 +19,47 @@ import {
   findFloppyDisk,
   type BootDevice,
 } from "./floppy.js";
+import { hardwareProblems, NETWORK_MODELS, isVintageCpu } from "@auxinux/shared";
+import {
+  applyCpuChoice,
+  applyMachineType,
+  buildCpuXml,
+  domainCpuModel,
+  domainVirtType,
+  readVirtuaMetadata,
+  replaceCpuXml,
+  stripVhostNet,
+} from "./vmHardware.js";
+import { buildSpiceAudioBlocks, buildSpiceGraphicsBlock, buildVideoBlock, buildVmDomainXml } from "./vmXml.js";
+import {
+  VMTMP_DISK,
+  VMTMP_MANIFEST,
+  assertBaseId,
+  assertStandaloneQcow2,
+  convertedDomainXml,
+  domainNvramPath,
+  hostBaseArch,
+  manifestFromDomain,
+  newBaseId,
+  parseTarListing,
+  primaryWritableDisk,
+  selectVmtmpMembers,
+} from "./disposable.js";
+import { BaseManifestSchema, baseDomainHardware, baseOsLabel, type BaseInfo, type BaseManifest } from "@auxinux/shared";
+import { createHash } from "crypto";
+import { cpus as hostCpus } from "os";
+import { QUICK_CREATE_PROFILES, effectiveVcpus, quickCreateHostName } from "@auxinux/shared";
+import {
+  buildFat12Image,
+  debianAppend,
+  debianBasePreseed,
+  debianPreseed,
+  initrdWithPreseed,
+  stripDirectKernelBoot,
+  stripInstallMedia,
+  windowsAnswerFile,
+} from "./quickCreate.js";
+import { createReadStream } from "fs";
 
 const execFileAsync = promisify(execFile);
 
@@ -88,6 +129,11 @@ async function getVmPid(name: string): Promise<number | undefined> {
 
 const IMAGES_DIR = process.env.QEMU_IMAGES_DIR ?? "/var/lib/libvirt/images";
 const ISOS_DIR = path.join(IMAGES_DIR, "isos");
+/** Per-VM unattended install work dirs (preseeded initrd, answer-file floppy, state). */
+const AUTOINSTALL_DIR = path.join(IMAGES_DIR, "autoinstall");
+/** Disposable bases (read-only backing disks shared by the disposable VMs). */
+const BASES_DIR = path.join(IMAGES_DIR, "bases");
+const NVRAM_DIR = "/var/lib/libvirt/qemu/nvram";
 const vmCpuSamples = new Map<string, { cpuTimeNs: number; sampledAtMs: number }>();
 
 // ── Input sanitization helpers ──────────────────────────────────────────────
@@ -290,6 +336,14 @@ export async function handleQemu(action: string, params: unknown, emit?: Progres
     case "qemu_machine_types": return listMachineTypes(p.arch as string);
     case "qemu_isos_list": return listIsos();
     case "qemu_iso_delete": return deleteIso(p.filename as string);
+    case "qemu_bases_list": return listBases();
+    case "qemu_base_create": return createBaseFromVm(p, emit);
+    case "qemu_base_delete": return deleteBase(p.id as string);
+    case "qemu_base_import": return importBaseArchive(p.archivePath as string, emit);
+    case "qemu_disposable_launch": return launchDisposable(p);
+    case "qemu_disposable_action": return disposableAction(p.name as string, p.action as string);
+    case "qemu_quick_create": return quickCreateVm(p);
+    case "qemu_autoinstall_tick": return autoInstallTick();
     default: throw new Error(`Unknown qemu action: ${action}`);
   }
 }
@@ -365,6 +419,7 @@ async function listVms() {
         maxMemoryKiB: maxMem, usedMemoryKiB: usedMem,
         memoryMb: Math.round(maxMem / 1024), usedMemoryMb: Math.round(usedMem / 1024),
         uuid, autostart, qemuAgentEnabled,
+        disposable: readVirtuaMetadata(xml).disposable ?? null,
       };
     } catch {
       return { name, state: "unknown", vcpus: 0, maxMemoryKiB: 0, usedMemoryKiB: 0, memoryMb: 0, usedMemoryMb: 0, uuid: "", autostart: false, qemuAgentEnabled: false };
@@ -703,47 +758,6 @@ function ensureGuestAgentChannel(xml: string, enabled: boolean) {
   );
 }
 
-function buildVideoBlock(model: "vga" | "virtio" | "qxl") {
-  if (model === "virtio") {
-    // virtio-gpu WITHOUT 3D acceleration. Enabling accel3d="yes" makes
-    // libvirt instantiate `virtio-vga-gl` on the QEMU side, which only
-    // works if the display backend has OpenGL turned on (SPICE+gl, or
-    // -display egl-headless). VNC — the default we expose via noVNC —
-    // does not support GL, and QEMU refuses to start with:
-    //   "The display backend does not have OpenGL support enabled"
-    // VirGL acceleration belongs to a future SPICE-graphics code path,
-    // not the default headless-server experience.
-    return `    <video><model type="virtio" heads="1" primary="yes" vram="65536"/></video>`;
-  }
-  if (model === "qxl") {
-    // vgamem bounds the primary surface: 16M tops out around 1920x1080, which
-    // silently breaks SPICE auto-resize above that. 64M covers 4K (3840x2160x4).
-    return `    <video><model type="qxl" ram="131072" vram="131072" vgamem="65536" heads="1" primary="yes"/></video>`;
-  }
-  return `    <video><model type="vga" vram="16384" heads="1" primary="yes"/></video>`;
-}
-
-function buildSpiceGraphicsBlock(indent = "    ") {
-  return [
-    `${indent}<graphics type="spice" port="-1" autoport="yes" listen="127.0.0.1">`,
-    `${indent}  <listen type="address" address="127.0.0.1"/>`,
-    `${indent}  <playback compression="on"/>`,
-    `${indent}  <clipboard copypaste="no"/>`,
-    `${indent}  <filetransfer enable="no"/>`,
-    `${indent}</graphics>`,
-  ].join("\n");
-}
-
-function buildSpiceAudioBlocks(indent = "    ", id = 1) {
-  return [
-    `${indent}<sound model="ich9">`,
-    `${indent}  <codec type="duplex"/>`,
-    `${indent}  <audio id="${id}"/>`,
-    `${indent}</sound>`,
-    `${indent}<audio id="${id}" type="spice"/>`,
-  ].join("\n");
-}
-
 function parseSpiceGraphics(xml: string): { enabled: boolean; host: string; port?: number; tlsPort?: number } {
   const block = xml.match(/<graphics\b[^>]*type=['"]spice['"][\s\S]*?(?:<\/graphics>|\/>)/i)?.[0];
   if (!block) return { enabled: false, host: "127.0.0.1" };
@@ -980,23 +994,26 @@ function ensureVideoModel(xml: string, model: "vga" | "virtio" | "qxl") {
   return xml.replace("</devices>", `${videoBlock}\n  </devices>`);
 }
 
-function buildCpuBlock(vcpus: number) {
-  const cores = Math.max(1, Math.floor(vcpus));
-  return `<cpu mode="host-passthrough" check="none" migratable="on"><topology sockets="1" cores="${cores}" threads="1"/></cpu>`;
+/**
+ * `<cpu>` of a domain: host-passthrough by default, or the CPU model chosen
+ * for the VM (Virtua metadata) — a period CPU must survive every redefine.
+ */
+function buildCpuBlock(vcpus: number, cpuModel = "auto") {
+  return buildCpuXml(vcpus, cpuModel);
 }
 
 function ensurePerformanceDefaults(xml: string) {
   let updated = xml;
   const vcpus = parseXmlNumberTag(updated, "vcpu") || 1;
-  const cpuBlock = buildCpuBlock(vcpus);
+  const cpuBlock = buildCpuBlock(vcpus, domainCpuModel(updated));
 
-  if (/<cpu\b[\s\S]*?<\/cpu>/i.test(updated)) {
-    updated = updated.replace(/<cpu\b[\s\S]*?<\/cpu>/i, cpuBlock);
-  } else if (/<cpu\b[^>]*\/>/i.test(updated)) {
-    updated = updated.replace(/<cpu\b[^>]*\/>/i, cpuBlock);
+  if (/<cpu\b[\s\S]*?<\/cpu>/i.test(updated) || /<cpu\b[^>]*\/>/i.test(updated)) {
+    updated = replaceCpuXml(updated, cpuBlock);
   } else {
     updated = updated.replace(/(<features>[\s\S]*?<\/features>)/i, `$1\n  ${cpuBlock}`);
   }
+  // Period speed (TCG): libvirt refuses vhost-net without KVM.
+  const emulated = domainVirtType(updated) === "qemu";
 
   // One IOThread per virtio-blk disk gives it its own I/O thread instead of
   // sharing the main vCPU event loop, which cuts I/O latency under load.
@@ -1030,6 +1047,7 @@ function ensurePerformanceDefaults(xml: string) {
   // Multiqueue virtio-net: one queue per vCPU (capped) so a single vCPU isn't
   // a network throughput bottleneck on multi-core guests.
   const netQueues = Math.min(8, Math.max(1, vcpus));
+  if (emulated) return stripVhostNet(updated);
   updated = updated.replace(/<interface\b[\s\S]*?<\/interface>/gi, (block) => {
     if (!/<model\s+type=['"]virtio['"]/i.test(block)) return block;
     let next = block.replace(/\s*<driver\b[^>]*\/>\s*/i, "");
@@ -1260,11 +1278,15 @@ async function resolveUefiLoader(arch: string) {
   return (await resolveUefiFirmware(arch, false)).loader;
 }
 
-function buildUefiLoaderLines(firmware: UefiFirmware, secureBoot: boolean) {
+function buildUefiLoaderLines(firmware: UefiFirmware, secureBoot: boolean, nvramPath?: string) {
   const secureAttr = secureBoot ? ` secure="yes"` : "";
   const lines = [`    <loader readonly="yes"${secureAttr} type="pflash">${xmlEscape(firmware.loader)}</loader>`];
-  if (secureBoot && firmware.nvramTemplate) {
-    lines.push(`    <nvram template="${xmlEscape(firmware.nvramTemplate)}"/>`);
+  const template = secureBoot && firmware.nvramTemplate ? ` template="${xmlEscape(firmware.nvramTemplate)}"` : "";
+  if (nvramPath) {
+    // An existing store (seeded from a base) is used as is by libvirt.
+    lines.push(`    <nvram${template}>${xmlEscape(nvramPath)}</nvram>`);
+  } else if (template) {
+    lines.push(`    <nvram${template}/>`);
   }
   return lines.join("\n");
 }
@@ -1281,6 +1303,33 @@ function ensureSmmFeature(xml: string, enabled: boolean) {
 function requireQ35ForSecureBoot(machine: string) {
   if (!machine.includes("q35")) {
     throw new Error(`Secure Boot requires the q35 machine type (current: ${machine || "unknown"})`);
+  }
+}
+
+/** Network card models libvirt/QEMU get from Virtua (validated against the allow-list). */
+function validateNetworkModel(value: unknown): string {
+  const model = (value as string | undefined) ?? "virtio";
+  if (!(NETWORK_MODELS as readonly string[]).includes(model)) {
+    throw new Error(`Invalid network model: must be one of ${NETWORK_MODELS.join(", ")}`);
+  }
+  return model;
+}
+
+/** Throw the first hardware rule a choice breaks (same rules as the API schema). */
+function assertHardware(choice: Parameters<typeof hardwareProblems>[0]) {
+  const problem = hardwareProblems(choice)[0];
+  if (problem) throw new Error(problem.message);
+}
+
+/** `virsh define` a freshly built domain XML (temp file, never a shell string). */
+async function defineDomainXml(name: string, xml: string, autostart = false) {
+  const tmpFile = `/tmp/auxinux-vm-${name}-${Date.now()}.xml`;
+  await fs.writeFile(tmpFile, xml);
+  try {
+    await virsh("define", tmpFile);
+    if (autostart) await virsh("autostart", name);
+  } finally {
+    await fs.unlink(tmpFile).catch(() => {});
   }
 }
 
@@ -1321,16 +1370,23 @@ async function createVm(p: Record<string, unknown>) {
   }
   const videoModel = videoModelRaw as "vga" | "virtio" | "qxl";
   const autostart = (p.autostart as boolean) ?? false;
-  const loaderLine = uefi
+  const cpuModel = (p.cpuModel as string | undefined) ?? "auto";
+  const periodSpeed = (p.periodSpeed as boolean | undefined) ?? false;
+  const networkModel = validateNetworkModel(p.networkModel);
+
+  const diskBusRaw = (p.diskBus as string | undefined) ?? (osType === "windows" ? "sata" : "virtio");
+  const diskBus = ["virtio", "sata", "ide", "scsi"].includes(diskBusRaw) ? diskBusRaw : "virtio";
+  const existingPathRaw = (p.existingPath as string | undefined)?.trim();
+  const existingPath = existingPathRaw ? validatePath(existingPathRaw, "existingPath") : undefined;
+  const hasDisk = !!((diskGb && storagePool) || existingPath);
+  // An IDE CD-ROM follows an IDE disk (a diskless VM gets a SATA CD-ROM).
+  assertHardware({ arch, machine, cpuModel, periodSpeed, diskBus: hasDisk ? diskBus : undefined, networkModel, secureBoot });
+
+  const firmwareLines = uefi
     ? buildUefiLoaderLines(await resolveUefiFirmware(arch, secureBoot), secureBoot)
     : "";
 
   await ensureVmBridgeReady(bridge);
-  const diskBusRaw = (p.diskBus as string | undefined) ?? (osType === "windows" ? "sata" : "virtio");
-  const diskBus = ["virtio", "sata", "ide", "scsi"].includes(diskBusRaw) ? diskBusRaw : "virtio";
-  const diskDevName = diskBus === "virtio" ? "vda" : diskBus === "ide" ? "hda" : "sda";
-  const existingPathRaw = (p.existingPath as string | undefined)?.trim();
-  const existingPath = existingPathRaw ? validatePath(existingPathRaw, "existingPath") : undefined;
 
   let diskPath: string | undefined;
   if (diskGb && storagePool) {
@@ -1343,83 +1399,27 @@ async function createVm(p: Record<string, unknown>) {
     await ensureLibvirtDiskAccess(diskPath);
   }
 
-  const xmlLines = [
-    `<domain type="kvm">`,
-    `  <name>${xmlEscape(name)}</name>`,
-    `  <memory unit="MiB">${memoryMb}</memory>`,
-    `  <currentMemory unit="MiB">${memoryMb}</currentMemory>`,
-    `  <vcpu>${vcpus}</vcpu>`,
-    `  <os>`,
-    uefi
-      ? `    <type arch="${xmlEscape(arch)}" machine="${xmlEscape(machine)}">hvm</type>\n${loaderLine}`
-      : `    <type arch="${xmlEscape(arch)}" machine="${xmlEscape(machine)}">hvm</type>`,
-    bootOrderXmlLines(bootDevice),
-    `  </os>`,
-    `  <features><acpi/><apic/>${secureBoot ? `<smm state="on"/>` : ""}</features>`,
-    `  <pm><suspend-to-mem enabled="no"/><suspend-to-disk enabled="no"/></pm>`,
-    `  ${buildCpuBlock(vcpus)}`,
-    `  <devices>`,
-    `    <emulator>/usr/bin/qemu-system-${xmlEscape(arch)}</emulator>`,
-    diskPath ? [
-      `    <disk type="file" device="disk">`,
-      `      <driver name="qemu" type="qcow2" cache="none" io="native" discard="unmap"/>`,
-      `      <source file="${xmlEscape(diskPath)}"/>`,
-      `      <target dev="${diskDevName}" bus="${diskBus}"/>`,
-      `    </disk>`,
-    ].join("\n") : "",
-    isoFile ? (() => {
-      // Pick a CD-ROM device name that cannot conflict with the primary disk.
-      // virtio disk = vda  → cdrom: sda/sata (no conflict)
-      // sata disk   = sda  → cdrom: sdb/sata
-      // ide disk    = hda  → cdrom: hdb/ide
-      // scsi/none         → cdrom: sda/sata
-      const cdBus = diskBus === "ide" ? "ide" : "sata";
-      const cdDev = diskBus === "sata" ? "sdb" : diskBus === "ide" ? "hdb" : "sda";
-      return [
-        `    <disk type="file" device="cdrom">`,
-        `      <driver name="qemu" type="raw"/>`,
-        `      <source file="${xmlEscape(isoFile)}"/>`,
-        `      <target dev="${cdDev}" bus="${cdBus}"/>`,
-        `      <readonly/>`,
-        `    </disk>`,
-      ].join("\n");
-    })() : "",
-    floppyFile ? buildFloppyDiskXml({ path: floppyFile, readonly: true }) : "",
-    `    <interface type="bridge">`,
-    mac ? `      <mac address="${xmlEscape(mac)}"/>` : "",
-    `      <source bridge="${xmlEscape(bridge)}"/>`,
-    `      <model type="virtio"/>`,
-    `    </interface>`,
-    `    <graphics type="vnc" port="-1" autoport="yes" listen="127.0.0.1">`,
-    `      <listen type="address" address="127.0.0.1"/>`,
-    `    </graphics>`,
-    buildSpiceGraphicsBlock(),
-    buildSpiceAudioBlocks(),
-    tpmEnabled ? `    <tpm model="tpm-crb"><backend type="emulator" version="2.0"/></tpm>` : "",
-    buildVideoBlock(videoModel),
-    `    <input type="tablet" bus="usb"/>`,
-    `    <channel type="spicevmc"><target type="virtio" name="com.redhat.spice.0"/></channel>`,
-    `    <serial type="pty">`,
-    `      <target port="0"/>`,
-    `    </serial>`,
-    `    <console type="pty">`,
-    `      <target type="serial" port="0"/>`,
-    `    </console>`,
-    qemuAgentEnabled ? `    <channel type="unix">\n      <source mode="bind"/>\n      <target type="virtio" name="org.qemu.guest_agent.0"/>\n    </channel>` : "",
-    `    <memballoon model="virtio"/>`,
-    `    <rng model="virtio"><backend model="random">/dev/urandom</backend></rng>`,
-    `  </devices>`,
-    `</domain>`,
-  ].filter(Boolean).join("\n");
-
-  const tmpFile = `/tmp/auxinux-vm-${name}-${Date.now()}.xml`;
-  await fs.writeFile(tmpFile, xmlLines);
-  try {
-    await virsh("define", tmpFile);
-    if (autostart) await virsh("autostart", name);
-  } finally {
-    await fs.unlink(tmpFile).catch(() => {});
-  }
+  const xml = buildVmDomainXml({
+    name,
+    vcpus,
+    memoryMb,
+    arch,
+    machine,
+    firmwareLines,
+    secureBoot,
+    bootDevice,
+    disk: diskPath ? { path: diskPath, bus: diskBus } : undefined,
+    // Without a disk the CD-ROM keeps the historical SATA placement.
+    cdroms: isoFile ? [isoFile] : [],
+    floppy: floppyFile ? { path: floppyFile, readonly: true } : undefined,
+    network: { bridge, mac, model: networkModel },
+    tpm: tpmEnabled,
+    videoModel,
+    qemuAgent: qemuAgentEnabled,
+    cpuModel,
+    periodSpeed,
+  });
+  await defineDomainXml(name, xml, autostart);
   return { ok: true, name };
 }
 
@@ -1685,12 +1685,27 @@ async function getVmInfo(name: string) {
 
   const uefi = /<loader\b/i.test(xml);
   const secureBoot = /<loader[^>]*\bsecure=['"]yes['"]/i.test(xml);
+  const virtuaMeta = readVirtuaMetadata(xml);
   return {
+    cpuModel: virtuaMeta.cpuModel ?? "auto",
+    periodSpeed: !!virtuaMeta.periodSpeed && domainVirtType(xml) === "qemu",
+    disposable: virtuaMeta.disposable ?? null,
+    autoInstall: await readAutoInstallSummary(name),
     name, state, vcpus,
     currentMemoryKiB: curMem, maxMemoryKiB: maxMem,
     memoryMb: Math.round(maxMem / 1024), usedMemoryMb: Math.round(curMem / 1024),
     uuid, autostart, machine, arch, uefi, secureBoot, bootOrder, tpmEnabled, qemuAgentEnabled, videoModel, disks, networks, usbDevices, mountedIso, mountedFloppy, floppyDrive, floppyReadonly: floppy?.readonly ?? null, vncPort, vncHost: "127.0.0.1", spicePort: spice.port, spiceTlsPort: spice.tlsPort, spiceHost: spice.host, spiceEnabled: spice.enabled, os: "Unknown",
   };
+}
+
+/** Unattended install still running for this VM (quick create), else null. */
+async function readAutoInstallSummary(name: string): Promise<{ os: string; makeBase: boolean; phase: string } | null> {
+  try {
+    const raw = JSON.parse(await fs.readFile(path.join(AUTOINSTALL_DIR, name, "state.json"), "utf8")) as Record<string, unknown>;
+    return { os: String(raw.os ?? ""), makeBase: raw.makeBase === true, phase: String(raw.phase ?? "") };
+  } catch {
+    return null;
+  }
 }
 
 async function ensureSpiceConsole(name: string) {
@@ -2163,6 +2178,24 @@ async function updateVmConfig(p: Record<string, unknown>) {
     xml = ensureVideoModel(xml, p.videoModel as "vga" | "virtio" | "qxl");
   }
 
+  if (typeof p.cpuModel === "string" || typeof p.periodSpeed === "boolean") {
+    const meta = readVirtuaMetadata(xml);
+    const cpuModel = typeof p.cpuModel === "string" ? p.cpuModel : (meta.cpuModel ?? "auto");
+    // A new non-period CPU silently drops period speed rather than failing.
+    const periodSpeed = typeof p.periodSpeed === "boolean" ? p.periodSpeed : !!meta.periodSpeed && isVintageCpu(cpuModel);
+    const { arch } = domainArchMachine(xml);
+    assertHardware({ arch, cpuModel, periodSpeed });
+    xml = applyCpuChoice(xml, { cpuModel, periodSpeed, vcpus: parseXmlNumberTag(xml, "vcpu") || 1 });
+  }
+
+  // q35 first (so Secure Boot can be turned on in the same request), i440FX
+  // last (so Secure Boot can be turned off first).
+  const machineTarget = typeof p.machine === "string" ? p.machine : undefined;
+  if (machineTarget !== undefined && machineTarget !== "q35" && machineTarget !== "pc") {
+    throw new Error("Invalid machine: must be q35 or pc");
+  }
+  if (machineTarget === "q35") xml = applyMachineType(xml, "q35");
+
   let staleNvramPath: string | undefined;
   if (typeof p.uefi === "boolean" || typeof p.secureBoot === "boolean") {
     const currentlyUefi = /<loader\b/i.test(xml);
@@ -2189,6 +2222,8 @@ async function updateVmConfig(p: Record<string, unknown>) {
     }
     xml = ensureSmmFeature(xml, wantSecure);
   }
+
+  if (machineTarget === "pc") xml = applyMachineType(xml, "pc");
 
   // Floppy-first must stay bootable whatever else changed (UEFI toggled on, …).
   if (xml.match(/<boot dev=['"]([^'"]+)['"]/)?.[1] === "fd") {
@@ -2385,11 +2420,19 @@ async function resizeDisk(name: string, device: string, sizeGb: number) {
   return { ok: true };
 }
 
+/** Refuse a PC-only NIC (NE2000, PCnet) on a non-x86 VM. */
+async function assertNicModelFitsVm(name: string, model: string) {
+  const { arch } = domainArchMachine(await dumpDomainXmlForDefine(name, true));
+  assertHardware({ arch, networkModel: model });
+}
+
 async function attachNetwork(p: Record<string, unknown>) {
-  const name = p.name as string;
-  const bridge = p.bridge as string;
-  const model = (p.model as string) ?? "virtio";
-  const mac = p.mac as string | undefined;
+  const name = validateVmName(p.name as string);
+  const bridge = validateBridge(p.bridge as string);
+  const model = validateNetworkModel(p.model);
+  const macRaw = (p.mac as string | undefined)?.trim();
+  const mac = macRaw ? validateMac(macRaw) : undefined;
+  await assertNicModelFitsVm(name, model);
   await ensureVmBridgeReady(bridge);
   const macAttr = mac ? `<mac address="${mac}"/>` : "";
   const xml = `<interface type="bridge"><source bridge="${bridge}"/>${macAttr}<model type="${model}"/></interface>`;
@@ -2427,8 +2470,9 @@ async function updateNetwork(p: Record<string, unknown>) {
   const name = p.name as string;
   const mac = p.mac as string;
   const newBridge = p.bridge as string | undefined;
-  const newModel = p.model as string | undefined;
+  const newModel = p.model !== undefined ? validateNetworkModel(p.model) : undefined;
   const newMac = p.newMac as string | undefined;
+  if (newModel) await assertNicModelFitsVm(name, newModel);
   const xml = await virsh("dumpxml", name);
   const nic = parseInterfaceBlocks(xml).find((entry) => entry.mac === mac.toLowerCase());
   if (!nic) throw new Error(`NIC with MAC ${mac} not found`);
@@ -2444,6 +2488,8 @@ async function updateNetwork(p: Record<string, unknown>) {
     }
   }
   if (newModel) {
+    // vhost-net is a virtio-only backend: libvirt refuses it on other models.
+    if (newModel !== "virtio") nicXml = nicXml.replace(/\s*<driver\b[^>]*\/>/i, "");
     if (/<model\b[^>]*type=['"][^'"]+['"]/i.test(nicXml)) {
       nicXml = nicXml.replace(/(<model\b[^>]*type=['"])[^'"]+(['"][^>]*\/?>)/i, `$1${newModel}$2`);
     } else {
@@ -3837,4 +3883,583 @@ async function deleteIso(filename: string) {
   if (!realPath || !realPath.startsWith(ISOS_DIR)) throw new Error("Invalid path");
   await fs.unlink(realPath);
   return { ok: true };
+}
+
+// ── Disposable VMs (beta) ──────────────────────────────────────────────────
+// Pure parts in disposable.ts. A base never changes once written: every
+// disposable VM reads it as the backing file of its own overlay.
+
+function baseDir(id: string) {
+  return path.join(BASES_DIR, assertBaseId(id));
+}
+
+async function readBaseManifest(id: string): Promise<BaseManifest> {
+  const raw = await fs.readFile(path.join(baseDir(id), VMTMP_MANIFEST), "utf8").catch(() => {
+    throw new Error(`Base ${id} not found`);
+  });
+  return BaseManifestSchema.parse(JSON.parse(raw));
+}
+
+async function baseVarsFile(id: string): Promise<string | undefined> {
+  const files = await fs.readdir(baseDir(id)).catch(() => [] as string[]);
+  const vars = files.filter((f) => /^disk\.[A-Za-z0-9_-]{1,40}\.fd$/.test(f)).sort();
+  return vars[0] ? path.join(baseDir(id), vars[0]) : undefined;
+}
+
+/** Disposable VMs per base id, from the domains' Virtua metadata. */
+async function disposableUsage(): Promise<Map<string, string[]>> {
+  const usage = new Map<string, string[]>();
+  const names = (await virsh("list", "--all", "--name")).trim().split("\n").filter(Boolean);
+  await Promise.all(names.map(async (name) => {
+    const xml = await virsh("dumpxml", name, "--inactive").catch(() => "");
+    const baseId = readVirtuaMetadata(xml).disposable?.baseId;
+    if (baseId) usage.set(baseId, [...(usage.get(baseId) ?? []), name]);
+  }));
+  return usage;
+}
+
+async function dirSize(dir: string): Promise<number> {
+  let total = 0;
+  for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isFile()) total += (await fs.stat(path.join(dir, entry.name)).catch(() => ({ size: 0 }))).size;
+  }
+  return total;
+}
+
+async function listBases(): Promise<BaseInfo[]> {
+  await fs.mkdir(BASES_DIR, { recursive: true });
+  const usage = await disposableUsage().catch(() => new Map<string, string[]>());
+  const bases: BaseInfo[] = [];
+  for (const entry of await fs.readdir(BASES_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    try {
+      const manifest = await readBaseManifest(entry.name);
+      if (manifest.id !== entry.name) continue;
+      await fs.access(path.join(baseDir(entry.name), VMTMP_DISK));
+      const usedBy = usage.get(manifest.id) ?? [];
+      bases.push({ ...manifest, sizeBytes: await dirSize(baseDir(entry.name)), inUse: usedBy.length, usedBy });
+    } catch {
+      /* incomplete or foreign directory: not a base */
+    }
+  }
+  return bases.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** Base files are read by every disposable QEMU, never written. */
+async function sealBaseDir(dir: string) {
+  const identity = await getLibvirtQemuIdentity();
+  for (const file of await fs.readdir(dir)) {
+    const full = path.join(dir, file);
+    if (identity) await fs.chown(full, identity.uid, identity.gid).catch(() => {});
+    await fs.chmod(full, 0o440).catch(() => {});
+  }
+  if (identity) await fs.chown(dir, 0, identity.gid).catch(() => {});
+  await fs.chmod(dir, 0o750).catch(() => {});
+}
+
+async function qemuImgInfo(file: string): Promise<Record<string, unknown>> {
+  const { stdout } = await execFileAsync("qemu-img", ["info", "--output=json", file], { maxBuffer: 4 * 1024 * 1024 });
+  return JSON.parse(stdout) as Record<string, unknown>;
+}
+
+async function createBaseFromVm(p: Record<string, unknown>, emit?: ProgressEmitter) {
+  const name = validateVmName(p.name as string);
+  const os = typeof p.os === "string" && /^[a-z0-9][a-z0-9_-]{0,40}$/.test(p.os) ? p.os : "other";
+  if ((await getDomainState(name)) !== "stopped") throw new Error(`Stop "${name}" before making a base of it`);
+  const xml = await dumpDomainXmlForDefine(name, true);
+  if (readVirtuaMetadata(xml).disposable) {
+    throw new Error("A disposable VM cannot become a base: convert it into an ordinary VM first");
+  }
+  const disk = primaryWritableDisk(xml);
+  if (!disk) throw new Error("The VM has no writable system disk");
+  const { arch } = domainArchMachine(xml);
+  const architecture = arch === "aarch64" ? "arm64" : "amd64";
+  const id = newBaseId(os, architecture);
+  const label = (typeof p.label === "string" && p.label.trim() ? p.label.trim() : `${baseOsLabel(os)} (${architecture.toUpperCase()})`).slice(0, 200);
+  await fs.mkdir(BASES_DIR, { recursive: true });
+  const partial = path.join(BASES_DIR, `.${id}.partial`);
+  await fs.rm(partial, { recursive: true, force: true });
+  await fs.mkdir(partial, { recursive: true });
+  try {
+    emit?.({ percent: 2, message: "Copying the system disk (flattened)" });
+    // convert flattens any backing chain/snapshot overlay and drops unused clusters.
+    await qemuImgWithProgress(["convert", "-p", "-O", "qcow2", disk.source, path.join(partial, VMTMP_DISK)], emit);
+    const nvram = domainNvramPath(xml) ?? (/<loader\b/i.test(xml) ? path.join(NVRAM_DIR, `${name}_VARS.fd`) : undefined);
+    if (nvram && await pathExists(nvram)) await fs.copyFile(nvram, path.join(partial, "disk.vars.fd"));
+    const virtualSize = Number((await qemuImgInfo(path.join(partial, VMTMP_DISK)))["virtual-size"] ?? 0);
+    const manifest = manifestFromDomain(xml, {
+      id,
+      label,
+      os,
+      diskGib: Math.max(1, Math.ceil(virtualSize / 1024 ** 3)),
+      createdAt: new Date().toISOString(),
+    });
+    await fs.writeFile(path.join(partial, VMTMP_MANIFEST), JSON.stringify(manifest, null, 2));
+    await sealBaseDir(partial);
+    await fs.rename(partial, baseDir(id));
+  } catch (error) {
+    await fs.rm(partial, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  emit?.({ percent: 100, message: "Base ready" });
+  if (p.removeSource === true) await deleteVm(name, true);
+  return { ok: true, id, label };
+}
+
+async function deleteBase(idRaw: string) {
+  const id = assertBaseId(idRaw);
+  const users = (await disposableUsage()).get(id) ?? [];
+  if (users.length > 0) {
+    throw new Error(`${users.length} disposable VM(s) still use this base (${users.join(", ")}): discard or convert them first`);
+  }
+  await fs.rm(baseDir(id), { recursive: true, force: true });
+  return { ok: true };
+}
+
+async function sha256File(file: string): Promise<string> {
+  const hash = createHash("sha256");
+  await new Promise<void>((resolve, reject) => {
+    createReadStream(file).on("data", (chunk) => hash.update(chunk)).on("end", resolve).on("error", reject);
+  });
+  return hash.digest("hex");
+}
+
+/** Unpack a `.vmtmp` (plain tar) into the bases: safe members only, manifest, sha256, arch, no backing file. */
+async function importBaseArchive(archiveRaw: string, emit?: ProgressEmitter) {
+  const archivePath = validatePath(archiveRaw, "archivePath");
+  if (!archivePath.endsWith(".vmtmp")) throw new Error("Expected a .vmtmp file");
+  const { stdout } = await execFileAsync("tar", ["-tvf", archivePath], { maxBuffer: 4 * 1024 * 1024 });
+  const members = selectVmtmpMembers(parseTarListing(stdout));
+  await fs.mkdir(BASES_DIR, { recursive: true });
+  const staging = path.join(BASES_DIR, `.import-${Date.now()}-${randomBytes(4).toString("hex")}`);
+  await fs.mkdir(staging, { recursive: true });
+  try {
+    emit?.({ percent: 10, message: "Unpacking the base" });
+    const wanted = [members.manifest, members.disk, ...members.vars];
+    await execFileAsync("tar", ["-xf", archivePath, "-C", staging, "--no-same-owner", "--no-same-permissions", "--", ...wanted], { maxBuffer: 4 * 1024 * 1024 });
+    const manifest = BaseManifestSchema.parse(JSON.parse(await fs.readFile(path.join(staging, members.manifest), "utf8")));
+    const host = hostBaseArch(process.arch);
+    if (manifest.architecture !== host) {
+      throw new Error(`This base is ${manifest.architecture}; this node is ${host ?? process.arch}`);
+    }
+    const disk = path.join(staging, members.disk);
+    if (manifest.diskSha256) {
+      emit?.({ percent: 50, message: "Checking the disk (sha256)" });
+      if ((await sha256File(disk)).toLowerCase() !== manifest.diskSha256.toLowerCase()) {
+        throw new Error("The .vmtmp disk is corrupted (checksum mismatch)");
+      }
+    }
+    assertStandaloneQcow2(await qemuImgInfo(disk));
+    const id = newBaseId(manifest.os, manifest.architecture);
+    const finalDir = path.join(staging, ".final");
+    await fs.mkdir(finalDir);
+    await fs.rename(disk, path.join(finalDir, VMTMP_DISK));
+    for (const vars of members.vars) {
+      const stat = await fs.stat(path.join(staging, vars));
+      if (stat.size <= 64 * 1024 * 1024) await fs.rename(path.join(staging, vars), path.join(finalDir, path.basename(vars)));
+    }
+    await fs.writeFile(path.join(finalDir, VMTMP_MANIFEST), JSON.stringify({ ...manifest, id, source: "depot" }, null, 2));
+    await sealBaseDir(finalDir);
+    await fs.rename(finalDir, baseDir(id));
+    emit?.({ percent: 100, message: "Base imported" });
+    return { ok: true, id, label: manifest.label };
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** UEFI VARS template matching the firmware code file (same size), if installed. */
+async function varsTemplateFor(firmware: UefiFirmware): Promise<string | undefined> {
+  const candidates = [firmware.nvramTemplate, firmware.loader.replace(/CODE/, "VARS").replace(/\.(ms|secboot)\.fd$/, ".fd"), firmware.loader.replace(/CODE/, "VARS")];
+  for (const candidate of candidates) {
+    if (candidate && candidate !== firmware.loader && await pathExists(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Seed the VM's UEFI store from the base when it fits this node's firmware
+ * (same size as its VARS template); otherwise libvirt starts from a blank
+ * store and the firmware falls back to \EFI\BOOT\BOOTX64.EFI.
+ */
+async function seedNvramFromBase(baseId: string, vmName: string, firmware: UefiFirmware): Promise<string | undefined> {
+  const vars = await baseVarsFile(baseId);
+  if (!vars) return undefined;
+  const template = await varsTemplateFor(firmware);
+  if (!template) return undefined;
+  const [baseSize, templateSize] = await Promise.all([fs.stat(vars), fs.stat(template)]).then(([a, b]) => [a.size, b.size]);
+  if (baseSize !== templateSize) return undefined;
+  await fs.mkdir(NVRAM_DIR, { recursive: true });
+  const target = path.join(NVRAM_DIR, `${vmName}_VARS.fd`);
+  await fs.copyFile(vars, target);
+  await ensureLibvirtDiskAccess(target).catch(() => {});
+  return target;
+}
+
+async function newOverlay(baseId: string, overlay: string) {
+  await execFileAsync("qemu-img", ["create", "-f", "qcow2", "-F", "qcow2", "-b", path.join(baseDir(baseId), VMTMP_DISK), overlay]);
+  await ensureLibvirtDiskAccess(overlay);
+}
+
+async function uniqueDisposableName(os: string): Promise<string> {
+  const names = new Set((await virsh("list", "--all", "--name")).trim().split("\n").filter(Boolean));
+  const stem = `jetable-${os.replace(/[^a-zA-Z0-9-]/g, "")}`.slice(0, 50);
+  for (let n = 1; n < 1000; n += 1) {
+    if (!names.has(`${stem}-${n}`)) return `${stem}-${n}`;
+  }
+  throw new Error("No free disposable VM name");
+}
+
+async function launchDisposable(p: Record<string, unknown>) {
+  const baseId = assertBaseId(p.baseId as string);
+  const manifest = await readBaseManifest(baseId);
+  const host = hostBaseArch(process.arch);
+  if (manifest.architecture !== host) throw new Error(`Base ${manifest.architecture} cannot run on this ${host ?? process.arch} node`);
+  const storagePool = validatePath(p.storagePool as string, "storagePool");
+  const name = p.name ? validateVmName(p.name as string) : await uniqueDisposableName(manifest.os);
+  if (await domainExists(name)) throw new Error(`VM ${name} already exists`);
+  const strict = p.strict === true;
+  const noNetwork = p.noNetwork === true;
+  const bridge = noNetwork ? undefined : validateBridge((p.bridge as string) ?? "virbr0");
+  const hw = baseDomainHardware(manifest, { hasUefiVars: !!(await baseVarsFile(baseId)) });
+
+  await ensureLibvirtStorageDir(storagePool);
+  const overlay = path.join(storagePool, `${name}.qcow2`);
+  if (await pathExists(overlay)) throw new Error(`A disk named ${path.basename(overlay)} already exists in this pool`);
+  if (bridge) await ensureVmBridgeReady(bridge);
+  await newOverlay(baseId, overlay);
+  try {
+    let firmwareLines = "";
+    if (hw.uefi) {
+      const firmware = await resolveUefiFirmware(hw.arch, hw.secureBoot);
+      firmwareLines = buildUefiLoaderLines(firmware, hw.secureBoot, await seedNvramFromBase(baseId, name, firmware));
+    }
+    const xml = buildVmDomainXml({
+      name,
+      vcpus: manifest.cpu,
+      memoryMb: manifest.memoryMib,
+      arch: hw.arch,
+      machine: hw.machine,
+      firmwareLines,
+      secureBoot: hw.secureBoot,
+      bootDevice: "hd",
+      disk: { path: overlay, bus: hw.diskBus, transient: strict },
+      network: bridge ? { bridge, model: hw.networkModel } : null,
+      tpm: hw.tpm,
+      videoModel: hw.videoModel,
+      qemuAgent: true,
+      cpuModel: hw.cpuModel,
+      periodSpeed: hw.periodSpeed,
+      metadata: { disposable: { baseId, baseLabel: manifest.label, strict } },
+    });
+    await defineDomainXml(name, xml);
+  } catch (error) {
+    await fs.rm(overlay, { force: true }).catch(() => {});
+    await fs.rm(path.join(NVRAM_DIR, `${name}_VARS.fd`), { force: true }).catch(() => {});
+    throw error;
+  }
+  if (p.start !== false) await vmAction(name, "start");
+  return { ok: true, name, baseId, strict, noNetwork };
+}
+
+/** discard | reset | keep | convert, once the disposable VM stopped (discard also stops it). */
+async function disposableAction(nameRaw: string, action: string) {
+  const name = validateVmName(nameRaw);
+  if (!["discard", "reset", "keep", "convert"].includes(action)) throw new Error("Invalid disposable action");
+  const xml = await dumpDomainXmlForDefine(name, true);
+  const disposable = readVirtuaMetadata(xml).disposable;
+  if (!disposable) throw new Error(`${name} is not a disposable VM`);
+  if (action === "keep") return { ok: true, name };
+  if (action === "discard") {
+    await deleteVm(name, true);
+    return { ok: true, name, deleted: true };
+  }
+  if ((await getDomainState(name)) !== "stopped") throw new Error("Stop the VM first");
+  const disk = primaryWritableDisk(xml);
+  if (!disk) throw new Error("The disposable VM has no overlay disk");
+
+  if (action === "reset") {
+    await fs.rm(disk.source, { force: true });
+    await newOverlay(disposable.baseId, disk.source);
+    const nvram = domainNvramPath(xml);
+    const vars = await baseVarsFile(disposable.baseId);
+    if (nvram && vars && nvram.startsWith(`${NVRAM_DIR}/`)) {
+      // Back to the base's boot entries; libvirt re-creates a blank store otherwise.
+      const sameSize = (await fs.stat(vars)).size === (await fs.stat(nvram).catch(() => ({ size: -1 }))).size;
+      if (sameSize) await fs.copyFile(vars, nvram);
+      else await fs.rm(nvram, { force: true });
+    }
+    return { ok: true, name, reset: true };
+  }
+
+  // convert: flatten base + overlay into an ordinary disk next to the overlay.
+  const flat = path.join(path.dirname(disk.source), `${name}-${Date.now()}.qcow2`);
+  await execFileAsync("qemu-img", ["convert", "-O", "qcow2", disk.source, flat], { maxBuffer: 4 * 1024 * 1024 });
+  await ensureLibvirtDiskAccess(flat);
+  try {
+    await withVmDefineLock(name, async () => {
+      const current = await dumpDomainXmlForDefine(name, true);
+      const tmp = `/tmp/auxinux-convert-${name}-${Date.now()}.xml`;
+      await fs.writeFile(tmp, convertedDomainXml(current, disk.source, flat));
+      try {
+        await virsh("define", tmp);
+      } finally {
+        await fs.unlink(tmp).catch(() => {});
+      }
+    });
+  } catch (error) {
+    await fs.rm(flat, { force: true }).catch(() => {});
+    throw error;
+  }
+  await fs.rm(disk.source, { force: true });
+  return { ok: true, name, converted: true, disk: flat };
+}
+
+// ── Quick create (unattended Windows 11 / Debian 13) ──────────────────────
+// Builders in quickCreate.ts. Each install keeps <images>/autoinstall/<vm>/
+// (seeded initrd or answer-file floppy + state.json) until the tick sees it
+// finished: Debian powered off, or Windows' guest agent answering.
+
+interface AutoInstallState {
+  os: "windows11" | "debian13";
+  makeBase: boolean;
+  phase: "installing";
+  createdAt: string;
+  arch: "amd64" | "arm64";
+  /** Install ISOs to take out once done (Windows). */
+  media?: string[];
+  agentSeenAt?: number;
+  shutdownRequested?: boolean;
+}
+
+function autoInstallDir(name: string) {
+  return path.join(AUTOINSTALL_DIR, validateVmName(name));
+}
+
+async function writeAutoInstallState(name: string, state: AutoInstallState) {
+  await fs.writeFile(path.join(autoInstallDir(name), "state.json"), JSON.stringify(state, null, 2));
+}
+
+function validateTimezone(value: unknown): string {
+  return typeof value === "string" && /^[A-Za-z0-9_+\-]+(\/[A-Za-z0-9_+\-]+){0,2}$/.test(value) ? value : "America/Toronto";
+}
+
+/**
+ * Answer "Press any key to boot from CD or DVD" on the very first start of a
+ * Windows install: without a key the firmware falls through to the empty
+ * disk. Keys only for a few seconds, never on a later start (a later key
+ * press would reinstall over the disk).
+ */
+function pressBootKeys(name: string) {
+  const until = Date.now() + 25_000;
+  const tick = () => {
+    if (Date.now() > until) return;
+    execFileAsync("virsh", ["send-key", name, "KEY_ENTER"], { timeout: 3000 }).catch(() => {}).finally(() => setTimeout(tick, 500));
+  };
+  tick();
+}
+
+async function quickCreateVm(p: Record<string, unknown>) {
+  const os = p.os === "windows11" || p.os === "debian13" ? p.os : undefined;
+  if (!os) throw new Error("Invalid os: windows11 or debian13");
+  const profile = QUICK_CREATE_PROFILES[os];
+  const name = validateVmName(p.name as string);
+  if (await domainExists(name)) throw new Error(`VM ${name} already exists`);
+  const storagePool = validatePath(p.storagePool as string, "storagePool");
+  const bridge = validateBridge((p.bridge as string) ?? "virbr0");
+  const makeBase = p.makeBase === true;
+  const architecture = hostBaseArch(process.arch);
+  if (!architecture) throw new Error(`Unsupported node architecture ${process.arch}`);
+  const arch = architecture === "arm64" ? "aarch64" : "x86_64";
+  if (os === "windows11" && arch !== "x86_64") {
+    throw new Error("Windows 11 quick create needs an x86-64 node (no Windows ARM64 ISO on the depot)");
+  }
+  const vcpus = effectiveVcpus(profile.vcpus, hostCpus().length);
+  const timezone = validateTimezone(p.timezone);
+
+  const workDir = autoInstallDir(name);
+  await fs.rm(workDir, { recursive: true, force: true });
+  await ensureLibvirtIsoDirAccess(workDir);
+  const diskPath = path.join(storagePool, `${name}.qcow2`);
+  if (await pathExists(diskPath)) throw new Error(`A disk named ${path.basename(diskPath)} already exists in this pool`);
+  await ensureVmBridgeReady(bridge);
+
+  let state: AutoInstallState = { os, makeBase, phase: "installing", createdAt: new Date().toISOString(), arch: architecture };
+  let xml: string;
+  try {
+    await ensureLibvirtStorageDir(storagePool);
+    await execFileAsync("qemu-img", ["create", "-f", "qcow2", diskPath, `${profile.diskGb}G`]);
+    await ensureLibvirtDiskAccess(diskPath);
+
+    if (os === "debian13") {
+      const kernelSrc = validatePath(p.kernelPath as string, "kernelPath");
+      const initrdSrc = validatePath(p.initrdPath as string, "initrdPath");
+      // A base's copies are all "debian-13"; the builder VM's name is not a host name.
+      const hostname = makeBase ? "debian-13" : quickCreateHostName(name, 63).toLowerCase();
+      const preseed = makeBase ? debianBasePreseed(hostname, timezone) : debianPreseed(hostname, timezone);
+      const kernel = path.join(workDir, "linux");
+      const initrd = path.join(workDir, "initrd-preseed.gz");
+      await fs.copyFile(kernelSrc, kernel);
+      await fs.writeFile(initrd, initrdWithPreseed(await fs.readFile(initrdSrc), preseed));
+      await ensureLibvirtIsoAccess(kernel);
+      await ensureLibvirtIsoAccess(initrd);
+      const uefi = arch === "aarch64";
+      xml = buildVmDomainXml({
+        name, vcpus, memoryMb: profile.memoryMb, arch, machine: uefi ? "virt" : "q35",
+        firmwareLines: uefi ? buildUefiLoaderLines(await resolveUefiFirmware(arch, false), false) : "",
+        bootDevice: "hd",
+        disk: { path: diskPath, bus: "virtio" },
+        network: { bridge, model: "virtio" },
+        videoModel: "virtio",
+        qemuAgent: true,
+        directKernel: { kernel, initrd, cmdline: debianAppend(hostname, architecture) },
+      });
+    } else {
+      const isoPath = validatePath(p.isoPath as string, "isoPath");
+      const driverIsoPath = validatePath(p.driverIsoPath as string, "driverIsoPath");
+      const language = ["fr-CA", "fr-FR", "en-US"].includes(p.language as string) ? (p.language as string) : "en-US";
+      const floppy = path.join(workDir, "autounattend.img");
+      const answer = windowsAnswerFile(architecture, language, quickCreateHostName(name, 15).toUpperCase());
+      await fs.writeFile(floppy, buildFat12Image([{ name: "autounattend.xml", data: Buffer.from(answer, "utf8") }]));
+      await ensureLibvirtIsoAccess(floppy);
+      await ensureLibvirtIsoAccess(isoPath);
+      await ensureLibvirtIsoAccess(driverIsoPath);
+      state = { ...state, media: [isoPath, driverIsoPath] };
+      xml = buildVmDomainXml({
+        name, vcpus, memoryMb: profile.memoryMb, arch, machine: "q35",
+        firmwareLines: buildUefiLoaderLines(await resolveUefiFirmware(arch, true), true),
+        secureBoot: true,
+        bootDevice: "cdrom",
+        // virtio-blk/NetKVM drivers come from the virtio-win disc (answer file DriverPaths).
+        disk: { path: diskPath, bus: "virtio" },
+        cdroms: [isoPath, driverIsoPath],
+        floppy: { path: floppy, readonly: true },
+        network: { bridge, model: "virtio" },
+        tpm: true,
+        videoModel: "qxl",
+        qemuAgent: true,
+      });
+    }
+    await writeAutoInstallState(name, state);
+    await defineDomainXml(name, xml);
+  } catch (error) {
+    await fs.rm(diskPath, { force: true }).catch(() => {});
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  await vmAction(name, "start");
+  if (os === "windows11") pressBootKeys(name);
+  return { ok: true, name, os, vcpus, memoryMb: profile.memoryMb, diskGb: profile.diskGb, makeBase };
+}
+
+async function redefineDomain(name: string, transform: (xml: string) => string) {
+  await withVmDefineLock(name, async () => {
+    const xml = transform(await dumpDomainXmlForDefine(name, true));
+    const tmp = `/tmp/auxinux-autoinstall-${name}-${Date.now()}.xml`;
+    await fs.writeFile(tmp, xml);
+    try {
+      await virsh("define", tmp);
+    } finally {
+      await fs.unlink(tmp).catch(() => {});
+    }
+  });
+}
+
+/** Take the installer media out of a Windows VM (live where possible, and its definition). */
+async function removeWindowsInstallMedia(name: string, state: AutoInstallState) {
+  const workDir = autoInstallDir(name);
+  const media = state.media ?? [];
+  if ((await getDomainState(name)) === "running") {
+    for (const disk of parseDiskXmlBlocks(await virsh("dumpxml", name))) {
+      if (disk.deviceType !== "cdrom" && disk.deviceType !== "floppy") continue;
+      if (!media.includes(disk.source) && !disk.source.startsWith(`${workDir}/`)) continue;
+      await virsh("change-media", name, disk.device, "--eject", "--live", "--force").catch(() => {});
+    }
+  }
+  await redefineDomain(name, (xml) => applyBootOrder(stripInstallMedia(xml, media, workDir), "hd"));
+}
+
+let autoInstallTickRunning = false;
+
+/**
+ * Advance the unattended installs (called periodically by the API). Returns
+ * what happened so the API can audit it and forget a builder VM.
+ */
+async function autoInstallTick(): Promise<Array<{ name: string; outcome: "installed" | "base" | "gone" | "error"; baseId?: string; error?: string }>> {
+  if (autoInstallTickRunning) return [];
+  autoInstallTickRunning = true;
+  const events: Array<{ name: string; outcome: "installed" | "base" | "gone" | "error"; baseId?: string; error?: string }> = [];
+  try {
+    const entries = await fs.readdir(AUTOINSTALL_DIR, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const name = entry.name;
+      let state: AutoInstallState;
+      try {
+        validateVmName(name);
+        state = JSON.parse(await fs.readFile(path.join(AUTOINSTALL_DIR, name, "state.json"), "utf8")) as AutoInstallState;
+      } catch {
+        continue;
+      }
+      const workDir = autoInstallDir(name);
+      try {
+        if (!(await domainExists(name))) {
+          await fs.rm(workDir, { recursive: true, force: true });
+          events.push({ name, outcome: "gone" });
+          continue;
+        }
+        const domainState = await getDomainState(name);
+        const label = `${QUICK_CREATE_PROFILES[state.os].label} (${state.arch.toUpperCase()})`;
+
+        if (state.os === "debian13") {
+          // The installer powers the VM off when it is done.
+          if (domainState !== "stopped") continue;
+          await redefineDomain(name, stripDirectKernelBoot);
+          if (state.makeBase) {
+            const base = await createBaseFromVm({ name, os: "debian13", label, removeSource: true });
+            events.push({ name, outcome: "base", baseId: base.id });
+          } else {
+            await vmAction(name, "start");
+            events.push({ name, outcome: "installed" });
+          }
+          await fs.rm(workDir, { recursive: true, force: true });
+          continue;
+        }
+
+        // Windows: the guest agent answers once the guest tools were installed
+        // at the first logon — Windows is done.
+        if (!state.makeBase) {
+          if (domainState === "running" && await pingGuestAgent(name)) {
+            await removeWindowsInstallMedia(name, state);
+            await fs.rm(workDir, { recursive: true, force: true });
+            events.push({ name, outcome: "installed" });
+          }
+          continue;
+        }
+        // Windows base: let the first logon finish (guest tools, RDP), shut
+        // down cleanly, then keep the disk as a base.
+        if (domainState === "stopped" && state.shutdownRequested) {
+          await removeWindowsInstallMedia(name, state);
+          const base = await createBaseFromVm({ name, os: "windows11", label, removeSource: true });
+          await fs.rm(workDir, { recursive: true, force: true });
+          events.push({ name, outcome: "base", baseId: base.id });
+          continue;
+        }
+        if (domainState === "running" && await pingGuestAgent(name)) {
+          const now = Date.now();
+          if (!state.agentSeenAt) {
+            await writeAutoInstallState(name, { ...state, agentSeenAt: now });
+          } else if (!state.shutdownRequested && now - state.agentSeenAt >= 120_000) {
+            await virsh("shutdown", name).catch(() => {});
+            await writeAutoInstallState(name, { ...state, shutdownRequested: true });
+          }
+        }
+      } catch (error) {
+        events.push({ name, outcome: "error", error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  } finally {
+    autoInstallTickRunning = false;
+  }
+  return events;
 }

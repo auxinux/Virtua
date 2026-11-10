@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { archSupportsFloppy, isFloppyFilename } from "./floppy";
+import { CpuModelSchema, NetworkModelSchema, X86_MACHINE_TYPES, isVintageCpu, refineHardware } from "./hardware";
 
 /** Boot devices: "fd" = floppy first (BIOS/SeaBIOS only; OVMF cannot boot a floppy). */
 export const VmBootDeviceSchema = z.enum(["hd", "cdrom", "network", "fd"]);
@@ -24,6 +25,12 @@ export const CreateVmSchema = z.object({
   mac: z.string().regex(macRegex, "MAC address must use aa:bb:cc:dd:ee:ff format").optional(),
   arch: z.enum(["x86_64", "aarch64"]).default("x86_64"),
   machine: z.string().default("q35"),
+  /** CPU model (see hardware.ts); `auto` = host-passthrough as before. */
+  cpuModel: CpuModelSchema.default("auto"),
+  /** Run a period CPU (286 … Pentium 4) at roughly its own speed (TCG + icount). */
+  periodSpeed: z.boolean().default(false),
+  /** Model of the first NIC. */
+  networkModel: NetworkModelSchema.default("virtio"),
   uefi: z.boolean().default(false),
   secureBoot: z.boolean().default(false),
   bootDevice: VmBootDeviceSchema.default("hd"),
@@ -44,7 +51,16 @@ export const CreateVmSchema = z.object({
 }).refine((value) => value.bootDevice !== "fd" || (!value.uefi && !value.secureBoot), {
   message: "UEFI firmware cannot boot from a floppy: use BIOS (uefi off) to boot from drive A:",
   path: ["bootDevice"],
-});
+}).superRefine((value, ctx) => refineHardware({
+  arch: value.arch,
+  machine: value.machine,
+  cpuModel: value.cpuModel,
+  periodSpeed: value.periodSpeed,
+  // A diskless VM has no disk bus to check.
+  diskBus: value.diskGb !== undefined || value.existingPath ? value.diskBus : undefined,
+  networkModel: value.networkModel,
+  secureBoot: value.secureBoot,
+}, ctx));
 
 export const UpdateVmConfigSchema = z.object({
   vcpus: z.number().int().min(1).max(256).optional(),
@@ -60,6 +76,17 @@ export const UpdateVmConfigSchema = z.object({
   tpmEnabled: z.boolean().optional(),
   qemuAgentEnabled: z.boolean().optional(),
   videoModel: z.enum(["vga", "virtio", "qxl"]).optional(),
+  /**
+   * x86 chipset. Changing it re-addresses every PCI device (libvirt rebuilds
+   * the topology): applies at the next start, refused while an IDE disk would
+   * land on q35 or Secure Boot on i440FX (checked by the runner on the real XML).
+   */
+  machine: z.enum(X86_MACHINE_TYPES).optional(),
+  cpuModel: CpuModelSchema.optional(),
+  periodSpeed: z.boolean().optional(),
+}).refine((value) => !(value.periodSpeed === true && value.cpuModel !== undefined && !isVintageCpu(value.cpuModel)), {
+  message: "Period speed needs a period CPU (286, 386, 486, Pentium … Pentium 4)",
+  path: ["periodSpeed"],
 });
 
 export const AttachDiskSchema = z.object({
@@ -72,13 +99,13 @@ export const AttachDiskSchema = z.object({
 
 export const AttachNetworkSchema = z.object({
   bridge: z.string().min(1),
-  model: z.enum(["virtio", "e1000", "rtl8139"]).default("virtio"),
+  model: NetworkModelSchema.default("virtio"),
   mac: z.string().regex(macRegex, "MAC address must use aa:bb:cc:dd:ee:ff format").optional(),
 });
 
 export const UpdateNetworkSchema = z.object({
   bridge: z.string().min(1).optional(),
-  model: z.enum(["virtio", "e1000", "rtl8139"]).optional(),
+  model: NetworkModelSchema.optional(),
   mac: z.string().regex(macRegex, "MAC address must use aa:bb:cc:dd:ee:ff format").optional(),
 });
 

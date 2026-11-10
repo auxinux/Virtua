@@ -14,6 +14,7 @@ export interface QemuVm {
   description?: string;
   tags?: string[];
   userId?: number;
+  disposable?: VmDisposableInfo | null;
 }
 
 export interface VmDisk {
@@ -29,7 +30,7 @@ export interface VmDisk {
 export interface VmNetworkInterface {
   index: number;
   mac: string;
-  model: "virtio" | "e1000" | "rtl8139";
+  model: "virtio" | "e1000" | "rtl8139" | "ne2k_pci" | "pcnet";
   source: string;       // bridge name
   type: "bridge" | "network" | "direct";
   ipAddresses?: string[];
@@ -71,6 +72,14 @@ export interface VmInfo {
   tpmEnabled?: boolean;
   qemuAgentEnabled?: boolean;
   videoModel?: "vga" | "virtio" | "qxl";
+  /** CPU model chosen for the VM (`auto` = host-passthrough). */
+  cpuModel?: string;
+  /** Period CPU emulated at roughly its own speed (TCG + icount). */
+  periodSpeed?: boolean;
+  /** Set when the VM is a disposable overlay on a base. */
+  disposable?: VmDisposableInfo | null;
+  /** Unattended installation still in progress (quick create). */
+  autoInstall?: VmAutoInstallInfo | null;
   autostart: boolean;
   /** Redémarrage automatique après une panne (null = défaut global du nœud). */
   restartOnCrash?: boolean | null;
@@ -85,6 +94,20 @@ export interface VmInfo {
   spiceEnabled?: boolean;
   description?: string;
   tags?: string[];
+}
+
+export interface VmDisposableInfo {
+  baseId: string;
+  baseLabel: string;
+  /** Strict sandbox: every write is dropped when the VM stops. */
+  strict: boolean;
+}
+
+export interface VmAutoInstallInfo {
+  os: "windows11" | "debian13";
+  /** The installed system becomes a disposable base when done. */
+  makeBase: boolean;
+  phase: string;
 }
 
 export interface VmRdpConsoleInfo {
