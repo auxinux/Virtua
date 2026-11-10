@@ -12,6 +12,18 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.12",
+      items: fr
+        ? [
+            "Virtua Desktop en mode Cloud a maintenant les nouveautés de la 0.8.11 : type de machine, modèle de processeur (80286 → Pentium 4) et vitesse d'époque, disque IDE, cartes NE2000/PCnet, disquettes de la bibliothèque, création rapide Windows 11 / Debian 13 et VM jetables.",
+            "Sécurité : modifier une VM depuis Virtua Desktop exige maintenant le droit « modifier les VM », comme dans l'interface web (seule la permission sur la VM était vérifiée).",
+          ]
+        : [
+            "Virtua Desktop in Cloud mode now has the 0.8.11 features: machine type, CPU model (80286 → Pentium 4) and period speed, IDE disk, NE2000/PCnet cards, library floppies, Windows 11 / Debian 13 quick create and disposable VMs.",
+            "Security: changing a VM from Virtua Desktop now requires the \"modify VMs\" right, as in the web interface (only the per-VM permission was checked).",
+          ],
+    },
+    {
       v: "0.8.11",
       items: fr
         ? [
