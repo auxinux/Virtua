@@ -62,6 +62,7 @@ test("cloud: a Virtua 0.8.11 server offers machine, period CPU, IDE, NE2000 and 
   await page.goto("/#/vms");
   await page.getByRole("button", { name: /Creer/i }).first().click();
   await expect(page.getByRole("heading", { name: "Création rapide" })).toBeVisible();
+  await expect(page.getByRole("note")).toHaveCount(0);
   await page.getByLabel("Nom", { exact: true }).fill("AuxiDos");
   await page.getByLabel("Type de machine").selectOption("pc");
   await page.getByLabel("Modèle de CPU").selectOption("286");
@@ -91,5 +92,6 @@ test("cloud: an older server keeps the previous form", async ({ page }) => {
   await page.getByRole("button", { name: /Creer/i }).first().click();
   await expect(page.getByLabel("Nom", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Type de machine")).toHaveCount(0);
+  await expect(page.getByRole("note")).toContainText("0.8.12 ou plus");
   await expect(page.getByRole("heading", { name: "Création rapide" })).toHaveCount(0);
 });

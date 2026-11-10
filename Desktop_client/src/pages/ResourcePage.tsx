@@ -369,6 +369,12 @@ function CreateResourceDialog({
           <button type="button" onClick={onClose} className="virtua-button">Fermer</button>
         </div>
 
+        {usageMode !== "local" && form.type === "vm" && !isLoadingOptions && !cloudHardware ? (
+          <p role="note" className="mb-3 rounded border border-virtua-yellow/40 bg-virtua-yellow/10 p-3 text-xs text-virtua-text">
+            Ce serveur Virtua ne propose pas encore le type de machine, le modèle de processeur, la vitesse d’époque, les disquettes ni la création rapide à Virtua Desktop.
+            Mettez-le à jour en <strong>0.8.12 ou plus</strong> (« vos update » ou « apt update &amp;&amp; apt upgrade » sur le nœud), puis rouvrez cette fenêtre.
+          </p>
+        ) : null}
         {quickCreate && form.type === "vm" && (usageMode === "local" || options.features?.quickCreate) ? (
           <QuickCreatePanel
             quickCreate={quickCreate}
