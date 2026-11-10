@@ -256,7 +256,11 @@ d-i debian-installer/exit/poweroff boolean true
 pub fn debian_base_preseed(hostname: &str, timezone: &str) -> String {
     let unit = "[Unit]\\nDescription=Virtua: SSH host keys of this copy\\nBefore=ssh.service\\nConditionPathExists=!/etc/ssh/ssh_host_ed25519_key\\n[Service]\\nType=oneshot\\nExecStart=/usr/bin/ssh-keygen -A\\n[Install]\\nWantedBy=multi-user.target\\n";
     format!(
-        "{}d-i preseed/late_command string in-target sh -c 'truncate -s 0 /etc/machine-id; rm -f /etc/ssh/ssh_host_*; printf \"{unit}\" > /etc/systemd/system/virtua-ssh-keys.service; systemctl enable virtua-ssh-keys.service; apt-get clean'\n",
+        // log-output: whatever the commands print goes to the installer's log.
+        // Printed straight to stdout, it lands on the debconf channel and
+        // corrupts the installer (garbled main menu, "continue without boot
+        // loader") — `systemctl enable` does print.
+        "{}d-i preseed/late_command string log-output -t virtua in-target sh -c 'truncate -s 0 /etc/machine-id; rm -f /etc/ssh/ssh_host_*; printf \"{unit}\" > /etc/systemd/system/virtua-ssh-keys.service; systemctl enable virtua-ssh-keys.service; apt-get clean; true'\n",
         debian_preseed(hostname, timezone)
     )
 }
@@ -266,7 +270,11 @@ pub fn debian_append(hostname: &str, architecture: &str) -> String {
     // there, offers only the "C" language, rejects the preseeded fr_CA and
     // stops on "Select a language". `console=tty0` puts it on the screen
     // (UEFI framebuffer), as on x86.
-    let console = if architecture == "arm64" { " console=tty0" } else { "" };
+    // With UEFI + ACPI the serial port stays the preferred console (ACPI SPCR
+    // table) even with console=tty0. acpi=nospcr (Linux 6.8+, Debian 13 has
+    // 6.12) keeps ACPI but drops that preference; acpi=off would leave the
+    // kernel without any hardware description under UEFI ("empty DTB").
+    let console = if architecture == "arm64" { " acpi=nospcr console=tty0" } else { "" };
     format!("auto=true priority=critical language=fr country=CA locale=fr_CA.UTF-8 keymap=ca hostname={hostname} domain=local{console} ---")
 }
 
@@ -805,7 +813,7 @@ mod tests {
 
     #[test]
     fn the_arm64_installer_runs_on_the_screen() {
-        assert!(debian_append("d", "arm64").contains(" console=tty0 ---"));
+        assert!(debian_append("d", "arm64").contains(" acpi=nospcr console=tty0 ---"));
         assert!(!debian_append("d", "amd64").contains("console="));
     }
 
@@ -847,6 +855,14 @@ mod tests {
         let mut unpacked = Vec::new();
         decoder.read_to_end(&mut unpacked).unwrap();
         assert_eq!(unpacked, cpio_newc("preseed.cfg", b"d-i x string y\n"));
+    }
+
+    #[test]
+    fn the_base_preseed_keeps_its_commands_off_the_debconf_channel() {
+        let base = debian_base_preseed("debian-13", "UTC");
+        let late = base.lines().find(|l| l.starts_with("d-i preseed/late_command")).unwrap();
+        assert!(late.contains("string log-output -t virtua in-target sh -c '"));
+        assert!(late.trim_end().ends_with("true'"));
     }
 
     #[test]
