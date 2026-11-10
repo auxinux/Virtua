@@ -51,7 +51,7 @@ async function cloudDesktop(page: Page, { modern = true } = {}) {
       });
     }
     if (path === "/api/desktop/resources" && method === "POST") return json({ ok: true });
-    if (path === "/api/desktop/quick-create") return json({ taskId: "t1", name: "Debian 13" });
+    if (path === "/api/desktop/quick-create") return json({ taskId: "t1", resourceId: "vm:debian-13", name: "Debian 13" }, 202);
     return json({ error: `unexpected ${method} ${path}` }, 404);
   });
   return posts;

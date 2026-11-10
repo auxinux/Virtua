@@ -715,7 +715,9 @@ export const virtuaClient = {
         body: { os, name: name || undefined, node: node || undefined },
       });
       updateTask(taskId, { status: "completed", progress: 100 });
-      return { id: result.resourceId ?? "", taskId: result.taskId, name: result.name };
+      // The server first downloads the installer: the VM appears only then.
+      // With a task to follow, the UI shows Tâches rather than an empty console.
+      return { id: result.taskId ? "" : result.resourceId ?? "", taskId: result.taskId, name: result.name };
     } catch (error) {
       updateTask(taskId, { status: "failed", progress: 100 });
       throw new Error(apiUnavailableMessage(error));
