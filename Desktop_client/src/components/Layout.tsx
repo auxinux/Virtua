@@ -33,6 +33,7 @@ const cloudNavItems = [
   { to: "/vms", labelKey: "nav.vm", icon: Monitor },
   { to: "/lxc", labelKey: "nav.lxc", icon: Container },
   { to: "/docker", labelKey: "nav.docker", icon: Boxes },
+  { to: "/disposable", labelKey: "nav.disposable", icon: FlaskConical },
   { to: "/tasks", labelKey: "nav.tasks", icon: CheckCircle2 },
   { to: "/settings", labelKey: "nav.settings", icon: Settings },
 ];

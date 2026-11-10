@@ -179,6 +179,14 @@ export interface DesktopResourceResponse {
   diskGiB?: number | string | null;
   tpm2?: boolean | null;
   secureBoot?: boolean | null;
+  /** Virtua 0.8.11+: hardware of the VM, floppy, disposable, quick create. */
+  machine?: string | null;
+  cpuModel?: string | null;
+  periodSpeed?: boolean | null;
+  diskBus?: string | null;
+  floppy?: string | null;
+  disposable?: { baseId: string; baseLabel: string; strict: boolean } | null;
+  autoInstall?: boolean | null;
   owner?: string | null;
   assignedUsers?: string[] | null;
   guestAgent?: {
@@ -223,6 +231,10 @@ export interface DesktopCreateOptionsResponse {
     network?: string;
     architecture?: VmArchitecture;
   };
+  /** Virtua 0.8.11+: hardware choices the server offers for this node. */
+  hardware?: { machines: string[]; cpus: string[]; diskBuses: string[]; networkModels: string[]; periodSpeed: boolean };
+  floppies?: Array<{ id: string; name: string; label: string }>;
+  features?: { quickCreate: boolean; disposable: boolean };
 }
 
 export interface DesktopConsoleTicketResponse {

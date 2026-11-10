@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { cpuOptions, legacyNetworkOptions, machineOptions, periodCpus } from "@/hardwareOptions";
+import { cpuOptions, diskBusLabels, labelled, legacyNetworkOptions, machineOptions, networkLabels, periodCpus } from "@/hardwareOptions";
 import { QuickCreatePanel } from "@/components/QuickCreatePanel";
 import { Boxes, Container, Loader2, Monitor, Plus, Play, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
@@ -155,6 +155,7 @@ function CreateResourceDialog({
     machine: "auto",
     cpuModel: "auto",
     periodSpeed: false,
+    floppyId: "",
     guestOs: "other",
     virtioDrivers: false,
     cpu: "2",
@@ -180,6 +181,17 @@ function CreateResourceDialog({
     () => Array.from(new Set(resources.map((resource) => resource.node))).map((node) => ({ id: node, name: node, label: node })),
     [resources],
   );
+  // Virtua 0.8.11+ servers announce the hardware choices they accept; older
+  // ones do not, and the Cloud form stays as it was.
+  const cloudHardware = usageMode === "local" ? undefined : options.hardware;
+  const showHardware = usageMode === "local" || Boolean(cloudHardware);
+  const machineChoices = cloudHardware ? machineOptions.filter((o) => cloudHardware.machines.includes(o.value)) : machineOptions;
+  const cpuChoices = cloudHardware ? labelled(cloudHardware.cpus, cpuOptions(form.architecture)) : cpuOptions(form.architecture);
+  const diskBusChoices = cloudHardware
+    ? labelled(cloudHardware.diskBuses, diskBusLabels)
+    : labelled(form.architecture === "arm64" ? ["nvme", "virtio"] : ["sata", "nvme", "virtio", "ide"], diskBusLabels);
+  const periodAvailable = form.architecture !== "arm64" && (usageMode === "local" || Boolean(cloudHardware?.periodSpeed));
+  const cloudFloppies = usageMode === "local" ? [] : options.floppies ?? [];
   const nodes = options.nodes?.length ? options.nodes : fallbackNodes;
   const images = options.images ?? [];
   const networks = options.networks ?? [];
@@ -279,10 +291,11 @@ function CreateResourceDialog({
         network: form.network.trim() || undefined,
         networkModel: form.type === "vm" ? form.networkModel : undefined,
         gpuModel: form.type === "vm" ? form.gpuModel : undefined,
-        diskBus: form.type === "vm" && usageMode === "local" ? form.diskBus : undefined,
-        machine: form.type === "vm" && usageMode === "local" ? form.machine : undefined,
-        cpuModel: form.type === "vm" && usageMode === "local" ? form.cpuModel : undefined,
-        periodSpeed: form.type === "vm" && usageMode === "local" && periodCpus.has(form.cpuModel) ? form.periodSpeed : undefined,
+        diskBus: form.type === "vm" && showHardware ? form.diskBus : undefined,
+        machine: form.type === "vm" && showHardware ? form.machine : undefined,
+        cpuModel: form.type === "vm" && showHardware ? form.cpuModel : undefined,
+        periodSpeed: form.type === "vm" && showHardware && periodAvailable && periodCpus.has(form.cpuModel) ? form.periodSpeed : undefined,
+        floppyId: form.type === "vm" && usageMode !== "local" && form.floppyId ? form.floppyId : undefined,
         guestOs: form.type === "vm" && usageMode === "local" ? form.guestOs : undefined,
         virtioDrivers: form.type === "vm" && usageMode === "local" ? form.virtioDrivers : undefined,
         cpu: Number(form.cpu),
@@ -356,14 +369,16 @@ function CreateResourceDialog({
           <button type="button" onClick={onClose} className="virtua-button">Fermer</button>
         </div>
 
-        {quickCreate && usageMode === "local" && form.type === "vm" ? (
+        {quickCreate && form.type === "vm" && (usageMode === "local" || options.features?.quickCreate) ? (
           <QuickCreatePanel
             quickCreate={quickCreate}
+            remote={usageMode !== "local"}
             onCreated={(resourceId) => {
               onCreated?.();
               onClose();
-              // Straight to the screen: the installation is running.
-              navigate(`/console/${encodeURIComponent(resourceId)}`);
+              // Straight to the screen when the VM exists already; a server
+              // that only returned a task is followed in Tâches.
+              navigate(resourceId ? `/console/${encodeURIComponent(resourceId)}` : "/tasks");
             }}
           />
         ) : null}
@@ -462,10 +477,14 @@ function CreateResourceDialog({
               <label className="space-y-1 text-xs text-virtua-muted">
                 Carte reseau
                 <select className="virtua-input w-full" value={form.networkModel} onChange={(event) => setField("networkModel", event.target.value)}>
-                  <option value="virtio">VirtIO</option>
-                  <option value="e1000">Intel e1000{form.architecture === "amd64" ? " - recommande AMD64" : ""}</option>
-                  {usageMode === "local" ? <option value="rtl8139">Realtek RTL8139</option> : null}
-                  {usageMode === "local" ? legacyNetworkOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>) : null}
+                  {cloudHardware ? labelled(cloudHardware.networkModels, networkLabels).map((option) => <option key={option.value} value={option.value}>{option.label}</option>) : (
+                    <>
+                      <option value="virtio">VirtIO</option>
+                      <option value="e1000">Intel e1000{form.architecture === "amd64" ? " - recommande AMD64" : ""}</option>
+                      {usageMode === "local" ? <option value="rtl8139">Realtek RTL8139</option> : null}
+                      {usageMode === "local" ? legacyNetworkOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>) : null}
+                    </>
+                  )}
                 </select>
               </label>
               <label className="space-y-1 text-xs text-virtua-muted">
@@ -478,38 +497,46 @@ function CreateResourceDialog({
                 </select>
               </label>
               {usageMode === "local" ? (
+                <label className="space-y-1 text-xs text-virtua-muted">
+                  Systeme invite
+                  <select className="virtua-input w-full" value={form.guestOs} onChange={(event) => setField("guestOs", event.target.value)}>
+                    <option value="other">Linux / autre</option>
+                    <option value="windows">Windows</option>
+                  </select>
+                </label>
+              ) : null}
+              {showHardware ? (
                 <>
-                  <label className="space-y-1 text-xs text-virtua-muted">
-                    Systeme invite
-                    <select className="virtua-input w-full" value={form.guestOs} onChange={(event) => setField("guestOs", event.target.value)}>
-                      <option value="other">Linux / autre</option>
-                      <option value="windows">Windows</option>
-                    </select>
-                  </label>
                   <label className="space-y-1 text-xs text-virtua-muted">
                     Bus disque
                     <select className="virtua-input w-full" value={form.diskBus} onChange={(event) => setField("diskBus", event.target.value)}>
-                      {form.architecture !== "arm64" ? <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option> : null}
-                      <option value="nvme">NVMe - vu par Windows sans pilote</option>
-                      <option value="virtio">VirtIO - rapide, pilotes requis sous Windows</option>
-                      {form.architecture !== "arm64" ? <option value="ide">IDE - DOS, Windows 9x/XP, vieux systèmes</option> : null}
+                      {diskBusChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </label>
-                  {form.architecture !== "arm64" ? (
+                  {form.architecture !== "arm64" && machineChoices.length > 0 ? (
                     <label className="space-y-1 text-xs text-virtua-muted">
                       Type de machine
                       <select className="virtua-input w-full" value={form.machine} onChange={(event) => setField("machine", event.target.value)}>
-                        {machineOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        {machineChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                       </select>
                     </label>
                   ) : null}
                   <label className="space-y-1 text-xs text-virtua-muted">
                     Modèle de CPU
                     <select className="virtua-input w-full" value={form.cpuModel} onChange={(event) => setField("cpuModel", event.target.value)}>
-                      {cpuOptions(form.architecture).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      {cpuChoices.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </label>
-                  {form.architecture !== "arm64" && periodCpus.has(form.cpuModel) ? (
+                  {cloudFloppies.length > 0 ? (
+                    <label className="space-y-1 text-xs text-virtua-muted">
+                      Disquette (lecteur A:)
+                      <select className="virtua-input w-full" value={form.floppyId} onChange={(event) => setField("floppyId", event.target.value)}>
+                        <option value="">Aucune</option>
+                        {cloudFloppies.map((floppy) => <option key={floppy.id} value={floppy.id}>{floppy.label || floppy.name}</option>)}
+                      </select>
+                    </label>
+                  ) : null}
+                  {periodAvailable && periodCpus.has(form.cpuModel) ? (
                     <label className="flex items-start gap-2 text-xs text-virtua-muted sm:col-span-2">
                       <input type="checkbox" className="mt-0.5" checked={form.periodSpeed} onChange={(event) => setField("periodSpeed", event.target.checked)} />
                       <span><span className="text-virtua-text">Vitesse d’époque</span> — la VM tourne à peu près à la vitesse de ce processeur (émulé, sans accélération matérielle) : les jeux DOS ne vont plus trop vite.</span>

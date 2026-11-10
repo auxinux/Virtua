@@ -45,9 +45,12 @@ function formatBytes(bytes: number) {
 export function QuickCreatePanel({
   quickCreate,
   onCreated,
+  remote = false,
 }: {
   quickCreate: (os: QuickOs, name?: string) => Promise<{ id: string }>;
   onCreated: (resourceId: string) => void;
+  /** Cloud: the server downloads and installs, nothing runs on this computer. */
+  remote?: boolean;
 }) {
   const [busy, setBusy] = useState<QuickOs | null>(null);
   const [names, setNames] = useState<Record<QuickOs, string>>({ windows11: "Windows 11", debian13: "Debian 13" });
@@ -89,7 +92,7 @@ export function QuickCreatePanel({
       <div className="mb-2 flex items-center gap-2">
         <Rocket className="h-4 w-4 text-virtua-accent" />
         <h3 className="text-sm font-semibold">Création rapide</h3>
-        <span className="text-xs text-virtua-muted">— téléchargement, configuration optimale et installation automatique · compte virtua / virtua</span>
+        <span className="text-xs text-virtua-muted">{remote ? "— le serveur Virtua télécharge, configure et installe · compte virtua / virtua" : "— téléchargement, configuration optimale et installation automatique · compte virtua / virtua"}</span>
       </div>
       <div className="grid gap-2 md:grid-cols-2">
         {offers.map((offer) => (
@@ -135,7 +138,7 @@ export function QuickCreatePanel({
               </div>
             </div>
           ) : null}
-          <p className="text-xs text-virtua-muted">Vous pouvez fermer cette boîte de dialogue : la création continue (gardez Virtua Desktop ouvert). Un téléchargement interrompu reprend où il s’était arrêté.</p>
+          <p className="text-xs text-virtua-muted">{remote ? "La demande part au serveur : suivez l’installation dans Tâches et dans la console de la VM." : "Vous pouvez fermer cette boîte de dialogue : la création continue (gardez Virtua Desktop ouvert). Un téléchargement interrompu reprend où il s’était arrêté."}</p>
         </div>
       ) : null}
       {error ? <p role="alert" className="mt-3 whitespace-pre-wrap rounded border border-virtua-red/50 bg-virtua-red/10 p-2 text-sm text-virtua-red">{error}</p> : null}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Download, FlaskConical, Loader2, Package, Play, RefreshCw, Shield, Trash2, Wrench } from "lucide-react";
-import { disposables, type BaseInfo, type DepotBase, type DisposableAction } from "@/api/disposable";
+import type { BaseInfo, DepotBase, DisposableAction, DisposableApi } from "@/api/disposable";
 import type { VirtuaResource } from "@/types";
 
 function formatSize(bytes?: number | null) {
@@ -18,7 +18,7 @@ function errorText(error: unknown) {
  * base, kept or thrown away afterwards. Windows bases are built on this
  * computer; Debian bases can also be downloaded from the AuxiNux depot.
  */
-export function DisposablePage({ resources, onChanged }: { resources: VirtuaResource[]; onChanged?: () => void }) {
+export function DisposablePage({ resources, api, onChanged }: { resources: VirtuaResource[]; api: DisposableApi; onChanged?: () => void }) {
   const navigate = useNavigate();
   const [bases, setBases] = useState<BaseInfo[] | null>(null);
   const [depot, setDepot] = useState<DepotBase[] | null>(null);
@@ -29,12 +29,12 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
 
   const load = useCallback(async () => {
     try {
-      setBases(await disposables.bases());
+      setBases(await api.bases());
     } catch (error) {
       setMessage({ text: errorText(error), error: true });
     }
-    disposables.depot().then(setDepot).catch(() => setDepot([]));
-  }, []);
+    if (api.depot) api.depot().then(setDepot).catch(() => setDepot([]));
+  }, [api]);
 
   useEffect(() => {
     void load();
@@ -58,7 +58,7 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
   };
 
   const launch = async (base: BaseInfo) => {
-    const vm = await run(`launch:${base.id}`, () => disposables.launch(base.id, strict, offline ? "isolated" : "user"));
+    const vm = await run(`launch:${base.id}`, () => api.launch(base.id, strict, offline ? "isolated" : "user"));
     if (vm && typeof vm === "object" && "id" in vm) navigate(`/console/${encodeURIComponent(String((vm as { id: string }).id))}`);
   };
 
@@ -109,7 +109,7 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
                   <p className="text-xs text-virtua-muted">{base.cpu} vCPU · {Math.round(base.memoryMib / 1024)} Go · {formatSize(base.size)}</p>
                 </div>
                 <p className="text-xs text-virtua-muted">
-                  {base.source === "depot" ? "Téléchargée du dépôt AuxiNux" : "Préparée sur cet ordinateur"}
+                  {base.source === "server" ? "Sur le serveur Virtua" : base.source === "depot" ? "Téléchargée du dépôt AuxiNux" : "Préparée sur cet ordinateur"}
                   {base.inUse ? ` · ${base.inUse} jetable(s) en cours` : ""}
                 </p>
                 <div className="flex flex-wrap gap-2">
@@ -117,15 +117,15 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
                     {busy === `launch:${base.id}` ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
                     Lancer une jetable
                   </button>
-                  <button className="virtua-button" disabled={!!busy} title="Fichier .vmtmp dans le dossier des exports" onClick={() => void run(`export:${base.id}`, () => disposables.exportBase(base.id).then((path) => setMessage({ text: `Exportée : ${path}`, error: false })))}>
+                  {api.exportBase ? <button className="virtua-button" disabled={!!busy} title="Fichier .vmtmp dans le dossier des exports" onClick={() => void run(`export:${base.id}`, () => api.exportBase!(base.id).then((path) => setMessage({ text: `Exportée : ${path}`, error: false })))}>
                     {busy === `export:${base.id}` ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Package className="mr-2 h-4 w-4" />}
                     Exporter .vmtmp
-                  </button>
-                  <button className="virtua-button" disabled={!!busy || base.inUse > 0} onClick={() => {
-                    if (window.confirm(`Supprimer la base « ${base.label} » ?`)) void run(`delete:${base.id}`, () => disposables.deleteBase(base.id), "Base supprimée.");
+                  </button> : null}
+                  {api.deleteBase ? <button className="virtua-button" disabled={!!busy || base.inUse > 0} onClick={() => {
+                    if (window.confirm(`Supprimer la base « ${base.label} » ?`)) void run(`delete:${base.id}`, () => api.deleteBase!(base.id), "Base supprimée.");
                   }}>
                     <Trash2 className="mr-2 h-4 w-4" />Supprimer
-                  </button>
+                  </button> : null}
                 </div>
               </div>
             ))}
@@ -133,6 +133,8 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
         )}
       </section>
 
+      {api.remoteNote ? <p className="rounded border border-virtua-border bg-virtua-panel p-4 text-sm text-virtua-muted">{api.remoteNote}</p> : null}
+      {api.prepare ? (
       <section className="grid gap-4 lg:grid-cols-2">
         <div className="rounded border border-virtua-border bg-virtua-panel p-4">
           <h2 className="mb-1 flex items-center gap-2 text-sm font-semibold"><Wrench className="h-4 w-4 text-virtua-accent" />Préparer une base ici</h2>
@@ -141,7 +143,7 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
           </p>
           <div className="flex flex-wrap gap-2">
             {(["windows11", "debian13"] as const).map((os) => (
-              <button key={os} className="virtua-button" disabled={!!busy} onClick={() => void run(`prepare:${os}`, () => disposables.prepare(os), "Installation de la base lancée : elle apparaîtra ici une fois terminée (la VM « Base jetable … » s’éteint toute seule).")}>
+              <button key={os} className="virtua-button" disabled={!!busy} onClick={() => void run(`prepare:${os}`, () => api.prepare!(os), "Installation de la base lancée : elle apparaîtra ici une fois terminée (la VM « Base jetable … » s’éteint toute seule).")}>
                 {busy === `prepare:${os}` ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 {os === "windows11" ? "Base Windows 11" : "Base Debian 13"}
               </button>
@@ -162,7 +164,7 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
               {depot.map((item) => (
                 <div key={item.url} className="flex items-center justify-between gap-2 text-sm">
                   <span className="truncate">{item.name} <span className="text-xs text-virtua-muted">{formatSize(item.size)}</span></span>
-                  <button className="virtua-button shrink-0" disabled={!!busy} onClick={() => void run(`download:${item.name}`, () => disposables.download(item), "Base téléchargée et prête.")}>
+                  <button className="virtua-button shrink-0" disabled={!!busy} onClick={() => void run(`download:${item.name}`, () => api.download!(item), "Base téléchargée et prête.")}>
                     {busy === `download:${item.name}` ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
                     {localNames.has(item.name) ? "Retélécharger" : "Télécharger"}
                   </button>
@@ -172,6 +174,7 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
           )}
         </div>
       </section>
+      ) : null}
 
       <section className="rounded border border-virtua-border bg-virtua-panel p-4">
         <h2 className="mb-3 text-sm font-semibold">Jetables existantes</h2>
@@ -180,7 +183,7 @@ export function DisposablePage({ resources, onChanged }: { resources: VirtuaReso
         ) : (
           <div className="space-y-2">
             {running.map((vm) => (
-              <DisposableRow key={vm.id} vm={vm} busy={busy} onAct={(action) => void run(`${action}:${vm.id}`, () => disposables.act(vm.id, action), actionDone[action])} onOpen={() => navigate(`/console/${encodeURIComponent(vm.id)}`)} />
+              <DisposableRow key={vm.id} vm={vm} busy={busy} onAct={(action) => void run(`${action}:${vm.id}`, () => api.act(vm.id, action), actionDone[action])} onOpen={() => navigate(`/console/${encodeURIComponent(vm.id)}`)} />
             ))}
           </div>
         )}

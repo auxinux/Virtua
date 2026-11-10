@@ -50,10 +50,12 @@ export type CreateResourcePayload = {
   gpuModel?: string;
   /** Local mode only: virtio (fast), sata or nvme (seen by OS installers). */
   diskBus?: string;
-  /** Local mode only: x86 chipset (`auto`, `q35`, `pc`) and QEMU CPU model. */
+  /** x86 chipset (`auto`, `q35`, `pc`) and QEMU CPU model (local, and Virtua 0.8.11+ servers). */
   machine?: string;
   cpuModel?: string;
   periodSpeed?: boolean;
+  /** Cloud: floppy image of the server library (create-options `floppies`). */
+  floppyId?: string;
   /** Local mode only: `windows` or `other`. */
   guestOs?: string;
   /** Local mode only: mount virtio-win.iso as a second CD-ROM (downloaded once). */
@@ -249,6 +251,12 @@ function mapResource(resource: DesktopResourceResponse): VirtuaResource {
     image: textFrom(resource.image ?? undefined) ?? (resource.type === "vm" ? "VM console" : resource.type === "lxc" ? "LXC shell" : "Docker shell"),
     tpm2: resource.tpm2 ?? undefined,
     secureBoot: resource.secureBoot ?? undefined,
+    machine: resource.machine ?? undefined,
+    cpuModel: resource.cpuModel ?? undefined,
+    periodSpeed: resource.periodSpeed ?? undefined,
+    diskBus: resource.diskBus ?? undefined,
+    floppyImage: resource.floppy ?? undefined,
+    disposable: resource.disposable ?? undefined,
     owner: textFrom(resource.owner ?? undefined),
     assignedUsers: resource.assignedUsers ?? undefined,
     guestAgent: guestAgentFrom(resource),
@@ -682,7 +690,7 @@ export const virtuaClient = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; tpm2?: boolean; secureBoot?: boolean; machine?: string; cpuModel?: string; periodSpeed?: boolean; floppyId?: string }) {
     const taskId = pushTask({ label: "Modification machine", target: resourceId, status: "running", progress: 20 });
     try {
       const result = await request<{ ok: boolean; resource?: DesktopResourceResponse }>(`/api/desktop/resources/${encodeURIComponent(resourceId)}`, {
@@ -695,6 +703,36 @@ export const virtuaClient = {
       updateTask(taskId, { status: "failed", progress: 100 });
       throw new Error(apiUnavailableMessage(error));
     }
+  },
+
+  /** Quick create on the server (Virtua 0.8.11+): Windows 11 or Debian 13, unattended. */
+  async quickCreate(os: "windows11" | "debian13", name?: string, node?: string) {
+    const label = os === "windows11" ? "Windows 11" : "Debian 13";
+    const taskId = pushTask({ label: `Création rapide ${label}`, target: name || label, status: "running", progress: 10 });
+    try {
+      const result = await request<{ taskId?: string; resourceId?: string; name: string }>("/api/desktop/quick-create", {
+        method: "POST",
+        body: { os, name: name || undefined, node: node || undefined },
+      });
+      updateTask(taskId, { status: "completed", progress: 100 });
+      return { id: result.resourceId ?? "", taskId: result.taskId, name: result.name };
+    } catch (error) {
+      updateTask(taskId, { status: "failed", progress: 100 });
+      throw new Error(apiUnavailableMessage(error));
+    }
+  },
+
+  disposable: {
+    bases: () => request<Array<{ id: string; label: string; os: string; architecture: string; cpu: number; memoryMib: number; diskGib: number; size: number; inUse: number }>>("/api/desktop/disposable/bases"),
+    async launch(baseId: string, strict: boolean, network: "user" | "isolated") {
+      const result = await request<DesktopResourceResponse & { resourceId?: string }>("/api/desktop/disposable/launch", {
+        method: "POST",
+        body: { baseId, strict, network },
+      });
+      return { id: result.id ?? result.resourceId ?? "" };
+    },
+    act: (resourceId: string, action: "discard" | "reset" | "keep" | "convert") =>
+      request<unknown>(`/api/desktop/resources/${encodeURIComponent(resourceId)}/disposable/${action}`, { method: "POST" }),
   },
 
   async deleteResource(resourceId: string) {

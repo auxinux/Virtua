@@ -71,6 +71,8 @@ type UpdateResourcePayload = {
   image?: string;
   driverImage?: string;
   floppyImage?: string;
+  /** Cloud: floppy image of the server library ("" ejects). */
+  floppyId?: string;
   guestOs?: string;
   windowsSetupBypass?: boolean;
   cpu?: number;
@@ -129,6 +131,8 @@ export function ResourceDetailPage({
     machine: resource?.machine ?? "auto",
     cpuModel: resource?.cpuModel ?? "auto",
     periodSpeed: Boolean(resource?.periodSpeed),
+    // null = untouched: an unchanged floppy must not be sent (it would eject it).
+    floppyId: null as string | null,
     tpm2: Boolean(resource?.tpm2),
     secureBoot: Boolean(resource?.secureBoot),
   });
@@ -140,6 +144,15 @@ export function ResourceDetailPage({
   const [deleteDisks, setDeleteDisks] = useState(false);
   const [localIsoFiles, setLocalIsoFiles] = useState<LocalStorageFile[]>([]);
   const [localFloppies, setLocalFloppies] = useState<LocalStorageFile[]>([]);
+  const [cloudFloppies, setCloudFloppies] = useState<Array<{ id: string; name: string; label: string }>>([]);
+  useEffect(() => {
+    if (!resource || resource.source === "local" || resource.kind !== "vm" || resource.machine === undefined) return;
+    let current = true;
+    void virtuaClient.listCreateOptions("vm").then((options) => {
+      if (current) setCloudFloppies(options.floppies ?? []);
+    }).catch(() => undefined);
+    return () => { current = false; };
+  }, [resource?.id, resource?.source, resource?.kind, resource?.machine]);
   const [isDownloadingDrivers, setDownloadingDrivers] = useState(false);
   const [snapshots, setSnapshots] = useState<LocalSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
@@ -165,6 +178,8 @@ export function ResourceDetailPage({
       machine: resource.machine ?? "auto",
       cpuModel: resource.cpuModel ?? "auto",
       periodSpeed: Boolean(resource.periodSpeed),
+      // null = untouched: an unchanged floppy must not be sent (it would eject it).
+    floppyId: null as string | null,
       tpm2: Boolean(resource.tpm2),
       secureBoot: Boolean(resource.secureBoot),
     });
@@ -220,6 +235,10 @@ export function ResourceDetailPage({
   const canModify = user?.role === "ADMIN" || Boolean(resource.permissions.canModify);
   const canDelete = user?.role === "ADMIN" || Boolean(resource.permissions.canDelete);
   const isLocal = resource.source === "local";
+  // Virtua 0.8.11+ servers report the hardware of their VMs and accept
+  // changes to it; older ones send no `machine` and nothing is shown.
+  const cloudHardware = !isLocal && resource.kind === "vm" && resource.machine !== undefined;
+  const cloudFloppyId = cloudFloppies.find((floppy) => floppy.name === resource.floppyImage)?.id ?? "";
   const canSnapshot = Boolean(resource.permissions.canSnapshot && createSnapshot && resource.kind !== "docker");
   const canManageSnapshots = Boolean(canSnapshot && listSnapshots && deleteSnapshot && rollbackSnapshot);
   const snapshotsAllowedNow = !isLocal || isStoppedState(resource.state);
@@ -251,6 +270,12 @@ export function ResourceDetailPage({
       if (isLocal && form.machine !== (resource.machine ?? "auto")) payload.machine = form.machine;
       if (isLocal && form.cpuModel !== (resource.cpuModel ?? "auto")) payload.cpuModel = form.cpuModel;
       if (isLocal && form.periodSpeed !== Boolean(resource.periodSpeed)) payload.periodSpeed = form.periodSpeed;
+      if (cloudHardware) {
+        if (form.machine !== (resource.machine ?? "auto")) payload.machine = form.machine;
+        if (form.cpuModel !== (resource.cpuModel ?? "auto")) payload.cpuModel = form.cpuModel;
+        if (form.periodSpeed !== Boolean(resource.periodSpeed)) payload.periodSpeed = form.periodSpeed;
+        if (form.floppyId !== null && form.floppyId !== cloudFloppyId) payload.floppyId = form.floppyId;
+      }
       if (form.tpm2 !== Boolean(resource.tpm2)) payload.tpm2 = form.tpm2;
       if (form.secureBoot !== Boolean(resource.secureBoot)) payload.secureBoot = form.secureBoot;
 
@@ -531,6 +556,39 @@ export function ResourceDetailPage({
                 </div>
                 <p className="text-xs text-virtua-muted">Image .img/.ima/.vfd de 2,88 Mo au plus. Sans ISO, la VM démarre sur la disquette (BIOS uniquement : un micrologiciel UEFI ne démarre pas sur une disquette). Prise en compte au prochain démarrage.</p>
               </div>
+            ) : null}
+            {cloudHardware ? (
+              <>
+                {resource.architecture !== "arm64" ? (
+                  <label className="space-y-1 text-xs text-virtua-muted">
+                    Type de machine
+                    <select className="virtua-input w-full" disabled={!canModify} value={form.machine} onChange={(event) => setForm((current) => ({ ...current, machine: event.target.value }))}>
+                      {machineOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+                <label className="space-y-1 text-xs text-virtua-muted">
+                  Modèle de CPU
+                  <select className="virtua-input w-full" disabled={!canModify} value={form.cpuModel} onChange={(event) => setForm((current) => ({ ...current, cpuModel: event.target.value }))}>
+                    {cpuOptions(resource.architecture).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                </label>
+                {resource.architecture !== "arm64" && periodCpus.has(form.cpuModel) ? (
+                  <label className="flex items-start gap-2 text-xs text-virtua-muted">
+                    <input type="checkbox" className="mt-0.5" disabled={!canModify} checked={form.periodSpeed} onChange={(event) => setForm((current) => ({ ...current, periodSpeed: event.target.checked }))} />
+                    <span><span className="text-virtua-text">Vitesse d’époque</span> — à peu près la vitesse de ce processeur (émulé). Au prochain démarrage.</span>
+                  </label>
+                ) : null}
+                {cloudFloppies.length > 0 && resource.architecture !== "arm64" ? (
+                  <label className="space-y-1 text-xs text-virtua-muted">
+                    Disquette (lecteur A:) — actuelle : {resource.floppyImage ?? "aucune"}
+                    <select className="virtua-input w-full" disabled={!canModify} value={form.floppyId ?? cloudFloppyId} onChange={(event) => setForm((current) => ({ ...current, floppyId: event.target.value }))}>
+                      <option value="">Aucune (éjecter)</option>
+                      {cloudFloppies.map((floppy) => <option key={floppy.id} value={floppy.id}>{floppy.label || floppy.name}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+              </>
             ) : null}
             {resource.source === "local" && resource.kind === "vm" ? null : (
               <label className="space-y-1 text-xs text-virtua-muted">

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FlaskConical, Loader2 } from "lucide-react";
-import { disposables, type DisposableAction } from "@/api/disposable";
+import type { DisposableAction } from "@/api/disposable";
 import type { VirtuaResource } from "@/types";
 
 /**
@@ -8,7 +8,7 @@ import type { VirtuaResource } from "@/types";
  * over from its base, keep it as is (to start it again later) or convert it
  * into an ordinary VM.
  */
-export function DisposableStopDialog({ resources, onChanged }: { resources: VirtuaResource[]; onChanged: () => void }) {
+export function DisposableStopDialog({ resources, act: runAction, onChanged }: { resources: VirtuaResource[]; act: (id: string, action: DisposableAction) => Promise<unknown>; onChanged: () => void }) {
   const previous = useRef<Map<string, string>>(new Map());
   const [queue, setQueue] = useState<VirtuaResource[]>([]);
   const [busy, setBusy] = useState<DisposableAction | null>(null);
@@ -32,7 +32,7 @@ export function DisposableStopDialog({ resources, onChanged }: { resources: Virt
     setBusy(action);
     setError(null);
     try {
-      await disposables.act(vm.id, action);
+      await runAction(vm.id, action);
       setQueue((current) => current.slice(1));
       onChanged();
     } catch (err) {

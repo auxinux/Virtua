@@ -50,3 +50,27 @@ export const legacyNetworkOptions = [
 
 /** CPUs that can run at the speed of their time ("Vitesse d'époque"). */
 export const periodCpus = new Set(["286", "386", "486", "pentium", "pentium2", "pentium3", "pentium4"]);
+
+const diskBusLabels: Record<string, string> = {
+  virtio: "VirtIO - rapide, pilotes requis sous Windows",
+  sata: "SATA / AHCI - compatible avec tous les installeurs",
+  nvme: "NVMe - vu par Windows sans pilote",
+  ide: "IDE - DOS, Windows 9x/XP, vieux systèmes",
+  scsi: "SCSI (virtio-scsi)",
+};
+
+const networkLabels: Record<string, string> = {
+  virtio: "VirtIO",
+  e1000: "Intel e1000",
+  rtl8139: "Realtek RTL8139",
+  ne2k_pci: "NE2000 (PCI) — DOS, Windows 3.x/9x",
+  pcnet: "AMD PCnet — Windows 9x/NT, vieux Linux",
+};
+
+/** Options of a list the server sent (`ids`), labelled like local mode; unknown ids shown as is. */
+export function labelled(ids: string[], known: Array<{ value: string; label: string }> | Record<string, string>) {
+  const lookup = Array.isArray(known) ? Object.fromEntries(known.map((o) => [o.value, o.label])) : known;
+  return ids.map((value) => ({ value, label: lookup[value] ?? value }));
+}
+
+export { diskBusLabels, networkLabels };
