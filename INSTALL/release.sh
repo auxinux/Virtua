@@ -29,8 +29,8 @@ MODE="node"
 VERSION=""
 BUILD_DONE=0
 
-node_ver="0.8.9"
-vdm_ver="0.8.9"
+node_ver="0.8.10"
+vdm_ver="0.8.10"
 
 show_help() {
     cat <<'EOF'

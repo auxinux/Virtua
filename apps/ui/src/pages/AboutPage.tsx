@@ -12,6 +12,22 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.10",
+      items: fr
+        ? [
+            "Nouveau : disquettes virtuelles (.img, .ima, .vfd, .flp jusqu'à 2,88 Mo). Elles ont leur onglet « Floppy » dans le stockage, à côté des ISO : envoi, import par URL, suppression.",
+            "Lecteur A: sur les VM : choix d'une disquette à la création et option de démarrage « Disquette » ; dans l'onglet Matériel, Insérer / Éjecter / Retirer le lecteur. Si la VM tourne et a déjà un lecteur A:, la disquette se change à chaud ; sinon le lecteur apparaît au prochain arrêt/démarrage complet.",
+            "Les disquettes sont refusées clairement sur ARM (pas de contrôleur de disquette) et le démarrage sur disquette en UEFI (le micrologiciel UEFI ne sait pas démarrer une disquette).",
+            "VDM : disquettes dans la bibliothèque, à la création des VM et dans le panneau matériel, sur tous les nœuds.",
+          ]
+        : [
+            "New: virtual floppy disks (.img, .ima, .vfd, .flp up to 2.88 MB). They have their own \"Floppy\" tab in storage, next to ISOs: upload, URL import, delete.",
+            "Drive A: on VMs: pick a floppy at creation and a \"Floppy\" boot option; on the Hardware tab, Insert / Eject / Remove drive. A running VM that already has a drive A: swaps floppies live; otherwise the drive appears after the next full stop/start.",
+            "Floppies are clearly refused on ARM (no floppy controller), and so is booting from a floppy under UEFI (UEFI firmware cannot boot a floppy).",
+            "VDM: floppies in the library, at VM creation and in the hardware panel, on every node.",
+          ],
+    },
+    {
       v: "0.8.9",
       items: fr
         ? [
