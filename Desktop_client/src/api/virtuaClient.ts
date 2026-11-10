@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { secureStore } from "@/api/secureStore";
 import type {
@@ -256,20 +257,52 @@ function mapResource(resource: DesktopResourceResponse): VirtuaResource {
   };
 }
 
+type ServerProbe = { reachable: boolean; speaks?: "http" | "https" | null; problem?: string | null };
+
+/** Same URL with the other scheme (http ↔ https), port and path kept. */
+export function withScheme(url: string, scheme: "http" | "https") {
+  const next = new URL(url);
+  const port = next.port;
+  next.protocol = `${scheme}:`;
+  next.port = port;
+  return next.toString();
+}
+
 async function nativeFetch(url: string, init: RequestInit = {}) {
   if (isTauri()) {
+    const send = (target: string) => tauriFetch(target, { ...init, connectTimeout: 15_000, maxRedirections: 5 });
     try {
-      return await tauriFetch(url, {
-        ...init,
-        connectTimeout: 15_000,
-        maxRedirections: 5,
-      });
+      return await send(url);
     } catch (error) {
-      // The Tauri HTTP plugin rejects with a bare string (connection refused,
-      // TLS, timeout). Callers only kept Error messages, so the UI showed a
-      // useless "Action impossible" exactly when the server was unreachable.
+      // The Tauri HTTP plugin rejects with a bare "error sending request for
+      // url (…)" for every network failure. Ask the backend why — refused
+      // port, unreachable host, macOS local-network permission, wrong scheme.
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Serveur Virtua injoignable (${new URL(url).host}) : ${detail}`);
+      const probe = await invoke<ServerProbe>("desktop_probe_server", { endpoint: new URL(url).origin }).catch(() => null);
+      const wanted = new URL(url).protocol.replace(":", "");
+      if (probe?.reachable && probe.speaks && probe.speaks !== wanted) {
+        // http:// typed for an HTTPS port (or the reverse): retry and keep
+        // the address that works.
+        const fixed = withScheme(url, probe.speaks);
+        let response: Response;
+        try {
+          response = await send(fixed);
+        } catch (retryError) {
+          const why = retryError instanceof Error ? retryError.message : String(retryError);
+          throw new Error(
+            probe.speaks === "https"
+              ? `Le serveur ${new URL(url).host} parle HTTPS, mais son certificat est refusé (certificat auto-signé ?) : ${why}`
+              : `Serveur Virtua injoignable (${new URL(url).host}) : ${why}`,
+          );
+        }
+        const origin = new URL(fixed).origin;
+        if (baseUrl && new URL(normalizeEndpoint(baseUrl)).host === new URL(origin).host) {
+          baseUrl = origin;
+          secureStore.setEndpoint(origin);
+        }
+        return response;
+      }
+      throw new Error(`Serveur Virtua injoignable (${new URL(url).host}) : ${probe?.problem ?? detail}`);
     }
   }
   const requestUrl = import.meta.env.DEV ? `/__virtua_proxy?url=${encodeURIComponent(url)}` : url;

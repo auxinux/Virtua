@@ -4,6 +4,7 @@ mod disposable;
 mod containers;
 mod docker;
 mod engines;
+mod netprobe;
 mod firmware;
 use firmware::UefiFirmware;
 mod platform;
@@ -4535,6 +4536,7 @@ pub fn run() {
             clear_desktop_setting,
             runtime_platform,
             log_ui_error,
+            netprobe::desktop_probe_server,
             appearance::desktop_appearance,
             local_host_metrics,
             local_qemu_diagnostics,

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS 15+ blocks local network access (a Virtua node on 192.168.x.x)
+       unless the app declares why it needs it; without this key the
+       permission prompt never even appears. Merged into the bundle by Tauri. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Virtua Desktop se connecte aux nœuds Virtua et au VDM de votre réseau local.</string>
+</dict>
+</plist>
