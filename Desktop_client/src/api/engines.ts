@@ -8,4 +8,6 @@ export const engines = {
   prepare: (engine: EngineId) => invoke<EngineOverview>("local_prepare_engine", { engine }),
   stopLxc: () => invoke<void>("local_stop_lxc_vm"),
   lxcLogs: () => invoke<string>("local_lxc_logs"),
+  /** "I already have QEMU": a folder (portable build, installed by IT…) searched first. */
+  setQemuDir: (path: string) => invoke<EngineOverview>("local_set_qemu_dir", { path }),
 };

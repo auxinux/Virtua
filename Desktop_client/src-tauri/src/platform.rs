@@ -25,10 +25,43 @@ pub fn data_dir() -> Result<PathBuf, String> {
 /// PATH first, then the well-known install roots of every supported OS —
 /// a freshly installed QEMU/Docker is usable without restarting the session,
 /// which is exactly the case right after the in-app setup runs.
+fn tool_dirs_file() -> Option<PathBuf> {
+    data_dir().ok().map(|dir| dir.join("Local").join("tool-dirs.json"))
+}
+
+/// Folders the user pointed Virtua to ("I already have QEMU"), searched first.
+pub fn custom_tool_dirs() -> Vec<PathBuf> {
+    tool_dirs_file()
+        .and_then(|file| fs::read_to_string(file).ok())
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect()
+}
+
+pub fn add_tool_dir(dir: &Path) -> Result<(), String> {
+    let file = tool_dirs_file().ok_or("Dossier de données introuvable")?;
+    let mut dirs: Vec<String> = custom_tool_dirs().iter().map(|d| d.to_string_lossy().to_string()).collect();
+    let dir = dir.to_string_lossy().to_string();
+    if !dirs.contains(&dir) {
+        dirs.insert(0, dir);
+    }
+    if let Some(parent) = file.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&file, serde_json::to_string_pretty(&dirs).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    forget_caches();
+    Ok(())
+}
+
 fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = env::var_os("PATH")
-        .map(|p| env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = custom_tool_dirs();
+    dirs.extend(
+        env::var_os("PATH")
+            .map(|p| env::split_paths(&p).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
 
     if cfg!(windows) {
         for key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {

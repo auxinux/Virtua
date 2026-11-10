@@ -326,7 +326,21 @@ pub fn install_qemu(app: &tauri::AppHandle) -> Result<(), String> {
     );
     match env::consts::OS {
         "macos" => mac_script(&format!("{}\nbrew install qemu swtpm", brew_prefix()))?,
-        "windows" => winget("SoftwareFreedomConservancy.QEMU")?,
+        // winget first; blocked or absent (policy, no App Installer — error
+        // 0x80070001 …): the official installer, downloaded and checked.
+        "windows" => {
+            let via_winget = if find_binary("winget").is_some() {
+                winget("SoftwareFreedomConservancy.QEMU")
+            } else {
+                Err("winget absent".to_string())
+            };
+            if let Err(winget_error) = via_winget {
+                log_line(&format!("QEMU via winget impossible, installateur direct : {winget_error}"));
+                wininstall::install_qemu_direct(app).map_err(|direct| {
+                    format!("{direct}\n\nSi QEMU est déjà présent sur cet ordinateur (installé par l’informatique, version portable), utilisez « J’ai déjà QEMU : choisir son dossier ».")
+                })?;
+            }
+        }
         "linux" => linux_script(&format!("{}{}", if find_binary("apt-get").is_some() {
             "apt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y qemu-system-x86 qemu-system-arm qemu-utils qemu-efi-aarch64 ovmf swtpm"
         } else if find_binary("dnf").is_some() {
@@ -382,7 +396,15 @@ fn install_docker(app: &tauri::AppHandle) -> Result<(), String> {
         }
         "windows" => {
             if find_binary("docker").is_none() {
-                winget("Docker.DockerDesktop")?;
+                let via_winget = if find_binary("winget").is_some() {
+                    winget("Docker.DockerDesktop")
+                } else {
+                    Err("winget absent".to_string())
+                };
+                if let Err(winget_error) = via_winget {
+                    log_line(&format!("Docker via winget impossible, installateur direct : {winget_error}"));
+                    wininstall::install_docker_direct(app)?;
+                }
             }
             let path = PathBuf::from(
                 env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into()),

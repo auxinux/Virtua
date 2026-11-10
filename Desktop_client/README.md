@@ -104,7 +104,8 @@ ou le service de secrets Linux. Ne pas exécuter l’interface entière en root.
 Les installations Linux peuvent nécessiter une reconnexion de session pour
 activer les groupes `docker` et `incus-admin`.
 
-Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.3.6](docs/RELEASE-0.3.6.md),
+Voir [BUILD_DESKTOP.md](BUILD_DESKTOP.md), [les notes 0.3.7](docs/RELEASE-0.3.7.md),
+[0.3.6](docs/RELEASE-0.3.6.md),
 [0.3.5](docs/RELEASE-0.3.5.md), [0.3.4](docs/RELEASE-0.3.4.md),
 [0.3.3](docs/RELEASE-0.3.3.md),
 [0.3.2](docs/RELEASE-0.3.2.md), [0.3.1](docs/RELEASE-0.3.1.md),

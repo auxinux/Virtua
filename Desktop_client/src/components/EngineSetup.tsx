@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { CheckCircle2, Download, Loader2, RefreshCw, Server } from "lucide-react";
 import { engines, type EngineId, type EngineOverview } from "@/api/engines";
 
@@ -41,6 +42,21 @@ export function EngineSetup({ requiredOnly = false, onReady }: { requiredOnly?: 
       try { setOverview(await engines.status()); } catch { /* Preserve the original setup error. */ }
     } finally { setBusy(null); }
   };
+  const chooseQemuDir = async () => {
+    setError("");
+    try {
+      const selected = await open({ directory: true, multiple: false, title: "Dossier de QEMU (contenant qemu-img et qemu-system-x86_64)" });
+      if (typeof selected !== "string") return;
+      setBusy("qemu");
+      const next = await engines.setQemuDir(selected);
+      setOverview(next);
+      setMessage(next.engines.find((e) => e.id === "qemu")?.state === "ready" ? "QEMU trouvé : prêt à utiliser." : "Dossier enregistré, mais QEMU ne répond pas encore : consultez le diagnostic.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
   const stop = async () => {
     if (!window.confirm("Arrêter la VM Debian et tous les conteneurs LXC qu’elle héberge ?")) return;
     setBusy("stop"); setError(""); setMessage("Arrêt de Debian et de ses conteneurs…");
@@ -67,6 +83,7 @@ export function EngineSetup({ requiredOnly = false, onReady }: { requiredOnly?: 
       {engine.id === "docker" && engine.state !== "ready" && <p className="mt-2 text-xs text-virtua-muted">L’installation existante est réutilisée. Docker Desktop peut demander de terminer son assistant ou de redémarrer Windows.</p>}
       <div className="mt-3 flex flex-wrap gap-2">
         {engine.state !== "ready" ? <button disabled={locked} onClick={() => void prepare(engine.id)} className="virtua-button-primary"><Download className="mr-2 h-4 w-4" />{busy === engine.id ? "Préparation…" : engine.state === "missing" ? "Installer et préparer" : "Démarrer / préparer"}</button> : <span className="flex items-center gap-2 text-sm text-virtua-green"><CheckCircle2 className="h-4 w-4" />Prêt à utiliser</span>}
+        {engine.id === "qemu" && engine.state !== "ready" && <button disabled={locked} onClick={() => void chooseQemuDir()} className="virtua-button" title="QEMU installé par l’informatique, version portable… : Virtua le cherchera d’abord dans ce dossier.">J’ai déjà QEMU : choisir son dossier</button>}
         {engine.id === "lxc" && overview.os !== "linux" && engine.state !== "missing" && <>
           <button disabled={locked} onClick={() => void stop()} className="virtua-button">Arrêter Debian</button>
           <button disabled={locked} onClick={() => void engines.lxcLogs().then(setLogs).catch(e => setError(String(e)))} className="virtua-button">Journaux Debian</button>

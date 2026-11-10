@@ -17,6 +17,8 @@ async function desktop(page: Page, os = "macos", ready = false) {
           case "local_qemu_diagnostics": return { os, hostArch: os === "macos" ? "arm64" : "amd64", accelerator: "hvf", ready: qemu, qemuImg: { available: qemu }, qemuSystemArm64: { available: qemu }, qemuSystemAmd64: { available: qemu }, homebrew: { available: true } };
           case "local_engine_status": return state();
           case "local_prepare_engine": if (args.engine === "qemu") { qemu = true; return state(); } throw "Installation annulée. Vous pouvez réessayer.";
+          case "plugin:dialog|open": return "C:\\Outils\\qemu";
+          case "local_set_qemu_dir": (window as any).qemuDir = args.path; qemu = true; return state();
           case "local_list_vms": case "local_list_containers": return [];
           case "local_host_metrics": return { totalCores: 8, totalMemoryGib: 16, virtualizationCores: 6, virtualizationMemoryGib: 8, cpuUsage: 10, memoryUsage: 20, storageUsage: 30, computerName: "Test Host" };
           case "local_load_storage_config": return { vmConfigDir: "/test/vms", diskDir: "/test/disks", isoDir: "/test/iso", snapshotDir: "/test/snapshots", exportDir: "/test/exports" };
@@ -69,4 +71,14 @@ test("optional setup failure remains recoverable and Linux does not offer a Debi
   await expect(page.getByRole("button", { name: "Installer et préparer" }).first()).toBeEnabled();
   await expect(page.getByRole("button", { name: "Arrêter Debian" })).toHaveCount(0);
   await page.screenshot({ path: "test-results/engines-linux.png", fullPage: true });
+});
+
+test("Windows without winget: an existing QEMU folder can be chosen", async ({ page }) => {
+  await desktop(page, "windows");
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Préparer cet ordinateur" })).toBeVisible();
+  await page.getByRole("button", { name: "J’ai déjà QEMU : choisir son dossier" }).click();
+  await expect(page.getByText("QEMU trouvé : prêt à utiliser.")).toBeVisible();
+  expect(await page.evaluate(() => (window as any).qemuDir)).toBe("C:\\Outils\\qemu");
+  await expect(page.getByRole("button", { name: "Ouvrir le mode local" })).toBeVisible();
 });

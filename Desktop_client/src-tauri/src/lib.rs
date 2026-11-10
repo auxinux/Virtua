@@ -10,6 +10,7 @@ use firmware::UefiFirmware;
 mod platform;
 mod quickcreate;
 mod unified;
+mod wininstall;
 
 const KEYCHAIN_SERVICE: &str = "ca.auxinux.virtua.desktop";
 const REFRESH_TOKEN_ACCOUNT: &str = "desktop-refresh-token";
@@ -4567,6 +4568,7 @@ pub fn run() {
             local_run_container_action,
             engines::local_engine_status,
             engines::local_prepare_engine,
+            wininstall::local_set_qemu_dir,
             companion::local_stop_lxc_vm,
             companion::local_lxc_logs,
             unified::local_unified_overview,
