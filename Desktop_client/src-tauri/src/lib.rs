@@ -357,6 +357,12 @@ struct LocalVm {
     /// Floppy image in drive A: (raw .img/.ima/.vfd).
     #[serde(default)]
     floppy_path: Option<String>,
+    /// x86 chipset: `auto` (q35), `q35` or `pc` (i440FX).
+    #[serde(default = "default_auto")]
+    machine: String,
+    /// QEMU CPU model, or `auto` (Virtua's choice for the accelerator).
+    #[serde(default = "default_auto")]
+    cpu_model: String,
     created_at: String,
     updated_at: String,
 }
@@ -379,6 +385,10 @@ struct LocalCreateVmPayload {
     disk_bus: Option<String>,
     tpm2: Option<bool>,
     secure_boot: Option<bool>,
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    cpu_model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +399,8 @@ struct LocalUpdateVmPayload {
     driver_image: Option<String>,
     /// Floppy image for drive A: ("" ejects it).
     floppy_image: Option<String>,
+    machine: Option<String>,
+    cpu_model: Option<String>,
     guest_os: Option<String>,
     windows_setup_bypass: Option<bool>,
     cpu: Option<u16>,
@@ -490,6 +502,10 @@ fn default_disk_bus() -> String {
     "virtio".to_string()
 }
 
+fn default_auto() -> String {
+    "auto".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -532,8 +548,11 @@ fn guess_guest_os(iso_path: Option<&str>) -> String {
 fn normalize_disk_bus(architecture: &str, value: Option<String>) -> String {
     match value.unwrap_or_else(default_disk_bus).as_str() {
         "nvme" => "nvme".to_string(),
+        // Real IDE (PIIX on i440FX, the ICH9 ports on q35): what DOS, Windows
+        // 9x/XP and old installers read without any driver.
+        "ide" if architecture != "arm64" => "ide".to_string(),
         // `virt` has no AHCI controller: an ARM64 SATA request becomes virtio.
-        "sata" | "ide" | "ahci" if architecture != "arm64" => "sata".to_string(),
+        "sata" | "ahci" if architecture != "arm64" => "sata".to_string(),
         _ => "virtio".to_string(),
     }
 }
@@ -568,6 +587,9 @@ fn normalize_network_model(value: Option<String>) -> String {
     match value.unwrap_or_else(default_network_model).as_str() {
         "e1000" => "e1000".to_string(),
         "rtl8139" => "rtl8139".to_string(),
+        // DOS packet drivers, Windows 3.x/9x: NE2000 and AMD PCnet.
+        "ne2k_pci" => "ne2k_pci".to_string(),
+        "pcnet" => "pcnet".to_string(),
         _ => "virtio".to_string(),
     }
 }
@@ -652,6 +674,14 @@ fn append_disk_args(
     tuning: &DiskTuning,
 ) {
     let options = tuning.drive_options();
+    if disk_bus == "ide" && architecture != "arm64" {
+        // Primary master: the CD-ROMs use IDE indexes 2 and 3.
+        command.arg("-drive").arg(format!(
+            "file={},if=ide,index=0,media=disk,format=qcow2,{}",
+            disk_path, options
+        ));
+        return;
+    }
     if disk_bus == "sata" || disk_bus == "nvme" {
         command.arg("-drive").arg(format!(
             "file={},if=none,id=virtua-disk0,format=qcow2,{}",
@@ -794,9 +824,17 @@ const FLOPPY_MAX_BYTES: u64 = 2_949_120;
 /// bridge); ARM64 `virt` has no ISA at all, so the image is a removable USB
 /// disk there. A floppy has no boot index: BIOS VMs boot it first only when
 /// no installer ISO is mounted (a DOS boot disk), otherwise it is just A:.
-fn append_floppy_args(command: &mut Command, architecture: &str, floppy: Option<&str>, iso: Option<&str>) -> Result<(), String> {
+fn append_floppy_args(command: &mut Command, architecture: &str, machine: &str, floppy: Option<&str>, iso: Option<&str>) -> Result<(), String> {
     let Some(path) = floppy.map(str::trim).filter(|p| !p.is_empty()) else { return Ok(()) };
     validate_qemu_path(path, "disquette")?;
+    if machine == "pc" && architecture != "arm64" {
+        // i440FX has its own floppy controller on the ISA bus.
+        command.arg("-drive").arg(format!("if=floppy,index=0,format=raw,file={path}"));
+        if iso.map(str::trim).filter(|p| !p.is_empty()).is_none() {
+            command.args(["-boot", "order=ac,menu=on"]);
+        }
+        return Ok(());
+    }
     command
         .arg("-drive")
         .arg(format!("if=none,id=virtua-fd0,format=raw,file={path}"));
@@ -875,6 +913,8 @@ fn append_network_args(
     let device = match effective_model.as_str() {
         "e1000" => "e1000,netdev=net0",
         "rtl8139" => "rtl8139,netdev=net0",
+        "ne2k_pci" => "ne2k_pci,netdev=net0",
+        "pcnet" => "pcnet,netdev=net0",
         // The virtio-win NetKVM driver binds to the PCI transport only. Linux
         // guests keep the MMIO device so their interface name does not move.
         _ if architecture == "arm64" && guest_os == "windows" => "virtio-net-pci,netdev=net0",
@@ -2309,6 +2349,8 @@ fn import_template_archive(
         autoinstall: None,
         disposable: None,
         floppy_path: None,
+        machine: default_auto(),
+        cpu_model: default_auto(),
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2816,6 +2858,8 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         autoinstall: None,
         disposable: None,
         floppy_path: None,
+        machine: platform::normalize_machine(&architecture, payload.machine.as_deref()),
+        cpu_model: platform::normalize_cpu_model(&architecture, payload.cpu_model.as_deref()),
         created_at: timestamp.clone(),
         updated_at: timestamp,
     };
@@ -2864,6 +2908,13 @@ fn local_update_vm_blocking(id: String, payload: LocalUpdateVmPayload) -> Result
     if let Some(image) = payload.driver_image {
         let image = image.trim().to_string();
         vm.driver_iso_path = if image.is_empty() { None } else { Some(image) };
+    }
+
+    if let Some(machine) = payload.machine {
+        vm.machine = platform::normalize_machine(&vm.architecture, Some(machine.trim()));
+    }
+    if let Some(cpu) = payload.cpu_model {
+        vm.cpu_model = platform::normalize_cpu_model(&vm.architecture, Some(cpu.trim()));
     }
 
     if let Some(image) = payload.floppy_image {
@@ -3516,16 +3567,21 @@ fn build_qemu_command(
         // a bare `-smp 8` (8 sockets on older QEMU) left most vCPUs idle.
         .arg(format!("{0},sockets=1,cores={0},threads=1", vm.cpu.max(1)));
 
-    platform::machine_args_tuned(
+    platform::machine_args_for(
         &mut command,
         &vm.architecture,
         &plan.accelerator,
         &vm.guest_os,
         plan.tuned,
+        &vm.machine,
+        &vm.cpu_model,
     );
     let append_pflash = |command: &mut Command, uefi: &UefiFirmware| -> Result<(), String> {
         validate_qemu_path(&uefi.code, "firmware")?;
         validate_qemu_path(&uefi.vars, "variables UEFI")?;
+        if uefi.smm && vm.machine == "pc" {
+            return Err("Secure Boot exige la machine q35 : choisissez q35 ou désactivez Secure Boot.".to_string());
+        }
         if uefi.smm {
             // OVMF Secure Boot builds keep their variables behind SMM: the
             // guest OS cannot rewrite the Secure Boot keys, like on a real PC.
@@ -3578,7 +3634,7 @@ fn build_qemu_command(
         vm.iso_path.as_deref(),
         vm.driver_iso_path.as_deref(),
     )?;
-    append_floppy_args(&mut command, &vm.architecture, vm.floppy_path.as_deref(), vm.iso_path.as_deref())?;
+    append_floppy_args(&mut command, &vm.architecture, &vm.machine, vm.floppy_path.as_deref(), vm.iso_path.as_deref())?;
     if vm.disposable.as_ref().is_some_and(|d| d.strict) {
         // Strict sandbox: every write goes to a temporary file QEMU drops on exit.
         command.arg("-snapshot");
@@ -4609,6 +4665,20 @@ mod local_mode_tests {
             let command = build_qemu_command("qemu", &vm, &ports, &plan).unwrap();
             lines.push(serde_json::to_string(&command_args(&command)).unwrap());
         }
+        // An old PC for DOS: i440FX, 486, IDE disk, NE2000, boot floppy.
+        let mut dos = sample_vm("amd64", "std");
+        dos.disk_path = disk.clone();
+        dos.machine = "pc".into();
+        dos.cpu_model = "486".into();
+        dos.disk_bus = "ide".into();
+        dos.network_model = "ne2k_pci".into();
+        dos.floppy_path = std::env::var("VIRTUA_FLOPPY").ok();
+        let mut plan = launch_plans("amd64", "std").remove(0);
+        plan.accelerator = "tcg".into();
+        plan.spice = SpiceMode::Off;
+        plan.audio = false;
+        let command = build_qemu_command("qemu", &dos, &sample_ports(), &plan).unwrap();
+        lines.push(serde_json::to_string(&command_args(&command)).unwrap());
         std::fs::write(out, lines.join("\n")).unwrap();
     }
 
@@ -4629,7 +4699,7 @@ mod local_mode_tests {
     #[test]
     fn floppies_get_a_controller_on_q35_and_usb_on_arm64() {
         let mut cmd = Command::new("qemu");
-        append_floppy_args(&mut cmd, "amd64", Some("/f/dos.img"), None).unwrap();
+        append_floppy_args(&mut cmd, "amd64", "auto", Some("/f/dos.img"), None).unwrap();
         let args = command_args(&cmd);
         assert!(args.contains(&"if=none,id=virtua-fd0,format=raw,file=/f/dos.img".to_string()));
         assert!(args.contains(&"isa-fdc,id=virtua-fdc".to_string()));
@@ -4637,12 +4707,12 @@ mod local_mode_tests {
         assert!(args.contains(&"order=ac,menu=on".to_string()));
         // With an installer ISO the CD boots, the floppy is just drive A:.
         let mut with_iso = Command::new("qemu");
-        append_floppy_args(&mut with_iso, "amd64", Some("/f/f6.img"), Some("/i/xp.iso")).unwrap();
+        append_floppy_args(&mut with_iso, "amd64", "auto", Some("/f/f6.img"), Some("/i/xp.iso")).unwrap();
         assert!(!command_args(&with_iso).iter().any(|a| a.starts_with("order=")));
         let mut arm = Command::new("qemu");
-        append_floppy_args(&mut arm, "arm64", Some("/f/d.img"), None).unwrap();
+        append_floppy_args(&mut arm, "arm64", "auto", Some("/f/d.img"), None).unwrap();
         assert!(command_args(&arm).contains(&"usb-storage,drive=virtua-fd0,removable=on".to_string()));
-        assert!(append_floppy_args(&mut Command::new("q"), "amd64", Some("/a,b.img"), None).is_err());
+        assert!(append_floppy_args(&mut Command::new("q"), "amd64", "auto", Some("/a,b.img"), None).is_err());
     }
 
     #[test]
@@ -4668,6 +4738,29 @@ mod local_mode_tests {
         assert!(command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap()).contains(&"-snapshot".to_string()));
         let fresh = new_local_vm("id".into(), "Jetable".into(), "arm64", 2, 4096, 60, "/d/j.qcow2".into(), "other");
         assert_eq!((fresh.state.as_str(), fresh.network.as_str(), fresh.disk_bus.as_str()), ("stopped", "user", "virtio"));
+    }
+
+    #[test]
+    fn an_old_pc_gets_ide_its_own_floppy_controller_and_classic_nics() {
+        let mut vm = sample_vm("amd64", "std");
+        vm.machine = "pc".into();
+        vm.cpu_model = "486".into();
+        vm.disk_bus = normalize_disk_bus("amd64", Some("ide".into()));
+        vm.network_model = normalize_network_model(Some("ne2k_pci".into()));
+        vm.floppy_path = Some("/f/dos.img".into());
+        let plan = launch_plans("amd64", "std").remove(0);
+        let args = command_args(&build_qemu_command("qemu", &vm, &sample_ports(), &plan).unwrap());
+        assert!(args.iter().any(|a| a.starts_with("file=/disks/vm.qcow2,if=ide,index=0,media=disk")));
+        assert!(args.contains(&"if=floppy,index=0,format=raw,file=/f/dos.img".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("isa-fdc")));
+        assert!(args.contains(&"ne2k_pci,netdev=net0".to_string()));
+        assert!(args.contains(&"486".to_string()));
+        assert_eq!(normalize_disk_bus("arm64", Some("ide".into())), "virtio");
+        // Secure Boot keeps its SMM-protected store only on q35.
+        vm.secure_boot = true;
+        let mut ports = sample_ports();
+        ports.uefi = Some(UefiFirmware { code: "/fw/code.fd".into(), vars: "/fw/vars.fd".into(), secure_boot: true, smm: true });
+        assert!(build_qemu_command("qemu", &vm, &ports, &plan).is_err());
     }
 
     #[test]
@@ -5147,6 +5240,8 @@ mod local_mode_tests {
         autoinstall: None,
         disposable: None,
         floppy_path: None,
+        machine: default_auto(),
+        cpu_model: default_auto(),
             created_at: "0".into(),
             updated_at: "0".into(),
         }

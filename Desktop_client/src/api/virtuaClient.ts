@@ -49,6 +49,9 @@ export type CreateResourcePayload = {
   gpuModel?: string;
   /** Local mode only: virtio (fast), sata or nvme (seen by OS installers). */
   diskBus?: string;
+  /** Local mode only: x86 chipset (`auto`, `q35`, `pc`) and QEMU CPU model. */
+  machine?: string;
+  cpuModel?: string;
   /** Local mode only: `windows` or `other`. */
   guestOs?: string;
   /** Local mode only: mount virtio-win.iso as a second CD-ROM (downloaded once). */

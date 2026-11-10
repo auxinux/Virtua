@@ -261,8 +261,13 @@ pub fn debian_base_preseed(hostname: &str, timezone: &str) -> String {
     )
 }
 
-pub fn debian_append(hostname: &str) -> String {
-    format!("auto=true priority=critical language=fr country=CA locale=fr_CA.UTF-8 keymap=ca hostname={hostname} domain=local ---")
+pub fn debian_append(hostname: &str, architecture: &str) -> String {
+    // ARM64 `virt` makes the serial port the console: the installer then runs
+    // there, offers only the "C" language, rejects the preseeded fr_CA and
+    // stops on "Select a language". `console=tty0` puts it on the screen
+    // (UEFI framebuffer), as on x86.
+    let console = if architecture == "arm64" { " console=tty0" } else { "" };
+    format!("auto=true priority=critical language=fr country=CA locale=fr_CA.UTF-8 keymap=ca hostname={hostname} domain=local{console} ---")
 }
 
 fn debian_netboot(app: &tauri::AppHandle, arch: &str) -> Result<(PathBuf, PathBuf), String> {
@@ -617,12 +622,15 @@ fn quick_create_with(app: &tauri::AppHandle, os: &str, name: Option<String>, mak
         disk_bus: Some(if arch == "arm64" && profile.guest_os == "windows" { "nvme" } else { "virtio" }.into()),
         tpm2: Some(profile.guest_os == "windows"),
         secure_boot: Some(profile.guest_os == "windows"),
+        machine: None,
+        cpu_model: None,
     };
 
     let auto = if profile.os == "debian13" {
         progress(app, 2, "Téléchargement de l’installateur Debian 13 (version la plus récente)…");
         let (kernel, initrd) = debian_netboot(app, &arch)?;
-        let hostname = host_name(&name, 63).to_lowercase();
+        // A base's copies are all "debian-13"; the builder VM's name is not a host name.
+        let hostname = if make_base { "debian-13".to_string() } else { host_name(&name, 63).to_lowercase() };
         let original = fs::read(&initrd).map_err(|e| e.to_string())?;
         let dir = local_state_dir()?.join("Unattend").join(safe_file_name(&format!("debian-{}", now_id()))?);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -636,7 +644,7 @@ fn quick_create_with(app: &tauri::AppHandle, os: &str, name: Option<String>, mak
             initrd: Some(seeded.to_string_lossy().to_string()),
             // Boot-parameter aliases of debian-installer: read before the preseed,
             // so even the first screens are in French.
-            append: Some(debian_append(&hostname)),
+            append: Some(debian_append(&hostname, &arch)),
             ..Default::default()
         }
     } else {
@@ -792,6 +800,12 @@ mod tests {
         assert!(is_windows11_iso("Win11_25H2_FrenchCanadian_Arm64.iso"));
         assert!(!is_windows11_iso("debian-13.5.0-amd64-netinst.iso"));
         assert!(!is_windows11_iso("Windows11.iso.part"));
+    }
+
+    #[test]
+    fn the_arm64_installer_runs_on_the_screen() {
+        assert!(debian_append("d", "arm64").contains(" console=tty0 ---"));
+        assert!(!debian_append("d", "amd64").contains("console="));
     }
 
     #[test]

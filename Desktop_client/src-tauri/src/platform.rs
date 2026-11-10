@@ -353,15 +353,51 @@ const WHPX_V2_FLAGS: &str = "+ssse3,+sse4.1,+sse4.2,+popcnt,+cx16,+lahf_lm";
 /// enlightenments and timer settings for Windows, x86-64-v2 on WHPX. A QEMU
 /// that refuses one of them gets an untuned retry from the launch ladder.
 pub fn machine_args_tuned(cmd: &mut Command, arch: &str, accel: &str, guest_os: &str, tuned: bool) {
+    machine_args_for(cmd, arch, accel, guest_os, tuned, "auto", "auto");
+}
+
+/// x86 chipsets offered: q35 (PCIe, the default) and i440FX "pc" (PCI + ISA,
+/// what DOS, Windows 9x/XP and old Linux expect).
+pub const X86_MACHINES: [&str; 3] = ["auto", "q35", "pc"];
+
+/// CPU models offered, by architecture (QEMU names; `auto` keeps Virtua's
+/// choice: `host` with KVM/HVF, x86-64-v2 on WHPX, `max` under emulation).
+pub const X86_CPUS: [&str; 18] = [
+    "auto", "host", "max", "qemu64", "qemu32", "kvm64", "486", "pentium", "pentium2", "pentium3", "athlon",
+    "core2duo", "Nehalem", "SandyBridge", "Haswell", "Skylake-Client", "Cascadelake-Server", "EPYC",
+];
+pub const ARM_CPUS: [&str; 7] = ["auto", "host", "max", "cortex-a53", "cortex-a57", "cortex-a72", "neoverse-n1"];
+
+/// `value` if it is a machine type offered for `arch`, else `auto`.
+pub fn normalize_machine(arch: &str, value: Option<&str>) -> String {
+    match value {
+        Some(m) if arch != "arm64" && X86_MACHINES.contains(&m) => m.to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+/// `value` if it is a CPU model offered for `arch`, else `auto` (the list is
+/// also what keeps a comma or an option out of QEMU's `-cpu`).
+pub fn normalize_cpu_model(arch: &str, value: Option<&str>) -> String {
+    let allowed: &[&str] = if arch == "arm64" { &ARM_CPUS } else { &X86_CPUS };
+    match value {
+        Some(m) if allowed.contains(&m) => m.to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+/// Machine/CPU with the VM's explicit choices (`auto` = Virtua decides).
+pub fn machine_args_for(cmd: &mut Command, arch: &str, accel: &str, guest_os: &str, tuned: bool, machine_choice: &str, cpu_choice: &str) {
     let windows = guest_os == "windows";
+    let chipset = if machine_choice == "pc" { "pc" } else { "q35" };
     let mut machine = if arch == "arm64" {
         "virt".to_string()
     } else if accel == "whpx" {
         // WHPX cannot drive the in-kernel IRQ chip; without this QEMU aborts
         // with "WHPX: injection failed" as soon as the guest enables MSI.
-        "q35,kernel-irqchip=off".to_string()
+        format!("{chipset},kernel-irqchip=off")
     } else {
-        "q35".to_string()
+        chipset.to_string()
     };
     if tuned && windows && arch != "arm64" && accel == "kvm" {
         // With hv_stimer/hv_time Windows no longer needs the HPET, whose
@@ -377,7 +413,11 @@ pub fn machine_args_tuned(cmd: &mut Command, arch: &str, accel: &str, guest_os: 
     } else {
         accel.to_string()
     };
+    let explicit = cpu_choice != "auto" && !cpu_choice.is_empty();
     let cpu = match accel {
+        // `host` needs hardware acceleration; under emulation it is `max`.
+        _ if explicit && cpu_choice == "host" && accel == "tcg" => "max".to_string(),
+        _ if explicit => cpu_choice.to_string(),
         "tcg" => "max".to_string(),
         "whpx" if tuned => format!("qemu64,{WHPX_V2_FLAGS},-hypervisor"),
         "whpx" => "qemu64,-hypervisor".to_string(),
@@ -684,6 +724,26 @@ mod tests {
         let whpx = args(true, "windows", "whpx");
         assert!(whpx.iter().any(|a| a.contains("+sse4.2") && a.contains("+popcnt") && a.ends_with("-hypervisor")));
         assert!(args(false, "windows", "whpx").contains(&"qemu64,-hypervisor".to_string()));
+    }
+    #[test]
+    fn explicit_machine_and_cpu_choices_are_honoured_and_checked() {
+        let args = |machine: &str, cpu: &str, accel: &str| {
+            let mut cmd = Command::new("qemu");
+            machine_args_for(&mut cmd, "amd64", accel, "other", true, machine, cpu);
+            cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>()
+        };
+        let dos = args("pc", "486", "kvm");
+        assert!(dos.contains(&"pc".to_string()) && dos.contains(&"486".to_string()));
+        assert!(args("pc", "auto", "whpx").contains(&"pc,kernel-irqchip=off".to_string()));
+        assert!(args("auto", "host", "tcg").contains(&"max".to_string()));
+        assert!(args("q35", "auto", "kvm").contains(&"host".to_string()));
+        assert_eq!(normalize_cpu_model("amd64", Some("486")), "486");
+        assert_eq!(normalize_cpu_model("amd64", Some("host,+evil")), "auto");
+        assert_eq!(normalize_cpu_model("arm64", Some("486")), "auto");
+        assert_eq!(normalize_cpu_model("arm64", Some("cortex-a72")), "cortex-a72");
+        assert_eq!(normalize_machine("amd64", Some("pc")), "pc");
+        assert_eq!(normalize_machine("arm64", Some("pc")), "auto");
+        assert_eq!(normalize_machine("amd64", Some("isapc")), "auto");
     }
     #[test]
     fn auxinux_is_recognised_by_os_release_or_kernel() {

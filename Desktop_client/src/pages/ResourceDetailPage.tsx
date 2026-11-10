@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { cpuOptions, legacyNetworkOptions, machineOptions } from "@/hardwareOptions";
 import { Boxes, Camera, Container, Edit3, Monitor, RotateCcw, Save, Terminal, Trash2 } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
@@ -77,6 +78,8 @@ type UpdateResourcePayload = {
   disk?: number;
   network?: string;
   networkModel?: string;
+  machine?: string;
+  cpuModel?: string;
   gpuModel?: string;
   diskBus?: string;
   tpm2?: boolean;
@@ -122,6 +125,8 @@ export function ResourceDetailPage({
     networkModel: resource?.networkModel ?? "virtio",
     gpuModel: resource?.gpuModel ?? "virtio",
     diskBus: resource?.diskBus ?? "virtio",
+    machine: resource?.machine ?? "auto",
+    cpuModel: resource?.cpuModel ?? "auto",
     tpm2: Boolean(resource?.tpm2),
     secureBoot: Boolean(resource?.secureBoot),
   });
@@ -155,6 +160,8 @@ export function ResourceDetailPage({
       networkModel: resource.networkModel ?? "virtio",
       gpuModel: resource.gpuModel ?? "virtio",
       diskBus: resource.diskBus ?? "virtio",
+      machine: resource.machine ?? "auto",
+      cpuModel: resource.cpuModel ?? "auto",
       tpm2: Boolean(resource.tpm2),
       secureBoot: Boolean(resource.secureBoot),
     });
@@ -238,6 +245,8 @@ export function ResourceDetailPage({
       if (form.networkModel !== (resource.networkModel ?? "virtio")) payload.networkModel = form.networkModel;
       if (form.gpuModel !== (resource.gpuModel ?? "virtio")) payload.gpuModel = form.gpuModel;
       if (form.diskBus !== (resource.diskBus ?? "virtio")) payload.diskBus = form.diskBus;
+      if (isLocal && form.machine !== (resource.machine ?? "auto")) payload.machine = form.machine;
+      if (isLocal && form.cpuModel !== (resource.cpuModel ?? "auto")) payload.cpuModel = form.cpuModel;
       if (form.tpm2 !== Boolean(resource.tpm2)) payload.tpm2 = form.tpm2;
       if (form.secureBoot !== Boolean(resource.secureBoot)) payload.secureBoot = form.secureBoot;
 
@@ -548,6 +557,7 @@ export function ResourceDetailPage({
                     <option value="virtio">VirtIO</option>
                     <option value="e1000">Intel e1000{resource.architecture === "amd64" ? " - recommande AMD64" : ""}</option>
                     {resource.source === "local" ? <option value="rtl8139">Realtek RTL8139</option> : null}
+                    {resource.source === "local" ? legacyNetworkOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>) : null}
                   </select>
                 </label>
                 <label className="space-y-1 text-xs text-virtua-muted">
@@ -567,6 +577,21 @@ export function ResourceDetailPage({
                         <option value="virtio">VirtIO - rapide, pilotes requis sous Windows</option>
                         <option value="nvme">NVMe - vu par Windows sans pilote</option>
                         {resource.architecture !== "arm64" ? <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option> : null}
+                        {resource.architecture !== "arm64" ? <option value="ide">IDE - DOS, Windows 9x/XP, vieux systèmes</option> : null}
+                      </select>
+                    </label>
+                    {resource.architecture !== "arm64" ? (
+                      <label className="space-y-1 text-xs text-virtua-muted">
+                        Type de machine
+                        <select className="virtua-input w-full" disabled={!canModify} value={form.machine} onChange={(event) => setForm((current) => ({ ...current, machine: event.target.value }))}>
+                          {machineOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                      </label>
+                    ) : null}
+                    <label className="space-y-1 text-xs text-virtua-muted">
+                      Modèle de CPU
+                      <select className="virtua-input w-full" disabled={!canModify} value={form.cpuModel} onChange={(event) => setForm((current) => ({ ...current, cpuModel: event.target.value }))}>
+                        {cpuOptions(resource.architecture).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                       </select>
                     </label>
                     <label className="space-y-1 text-xs text-virtua-muted">
@@ -663,6 +688,8 @@ export function ResourceDetailPage({
               ...(resource.source === "local" && resource.kind === "vm"
                 ? ([
                     ["Bus disque", resource.diskBus ?? "virtio"],
+                    ["Machine", resource.machine && resource.machine !== "auto" ? resource.machine : "q35 (auto)"],
+                    ["CPU", resource.cpuModel && resource.cpuModel !== "auto" ? resource.cpuModel : "automatique"],
                     ["Systeme invite", resource.guestOs === "windows" ? "Windows" : "Linux / autre"],
                     ["ISO pilotes", resource.driverImage ?? "aucune"],
                     ["Disquette A:", resource.floppyImage ?? "aucune"],

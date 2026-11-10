@@ -96,6 +96,8 @@ function mapLocalVm(vm: LocalVm): VirtuaResource {
     image: vm.isoPath || undefined,
     driverImage: vm.driverIsoPath || undefined,
     floppyImage: vm.floppyPath || undefined,
+    machine: vm.machine ?? "auto",
+    cpuModel: vm.cpuModel ?? "auto",
     disposable: vm.disposable ?? undefined,
     guestOs: vm.guestOs ?? "other",
     windowsSetupBypass: vm.windowsSetupBypass ?? true,
@@ -349,6 +351,8 @@ export const localVirtua = {
           diskBus: payload.diskBus,
           tpm2: payload.tpm2 ?? false,
           secureBoot: payload.secureBoot ?? false,
+          machine: payload.machine,
+          cpuModel: payload.cpuModel,
         },
       });
       updateTask(taskId, { status: "completed", progress: 100 });
@@ -405,7 +409,7 @@ export const localVirtua = {
     }
   },
 
-  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; floppyImage?: string; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
+  async updateResource(resourceId: string, payload: { name?: string; displayName?: string; image?: string; driverImage?: string; floppyImage?: string; machine?: string; cpuModel?: string; guestOs?: string; windowsSetupBypass?: boolean; cpu?: number; memory?: number; disk?: number; network?: string; networkModel?: string; gpuModel?: string; diskBus?: string; tpm2?: boolean; secureBoot?: boolean }) {
     const taskId = pushTask({ label: "Modification VM locale", target: resourceId, status: "running", progress: 25 });
     try {
       const vm = await invoke<LocalVm>("local_update_vm", {
@@ -415,6 +419,8 @@ export const localVirtua = {
           image: payload.image,
           driverImage: payload.driverImage,
           floppyImage: payload.floppyImage,
+          machine: payload.machine,
+          cpuModel: payload.cpuModel,
           guestOs: payload.guestOs,
           windowsSetupBypass: payload.windowsSetupBypass,
           cpu: payload.cpu,

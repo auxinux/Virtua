@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { cpuOptions, legacyNetworkOptions, machineOptions } from "@/hardwareOptions";
 import { QuickCreatePanel } from "@/components/QuickCreatePanel";
 import { Boxes, Container, Loader2, Monitor, Plus, Play, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
@@ -151,6 +152,8 @@ function CreateResourceDialog({
     networkModel: "virtio",
     gpuModel: "virtio",
     diskBus: "virtio",
+    machine: "auto",
+    cpuModel: "auto",
     guestOs: "other",
     virtioDrivers: false,
     cpu: "2",
@@ -276,6 +279,8 @@ function CreateResourceDialog({
         networkModel: form.type === "vm" ? form.networkModel : undefined,
         gpuModel: form.type === "vm" ? form.gpuModel : undefined,
         diskBus: form.type === "vm" && usageMode === "local" ? form.diskBus : undefined,
+        machine: form.type === "vm" && usageMode === "local" ? form.machine : undefined,
+        cpuModel: form.type === "vm" && usageMode === "local" ? form.cpuModel : undefined,
         guestOs: form.type === "vm" && usageMode === "local" ? form.guestOs : undefined,
         virtioDrivers: form.type === "vm" && usageMode === "local" ? form.virtioDrivers : undefined,
         cpu: Number(form.cpu),
@@ -458,6 +463,7 @@ function CreateResourceDialog({
                   <option value="virtio">VirtIO</option>
                   <option value="e1000">Intel e1000{form.architecture === "amd64" ? " - recommande AMD64" : ""}</option>
                   {usageMode === "local" ? <option value="rtl8139">Realtek RTL8139</option> : null}
+                  {usageMode === "local" ? legacyNetworkOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>) : null}
                 </select>
               </label>
               <label className="space-y-1 text-xs text-virtua-muted">
@@ -484,6 +490,21 @@ function CreateResourceDialog({
                       {form.architecture !== "arm64" ? <option value="sata">SATA / AHCI - compatible avec tous les installeurs</option> : null}
                       <option value="nvme">NVMe - vu par Windows sans pilote</option>
                       <option value="virtio">VirtIO - rapide, pilotes requis sous Windows</option>
+                      {form.architecture !== "arm64" ? <option value="ide">IDE - DOS, Windows 9x/XP, vieux systèmes</option> : null}
+                    </select>
+                  </label>
+                  {form.architecture !== "arm64" ? (
+                    <label className="space-y-1 text-xs text-virtua-muted">
+                      Type de machine
+                      <select className="virtua-input w-full" value={form.machine} onChange={(event) => setField("machine", event.target.value)}>
+                        {machineOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    </label>
+                  ) : null}
+                  <label className="space-y-1 text-xs text-virtua-muted">
+                    Modèle de CPU
+                    <select className="virtua-input w-full" value={form.cpuModel} onChange={(event) => setField("cpuModel", event.target.value)}>
+                      {cpuOptions(form.architecture).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
                   </label>
                 </>

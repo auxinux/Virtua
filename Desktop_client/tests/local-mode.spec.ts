@@ -47,6 +47,7 @@ async function localDesktop(page: Page, overrides: Overrides = {}) {
           case "local_depot_bases": return [{ name: "debian13-amd64.vmtmp", url: "https://dep.auxinux.ca/TEMPLATES/VM/AMD64/debian13-amd64.vmtmp", size: 9e8 }];
           case "local_launch_disposable": return { id: "local-vm-jetable", name: "Jetable Debian 13 #1", architecture: "amd64", cpu: 2, memoryMib: 4096, diskGib: 60, diskPath: "/d/j.qcow2", network: "user", state: "running", pid: 7, createdAt: "0", updatedAt: "0", disposable: { baseId: args.baseId, baseLabel: "Debian 13 (AMD64)", strict: args.strict } };
           case "local_disposable_action": return null;
+          case "local_create_vm": return { id: "local-vm-dos", name: args.payload.name, architecture: args.payload.architecture, cpu: 1, memoryMib: 64, diskGib: 1, diskPath: "/d/dos.qcow2", network: "user", state: "stopped", createdAt: "0", updatedAt: "0", machine: args.payload.machine, cpuModel: args.payload.cpuModel };
           case "local_list_containers": return [];
           case "local_create_container": return {
             id: `docker:${args.payload.name}`, kind: "docker", name: args.payload.name,
@@ -307,4 +308,20 @@ test("when a disposable VM stops, Virtua asks whether to throw it away", async (
     .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_disposable_action").map((c: any) => c.args)))
     .toEqual([{ id: "local-vm-j", action: "reset" }]);
   await expect(dialog).toBeHidden();
+});
+
+test("an old PC for DOS: i440FX machine, 486 CPU, IDE disk", async ({ page }) => {
+  await localDesktop(page);
+  await page.goto("/#/vms");
+  await page.getByRole("button", { name: /Nouveau|Nouvelle|Creer/i }).first().click();
+  await page.getByLabel("Nom", { exact: true }).fill("AuxiDos");
+  await page.getByLabel("Architecture").selectOption("amd64");
+  await page.getByLabel("Type de machine").selectOption("pc");
+  await page.getByLabel("Modèle de CPU").selectOption("486");
+  await page.getByLabel(/^Bus disque/).selectOption("ide");
+  await page.getByLabel(/^Carte reseau/).selectOption("ne2k_pci");
+  await page.locator("form").getByRole("button", { name: /^Creer$/i }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_create_vm").map((c: any) => c.args.payload)))
+    .toEqual([expect.objectContaining({ name: "AuxiDos", architecture: "amd64", machine: "pc", cpuModel: "486", diskBus: "ide", networkModel: "ne2k_pci" })]);
 });

@@ -37,3 +37,28 @@ déjà installée, puis jetée ou gardée.
   sur une disquette). Avec une ISO, la disquette sert de lecteur A: (pilotes
   F6 de Windows XP…). ARM64 : la disquette apparaît comme disque USB amovible.
 - Stockage : onglet « Disquettes » (les petites images du dossier ISO).
+
+## Machine, processeur, vieux systèmes
+
+- **Type de machine** (x86) : q35 (PC moderne, par défaut) ou **pc /
+  i440FX** (PC classique : DOS, Windows 9x/XP, vieux Linux). Secure Boot
+  exige q35 (le message le dit).
+- **Modèle de CPU** : automatique (comme avant), `host`, `max`, ou un modèle
+  précis — 486, Pentium, Pentium II/III, Athlon, Core 2 Duo, Nehalem…
+  Skylake, EPYC ; sur ARM64 : Cortex-A53/A57/A72, Neoverse N1.
+- **Bus disque IDE** (x86) : lu par DOS et les vieux installateurs sans
+  pilote.
+- **Cartes réseau NE2000 (PCI) et AMD PCnet** pour DOS et Windows 3.x/9x.
+- Sur une machine « pc », la disquette utilise le contrôleur intégré du
+  chipset.
+
+Exemple DOS : machine pc, CPU 486, disque IDE, carte NE2000, carte
+graphique VGA standard, disquette de démarrage sans ISO.
+
+## Correctif ARM64 (Mac)
+
+La création rapide Debian 13 (et la préparation d'une base Debian) restait
+bloquée sur « Select a language » sur ARM64 : l'installateur tournait sur la
+console série de la machine `virt`, qui ne propose que la langue « C » et
+refusait le français préconfiguré. Il s'affiche maintenant à l'écran
+(`console=tty0`), comme sur x86.

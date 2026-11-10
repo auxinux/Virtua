@@ -74,6 +74,9 @@ export interface VirtuaResource {
   driverImage?: string;
   /** Local VMs: floppy image in drive A:. */
   floppyImage?: string;
+  /** Local VMs: x86 chipset (`auto`, `q35`, `pc`) and QEMU CPU model. */
+  machine?: string;
+  cpuModel?: string;
   /** Local VMs: disposable copy of a base (copy-on-write). */
   disposable?: { baseId: string; baseLabel: string; strict: boolean };
   /** Local VMs: `windows` or `other`. */
@@ -348,6 +351,8 @@ export interface LocalVm {
   updatedAt: string;
   disposable?: { baseId: string; baseLabel: string; strict: boolean } | null;
   floppyPath?: string | null;
+  machine?: string;
+  cpuModel?: string;
 }
 
 export interface LocalContainerResource {
