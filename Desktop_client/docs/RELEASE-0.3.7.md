@@ -18,3 +18,10 @@ QEMU qu'avec lui.
 - **Docker Desktop** : même repli, installateur officiel de docker.com.
 - Le code Windows de Virtua Desktop est maintenant vérifié à la compilation
   pour la cible Windows à chaque modification.
+- **Compiler Virtua Desktop sur Windows sans winget** :
+  `scripts/build-windows.ps1` passe aux installateurs officiels quand winget
+  est absent ou échoue — Node.js (MSI de nodejs.org, vérifié avec
+  `SHASUMS256.txt`), Rust (`rustup-init.exe`, vérifié avec son `.sha256`,
+  installé pour l'utilisateur, sans droits administrateur), WebView2 et les
+  outils C++ (« Build Tools », charge « Développement Desktop en C++ ») de
+  Microsoft.
