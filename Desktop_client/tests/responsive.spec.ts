@@ -38,3 +38,43 @@ for (const [name, path] of [["dashboard", "/"], ["vms", "/#/vms"], ["detail", "/
     await page.screenshot({ path: `test-results/screen-${theme}-${name}.png` });
   });
 }
+
+// A running VM's console on short / narrow windows: every bar above the screen
+// stays in view, and the screen taking the focus no longer scrolls them away.
+for (const [w, h] of [[1366, 688], [1024, 600], [800, 520]] as const) {
+  test(`console of a running VM fits ${w}x${h}`, async ({ page }) => {
+    await page.setViewportSize({ width: w, height: h });
+    await page.addInitScript(({ vms }) => {
+      window.localStorage.setItem("auxinux-virtua-desktop-mode", "local");
+      const win = window as any;
+      win.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+      win.__TAURI_INTERNALS__ = { transformCallback: () => 1, invoke: async (cmd: string) => {
+        switch (cmd) {
+          case "runtime_platform": return { os: "linux", arch: "amd64", mobile: false, auxinux: true, distro: "auxinux" };
+          case "local_qemu_diagnostics": return { os: "linux", hostArch: "amd64", accelerator: "kvm", ready: true, qemuImg: { available: true }, qemuSystemArm64: { available: false }, qemuSystemAmd64: { available: true }, homebrew: { available: false }, host: { distro: "auxinux", auxinux: true } };
+          case "local_engine_status": return { os: "linux", architecture: "amd64", accelerator: "kvm", busy: false, engines: [{ id: "qemu", state: "ready", detail: "QEMU" }] };
+          case "local_list_vms": return vms;
+          case "local_list_containers": return [];
+          case "local_host_metrics": return { totalCores: 8, totalMemoryGib: 16, virtualizationCores: 6, virtualizationMemoryGib: 8, cpuUsage: 10, memoryUsage: 20, storageUsage: 30, computerName: "portable" };
+          case "plugin:event|listen": return 1;
+          default: return null;
+        }
+      } };
+    }, { vms });
+    await page.goto("/#/console/local-vm-1");
+    const ctrlAltDel = page.getByRole("button", { name: "Ctrl+Alt+Del" });
+    await expect(ctrlAltDel).toBeVisible();
+    const section = page.locator("section").filter({ has: ctrlAltDel });
+    // What a focus() on the screen used to do to this overflow-hidden panel.
+    await section.evaluate((el) => { el.scrollTop = 300; el.dispatchEvent(new Event("scroll")); });
+    await page.waitForTimeout(100);
+    expect(await section.evaluate((el) => el.scrollTop)).toBe(0);
+    // The panel fits the window: nothing hidden above or below it.
+    const panel = await section.boundingBox();
+    expect(panel!.y).toBeGreaterThanOrEqual(0);
+    expect(panel!.y + panel!.height).toBeLessThanOrEqual(h + 1);
+    expect(await section.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(w);
+    await page.screenshot({ path: `test-results/console-running-${w}x${h}.png` });
+  });
+}

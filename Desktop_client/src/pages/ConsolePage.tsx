@@ -452,7 +452,9 @@ export function ConsolePage({
       className={
         prefs.focus
           ? "relative flex h-full min-h-0 flex-col"
-          : `grid h-full min-h-[26rem] gap-3 ${showList ? "lg:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr]" : "grid-cols-[3rem_1fr]"}`
+          // List and screen stay side by side down to the 800 px minimum window
+          // (the list used to drop above the screen under 1024 px).
+          : `grid h-full min-h-0 gap-3 ${showList ? "grid-cols-[14rem_1fr] lg:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr]" : "grid-cols-[3rem_1fr]"}`
       }
     >
       {contextError ? (
@@ -547,6 +549,13 @@ export function ConsolePage({
       ) : null}
 
       <section
+        // overflow-hidden still lets the browser scroll this box when a child
+        // takes the focus (SPICE/VNC screen, terminal): the bars above the
+        // screen then slid out of sight. It never has to scroll — undo it.
+        onScroll={(event) => {
+          event.currentTarget.scrollTop = 0;
+          event.currentTarget.scrollLeft = 0;
+        }}
         className={
           prefs.focus
             ? "flex min-h-0 flex-1 flex-col overflow-hidden bg-[#05070a]"
@@ -557,8 +566,9 @@ export function ConsolePage({
         <>
         <ConsoleToolbar resource={selectedResource} runResourceAction={runResourceAction} onChanged={onChanged} extras={<ConsoleViewControls t={t} />} t={t} />
 
-        <div className="grid gap-2 border-b border-virtua-border bg-virtua-inset p-2 lg:grid-cols-[1fr_14rem]">
-          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
+        <div className="grid gap-2 border-b border-virtua-border bg-virtua-inset p-2 lg:grid-cols-[1fr_14rem] [@media(max-height:820px)]:!grid-cols-1 [@media(max-height:820px)]:py-1.5">
+          {/* Short windows keep the screen: the four cards give way, CPU/RAM stay. */}
+          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4 [@media(max-height:820px)]:hidden">
             <div className="rounded bg-virtua-shade/20 p-2">
               <p className="text-[10px] uppercase text-virtua-muted">{t("general.address")}</p>
               <p className="mt-0.5 font-mono text-xs">{selectedResource.ip ?? "n/a"}</p>
@@ -576,7 +586,7 @@ export function ConsolePage({
               <p className="mt-0.5 text-xs">{guestAgentLabel(selectedResource, t)}</p>
             </div>
           </div>
-          <div className="space-y-1.5 py-1">
+          <div className="space-y-1.5 py-1 [@media(max-height:820px)]:grid [@media(max-height:820px)]:grid-cols-2 [@media(max-height:820px)]:gap-3 [@media(max-height:820px)]:space-y-0 [@media(max-height:820px)]:py-0">
             <MetricBar label={t("general.cpu")} value={selectedResource.cpu ?? 0} />
             <MetricBar label={t("general.ram")} value={selectedResource.memory ?? 0} />
           </div>

@@ -179,7 +179,7 @@ function CloudGraphicalConsole({
         setProtocol("vnc");
         setConnected(true);
         showStatus("Console graphique connectee", 1200);
-        rfb.focus();
+        rfb.focus({ preventScroll: true });
       });
       rfb.addEventListener("disconnect", () => {
         setConnected(false);
@@ -350,7 +350,7 @@ function CloudGraphicalConsole({
         spiceSendCtrlAltDel(spiceRef.current);
       } else {
         rfbRef.current?.sendCtrlAltDel();
-        rfbRef.current?.focus();
+        rfbRef.current?.focus({ preventScroll: true });
       }
     } catch {
       showStatus("Ctrl+Alt+Del impossible", 1800);
@@ -448,7 +448,7 @@ function CloudGraphicalConsole({
     setWindowFullscreen(false);
     setAppFullscreen(false);
     setToolbarVisible(!autoHideActions);
-    window.setTimeout(() => rfbRef.current?.focus(), 150);
+    window.setTimeout(() => rfbRef.current?.focus({ preventScroll: true }), 150);
   }
 
   const enterFullscreenMode = async () => {
@@ -464,7 +464,7 @@ function CloudGraphicalConsole({
         }
         setWindowFullscreen(true);
         setAppFullscreen(true);
-        window.setTimeout(() => rfbRef.current?.focus(), 250);
+        window.setTimeout(() => rfbRef.current?.focus({ preventScroll: true }), 250);
         return;
       } catch (error) {
         showStatus(error instanceof Error ? error.message : "Plein ecran Tauri impossible", 2200);
@@ -477,7 +477,7 @@ function CloudGraphicalConsole({
       } finally {
         setAppFullscreen(false);
         setWindowFullscreen(false);
-        rfbRef.current?.focus();
+        rfbRef.current?.focus({ preventScroll: true });
       }
       return;
     }
@@ -488,7 +488,7 @@ function CloudGraphicalConsole({
       setAppFullscreen(true);
       showStatus("Plein ecran", 900);
     } finally {
-      window.setTimeout(() => rfbRef.current?.focus(), 0);
+      window.setTimeout(() => rfbRef.current?.focus({ preventScroll: true }), 0);
     }
   };
 
@@ -507,7 +507,10 @@ function CloudGraphicalConsole({
       className={`relative flex flex-col bg-[#05070a] ${
         isFullscreen
           ? "fixed inset-0 z-[100] h-screen w-screen rounded-none"
-          : "h-full min-h-[24rem] rounded-b"
+          // No minimum height: the screen scales down with the window. A fixed
+          // minimum pushed the console panel past short screens (768 px laptops)
+          // and its upper bars were cut off.
+          : "h-full min-h-0 rounded-b"
       }`}
     >
       <div

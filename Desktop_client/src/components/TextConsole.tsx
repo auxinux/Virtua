@@ -123,5 +123,5 @@ export function TextConsole({ resource }: { resource: VirtuaResource }) {
     };
   }, [resource.id]);
 
-  return <div ref={terminalHostRef} className="h-full min-h-[24rem] overflow-hidden rounded-b bg-[#05070a] p-2" />;
+  return <div ref={terminalHostRef} className="h-full min-h-0 overflow-hidden rounded-b bg-[#05070a] p-2" />;
 }
