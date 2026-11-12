@@ -12,6 +12,22 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.13",
+      items: fr
+        ? [
+            "Les conteneurs LXC sont maintenant non privilégiés : le root du conteneur est un utilisateur sans droits sur l'hôte (plage /etc/subuid de root). Valable pour les nouveaux conteneurs, les restaurations de sauvegarde locale et les restaurations PBS / Proxmox.",
+            "Conteneurs privilégiés existants : bouton « Convertir en non privilégié » sur la fiche du conteneur (arrêté). Les propriétaires des fichiers sont décalés sur place ; bits setuid et capacités de fichiers conservés. Faites un instantané avant.",
+            "Sauvegarde PBS d'un conteneur non privilégié au format Proxmox (unprivileged: 1), restaurable telle quelle par Proxmox VE.",
+            "Santé : le nombre de mises à jour disponibles comptait la bannière de connexion VirtuaOS (20 « paquets » fantômes). Seuls les vrais paquets sont comptés.",
+          ]
+        : [
+            "LXC containers are now unprivileged: container root is an unprivileged user on the host (root's /etc/subuid range). Applies to new containers, local backup restores and PBS / Proxmox restores.",
+            "Existing privileged containers: \"Convert to unprivileged\" button on the container page (stopped). File owners are shifted in place; setuid bits and file capabilities are kept. Take a snapshot first.",
+            "PBS backup of an unprivileged container in Proxmox's format (unprivileged: 1), restorable as-is by Proxmox VE.",
+            "Health: the available update count included the VirtuaOS login banner (20 phantom \"packages\"). Only real packages are counted.",
+          ],
+    },
+    {
       v: "0.8.12",
       items: fr
         ? [
