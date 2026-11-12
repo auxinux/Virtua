@@ -47,6 +47,7 @@ function LxcSummaryTab({ ct, stats }: { ct: LxcContainer; stats?: LxcStats }) {
             [t("res.disk"), `${ct.diskGb} GB`],
             ["IP", ct.ipAddress || "—"],
             [t("common.autostart"), ct.autostart ? t("common.yes") : t("common.no")],
+            [t("lxc.mode", "Mode"), ct.unprivileged ? t("lxc.unprivileged", "Non privilégié") : t("lxc.privileged", "Privilégié")],
           ].map(([k, v]) => (
             <div key={String(k)} className="flex justify-between gap-2">
               <dt className="text-text-500">{k}</dt>
@@ -737,6 +738,7 @@ export default function LxcDetail() {
   const [tab, setTab] = useState("summary");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
+  const [unprivOpen, setUnprivOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
   const perms = name ? getResourcePermissions("lxc", name) : null;
   const { locked, lockEntry } = useResourceLock("lxc", name);
@@ -786,6 +788,14 @@ export default function LxcDetail() {
     },
   });
 
+  const makeUnprivileged = useMutation({
+    mutationFn: () => apiPost<{ ok: boolean }>(`/api/lxc/${name}/make-unprivileged`, {}),
+    onSuccess: () => {
+      setUnprivOpen(false);
+      qc.invalidateQueries({ queryKey: ["lxc"] });
+    },
+  });
+
   useEffect(() => {
     const requestedTab = searchParams.get("tab");
     if (requestedTab && tabs.some((entry) => entry.key === requestedTab)) {
@@ -824,6 +834,11 @@ export default function LxcDetail() {
             <div className="flex items-center gap-2 mt-0.5">
               <StatusBadge state={ct.state} />
               {locked && <LockBadge reason={lockEntry?.reason} />}
+              {ct.unprivileged === false && (
+                <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded border border-amber-700 text-amber-400 bg-amber-900/20">
+                  {t("lxc.privileged", "Privilégié")}
+                </span>
+              )}
               {ct.ipAddress && <span className="text-xs font-mono text-text-400">{ct.ipAddress}</span>}
             </div>
           </div>
@@ -853,6 +868,16 @@ export default function LxcDetail() {
               className="btn-secondary disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {t("action.rename", "Renommer")}
+            </button>
+          )}
+          {perms?.canModify && ct.unprivileged === false && (
+            <button
+              onClick={() => setUnprivOpen(true)}
+              disabled={makeUnprivileged.isPending || locked || ct.state !== "stopped"}
+              title={ct.state !== "stopped" ? t("lxc.makeUnprivilegedRunning", "Arrêtez le conteneur pour le convertir") : undefined}
+              className="btn-secondary disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {t("lxc.makeUnprivileged", "Convertir en non privilégié")}
             </button>
           )}
           {perms?.canAdmin && <LockButton type="lxc" name={name} />}
@@ -911,6 +936,21 @@ export default function LxcDetail() {
         onCancel={() => setDeleteOpen(false)}
         loading={remove.isPending}
       />
+
+      <Modal open={unprivOpen} onClose={() => !makeUnprivileged.isPending && setUnprivOpen(false)} title={t("lxc.makeUnprivilegedTitle", "Convertir en conteneur non privilégié")}>
+        <div className="space-y-4">
+          <p className="text-sm text-text-400">
+            {t("lxc.makeUnprivilegedDesc", "Le root du conteneur deviendra un utilisateur sans droits sur l'hôte.")}
+          </p>
+          {makeUnprivileged.isError && <p className="text-xs text-red-400">{String((makeUnprivileged.error as Error)?.message ?? "Erreur")}</p>}
+          <div className="flex justify-end gap-2 pt-2">
+            <button className="btn-secondary" disabled={makeUnprivileged.isPending} onClick={() => setUnprivOpen(false)}>{t("action.cancel", "Annuler")}</button>
+            <button className="btn-primary" disabled={makeUnprivileged.isPending} onClick={() => makeUnprivileged.mutate()}>
+              {makeUnprivileged.isPending ? "…" : t("lxc.makeUnprivileged", "Convertir en non privilégié")}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={renameOpen} onClose={() => setRenameOpen(false)} title={t("action.rename", "Renommer")}>
         <div className="space-y-4">

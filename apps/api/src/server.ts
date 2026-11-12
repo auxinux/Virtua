@@ -6087,6 +6087,12 @@ app.post("/api/internal/lxc/:name/restore-backup", async (req, reply) => {
   return result;
 });
 
+app.post("/api/internal/lxc/:name/make-unprivileged", async (req) => {
+  requireInternalNodeToken(req);
+  const { name } = req.params as { name: string };
+  return callRunner("lxc_make_unprivileged", { name }, BACKUP_TIMEOUT_MS);
+});
+
 app.post("/api/internal/lxc/:name/:action", async (req, reply) => {
   requireInternalNodeToken(req);
   const { name, action } = req.params as { name: string; action: string };
@@ -8303,6 +8309,23 @@ app.post("/api/lxc/:name/rename", async (req, reply) => {
     details: `${name} -> ${renamed}`,
   });
   return { ok: true, name: renamed };
+});
+
+// 0.8.13: containers run unprivileged. Older privileged ones are converted on
+// demand (stopped container; the rootfs ownership is shifted in place).
+app.post("/api/lxc/:name/make-unprivileged", async (req, reply) => {
+  requireAuth(req, reply);
+  const { name } = req.params as { name: string };
+  requireResourcePermission(req, "lxc", name, "modify");
+  if (isResourceLocked("lxc", name)) return reply.status(423).send({ error: "Ressource verrouillée : déverrouillez-la avant de la convertir." });
+  const ip = getClientIp(req);
+  const task = createTask(req.session.userId!, req.session.username ?? "unknown", { kind: "action", action: "lxc.make_unprivileged", label: `LXC ${name}: unprivileged`, resourceType: "lxc", resourceName: name, message: "Converting to an unprivileged container" });
+  return runInstantTask(task, ip, async () => {
+    const node = await getResourceNodeAsync("lxc", name);
+    return node && !node.isLocal
+      ? fetchRemoteNode(node, `/api/internal/lxc/${encodeURIComponent(name)}/make-unprivileged`, { method: "POST" })
+      : callRunner("lxc_make_unprivileged", { name }, BACKUP_TIMEOUT_MS);
+  });
 });
 
 app.post("/api/lxc/:name/:action", async (req, reply) => {

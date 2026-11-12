@@ -12,6 +12,7 @@ import { isExternalRootfs, buildBackupTarArgs, checkSnapshotRestorable } from ".
 import { auditLxcRootfsPermissions } from "./lxcRootfsGuard.js";
 import { buildPveCtConf, buildPveLxcConfig, ctNicIpv4, lxcIncludeCandidates, parsePveCtConfig, parseSnapshotRef, pveOstypeFromOsRelease, validatePbsConnection, type PruneKeep } from "./pbsConfig.js";
 import { backupToPbs, prunePbsGroup, readPbsBlob, restorePbsArchive } from "./pbsClient.js";
+import { IDMAP_SIZE, applyUnprivilegedConfig, ensureRootSubIds, listFileCaps, parseIdmap, restoreFileCaps, shiftOwnership, usernsExecPrefix, usernsIncludeFor } from "./lxcUserns.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -114,6 +115,7 @@ export async function handleLxc(action: string, params: unknown, emit?: Progress
     case "lxc_net_update": return updateLxcNic(p);
     case "lxc_net_delete": return deleteLxcNic(p.name as string, p.index as number);
     case "lxc_rename": return renameContainer(p.name as string, p.newName as string);
+    case "lxc_make_unprivileged": return makeContainerUnprivileged(p.name as string);
     case "lxc_templates": return getTemplates((p.refresh as boolean) ?? false);
     case "lxc_cache_template": return cacheTemplate(p);
     case "lxc_cache_list": return listCache();
@@ -608,6 +610,10 @@ async function resolveRootfsDir(name: string, relDir: string): Promise<string> {
     const st = await fs.lstat(current).catch(() => null);
     if (!st) {
       await fs.mkdir(current);
+      // Unprivileged container: the new directory must belong to container
+      // root (its parent's owner), not to host root (= nobody inside).
+      const parent = await fs.lstat(path.dirname(current));
+      await fs.lchown(current, parent.uid, parent.gid);
     } else if (st.isSymbolicLink() || !st.isDirectory()) {
       throw new Error(`Refus d'écrire dans ${current} : symlink ou non-répertoire dans le rootfs du conteneur`);
     }
@@ -622,6 +628,11 @@ async function writeRootfsFile(dir: string, fileName: string, content: string, m
   await fs.rm(filePath, { force: true }).catch(() => {});
   const handle = await fs.open(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, mode);
   try {
+    // Same owner as the directory: in an unprivileged container that is the
+    // shifted container root, so the guest can still edit the file.
+    const dirStat = await fs.lstat(dir);
+    await handle.chown(dirStat.uid, dirStat.gid);
+    await handle.chmod(mode);
     await handle.writeFile(content);
   } finally {
     await handle.close();
@@ -1342,8 +1353,10 @@ function parseContainerConfig(cfg: string, name?: string) {
   const usbDevices = parseLxcUsbDevices(cfg);
   const gpuDevices = parseLxcGpuDevices(cfg);
   const arch = getCfgValue(cfg, "lxc.arch") ?? "amd64";
+  const unprivileged = parseIdmap(cfg) !== null;
 
   return {
+    unprivileged,
     cpus,
     memoryMiB,
     memoryMb: memoryMiB,
@@ -1543,6 +1556,74 @@ async function listContainers() {
   }));
 }
 
+// ── Unprivileged containers ────────────────────────────────────────────────
+/**
+ * Bring a stopped container to the unprivileged layout: config idmap at root's
+ * subordinate range and a rootfs owned by the shifted ids. Handles a privileged
+ * container (ids 0..65535), a rootfs mapped at another base (archive from
+ * another host) and a config that already has the idmap over a rootfs that was
+ * extracted as host root. Re-running it is a no-op.
+ */
+async function ensureUnprivileged(name: string): Promise<{ converted: boolean; changedFiles: number }> {
+  const base = await ensureRootSubIds();
+  const containerDir = path.join(LXC_DIR, name);
+  const cfgPath = path.join(containerDir, "config");
+  const cfg = await fs.readFile(cfgPath, "utf8");
+  const current = parseIdmap(cfg);
+  const rootfs = await containerRootfsPath(name);
+  const rootfsReady = await fs.lstat(path.join(rootfs, "etc")).then((st) => st.isDirectory(), () => false);
+  const rootStat = await fs.lstat(rootfs).catch(() => null);
+
+  let from: { uid: number; gid: number } | null;
+  if (current && current.uidBase === base && current.gidBase === base) {
+    // Mapped already. A rootfs still owned by host root came from an extraction
+    // done outside the namespace (direct downloader, restore): shift it.
+    from = rootfsReady && rootStat && rootStat.uid === 0 ? { uid: 0, gid: 0 } : null;
+    if (!from) return { converted: false, changedFiles: 0 };
+  } else {
+    if (!rootfsReady) {
+      // A non-directory backing (ZFS, LVM…) is only mounted while the container
+      // runs: there is nothing here to shift, and a config-only switch would
+      // leave a rootfs container root cannot read.
+      throw Object.assign(new Error(`Root filesystem of ${name} is not reachable at ${rootfs}; cannot convert it to unprivileged`), { code: "ROOTFS_UNREACHABLE" });
+    }
+    from = current ? { uid: current.uidBase, gid: current.gidBase } : { uid: 0, gid: 0 };
+  }
+
+  const caps = await listFileCaps(rootfs);
+  const shifted = await shiftOwnership(rootfs, from, { uid: base, gid: base }, IDMAP_SIZE);
+  let include = path.join(LXC_TEMPLATE_CONFIG_DIR, "userns.conf");
+  for (const candidate of usernsIncludeFor(cfg, LXC_TEMPLATE_CONFIG_DIR)) {
+    if (await fs.access(candidate).then(() => true, () => false)) { include = candidate; break; }
+  }
+  await fs.writeFile(cfgPath, applyUnprivilegedConfig(cfg, base, include));
+  // Container root must be able to reach its rootfs through the container
+  // directory (lxc-create sets the same ownership, mode 0770).
+  await fs.lchown(containerDir, base, base).catch(() => {});
+  await restoreFileCaps(caps, base);
+  return { converted: true, changedFiles: shifted.changed };
+}
+
+async function makeContainerUnprivileged(name: string) {
+  validateSafePart(name, "name");
+  if (!(await hasUsableContainer(name))) {
+    throw Object.assign(new Error(`LXC container ${name} not found`), { code: "NOT_FOUND" });
+  }
+  const state = (await lxcCmd("lxc-info", "-n", name, "-sH").catch(() => "")).trim().toUpperCase();
+  if (state && state !== "STOPPED") {
+    throw Object.assign(new Error("Stop the container before converting it to unprivileged"), { code: "NOT_STOPPED" });
+  }
+  const result = await ensureUnprivileged(name);
+  return { ok: true, name, ...result };
+}
+
+/** /etc/lxc/default.conf + the idmap, for `lxc-create -f`. */
+async function unprivilegedCreateConfig(base: number): Promise<string> {
+  const defaults = await fs.readFile("/etc/lxc/default.conf", "utf8").catch(() => "");
+  const kept = defaults.replace(/^\s*lxc\.(?:idmap|id_map)\s*=.*$/gim, "").trim();
+  return `${kept ? `${kept}\n` : ""}lxc.idmap = u 0 ${base} ${IDMAP_SIZE}\nlxc.idmap = g 0 ${base} ${IDMAP_SIZE}\n`;
+}
+
 async function createContainer(p: Record<string, unknown>) {
   const name = p.name as string;
   const template = normalizeTemplateSpec(p.dist, p.release, p.arch, p.variant);
@@ -1607,6 +1688,14 @@ async function createContainer(p: Record<string, unknown>) {
     }
   }
 
+  // Unprivileged from the start: lxc-create runs the download template inside
+  // the user namespace, so the rootfs is unpacked with the shifted ids.
+  const idBase = await ensureRootSubIds();
+  const createConfDir = await fs.mkdtemp(path.join(os.tmpdir(), "auxinux-lxc-create-"));
+  const createConf = path.join(createConfDir, "default.conf");
+  await fs.writeFile(createConf, await unprivilegedCreateConfig(idBase));
+  createArgs.splice(2, 0, "-f", createConf);
+
   try {
     await execFileAsync("lxc-create", createArgs, { maxBuffer: 20 * 1024 * 1024, timeout: 15 * 60_000 });
   } catch (error) {
@@ -1619,6 +1708,8 @@ async function createContainer(p: Record<string, unknown>) {
         throw new Error(`LXC template download failed. Native lxc-create: ${errorMessage(error)}. Direct downloader: ${errorMessage(directError)}`);
       }
     }
+  } finally {
+    await fs.rm(createConfDir, { recursive: true, force: true }).catch(() => {});
   }
 
   // Apply the disk size as a REAL ZFS quota — only if the container was actually
@@ -1655,6 +1746,7 @@ async function createContainer(p: Record<string, unknown>) {
   // Always persist a MAC so config and runtime stay in sync across restarts.
   const effectiveMac = macAddress || generateRandomMac();
 
+  const createdRootfsPath = getCfgValue(await fs.readFile(cfgPath, "utf8"), "lxc.rootfs.path") ?? undefined;
   const netSection = ipv4
     ? `lxc.net.0.ipv4.address = ${ipv4}\nlxc.net.0.ipv4.gateway = ${gateway ?? "auto"}`
     : "";
@@ -1668,7 +1760,9 @@ async function createContainer(p: Record<string, unknown>) {
     `lxc.net.0.hwaddr = ${effectiveMac}`,
     netSection,
     `lxc.rootfs.options = size=${diskGb}G`,
-    relocatedRootfsPath ? `lxc.rootfs.path = dir:${relocatedRootfsPath}` : "",
+    // Always explicit: without it an unprivileged container cannot mount its
+    // /dev, and a zfs:/btrfs: backing written by lxc-create must survive.
+    `lxc.rootfs.path = ${relocatedRootfsPath ? `dir:${relocatedRootfsPath}` : (createdRootfsPath ?? `dir:${path.join(containerDir, "rootfs")}`)}`,
     autostart ? "lxc.start.auto = 1" : "",
     // Container nesting (run Docker/LXC inside this container) — opt-in, NEW containers only.
     nesting ? "lxc.apparmor.allow_nesting = 1" : "",
@@ -1688,6 +1782,9 @@ async function createContainer(p: Record<string, unknown>) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   await fs.writeFile(cfgPath, `${existingCfg}\n${extraConfig}\n`);
+  // Native lxc-create already produced a mapped rootfs (no-op then); the direct
+  // downloader unpacked it as host root and gets shifted here.
+  await ensureUnprivileged(name);
   await writeContainerHostname(name, name);
 
   // Écrire les fichiers de config réseau dans le rootfs AVANT le premier démarrage
@@ -2919,6 +3016,9 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
     }
     cfg = `${stripInvalidDhcpAutoLines(cfg)}\n`;
     await fs.writeFile(path.join(destDir, "config"), cfg);
+    // Archives of privileged containers (or from a host with another id range)
+    // come back unprivileged, mapped on this host's range.
+    await ensureUnprivileged(name);
     await configureContainerNetwork(name, ipv4, ipv4Gateway);
     await writeContainerDns(name, dnsServers);
     return { ok: true, name };
@@ -2929,9 +3029,9 @@ async function restoreContainerBackup(p: Record<string, unknown>) {
 
 /**
  * Restore a Proxmox CT from a PBS snapshot: the root.pxar archive is extracted
- * as root with its ownership untouched. Proxmox stores unprivileged CT files
- * with their in-container ids (0-based), which is exactly what Virtua's
- * privileged containers expect.
+ * as root with its ownership untouched (Proxmox stores unprivileged CT files
+ * with their in-container ids, 0-based), then shifted onto this host's
+ * unprivileged id range.
  */
 async function restoreContainerFromPbs(p: Record<string, unknown>, emit?: ProgressEmitter) {
   const conn = validatePbsConnection(p.connection);
@@ -3001,6 +3101,10 @@ async function restoreContainerFromPbs(p: Record<string, unknown>, emit?: Progre
       generateMac: generateRandomMac,
     });
     await fs.writeFile(path.join(containerDir, "config"), cfg);
+    // pxar archives hold in-container ids (Proxmox stores unprivileged CTs that
+    // way, and privileged ones are 0-based anyway): shift them onto our range.
+    emit?.({ percent: 94, message: "Mapping file ownership for an unprivileged container" });
+    await ensureUnprivileged(name);
     await writeContainerHostname(name, name);
     const nic0 = spec.nics[0];
     // ip=manual means the guest manages its own network — leave its files alone.
@@ -3034,6 +3138,7 @@ async function backupContainerToPbs(p: Record<string, unknown>, emit?: ProgressE
   if (!(await fs.stat(rootfs).then((st) => st.isDirectory(), () => false))) {
     throw new Error(`Root filesystem of ${name} not found at ${rootfs}`);
   }
+  const idmap = parseIdmap(cfg);
   const cpuQuota = getCfgValue(cfg, "lxc.cgroup2.cpu.max")?.split(/\s+/)[0];
   const swapRaw = getCfgValue(cfg, "lxc.cgroup2.memory.swap.max");
   const swapMb = swapRaw && swapRaw !== "max" ? parseInt(swapRaw.replace(/[^\d]/g, ""), 10) || 0 : 512;
@@ -3064,6 +3169,7 @@ async function backupContainerToPbs(p: Record<string, unknown>, emit?: ProgressE
     memoryMb: parsed.memoryMb,
     swapMb,
     nesting: getCfgValue(cfg, "lxc.apparmor.allow_nesting") === "1",
+    unprivileged: idmap !== null,
     autostart: parsed.autostart,
     rootfsSizeGb,
     nics: parseLxcNics(cfg),
@@ -3076,7 +3182,27 @@ async function backupContainerToPbs(p: Record<string, unknown>, emit?: ProgressE
     const confPath = path.join(workDir, "pct.conf");
     await fs.writeFile(confPath, conf, { mode: 0o600 });
     emit?.({ percent: 5, message: "Uploading the container filesystem to Proxmox Backup Server" });
-    snapshot = await backupToPbs(conn, [`pct.conf:${confPath}`, `root.pxar:${rootfs}`], { type: "ct", id: name });
+    if (idmap) {
+      // Like Proxmox's vzdump: archive from inside the container's namespace,
+      // so the pxar records in-container ids (what `unprivileged: 1` means).
+      // The client runs as container root: it needs its own HOME and files.
+      const home = path.join(workDir, "home");
+      await fs.mkdir(home, { mode: 0o700 });
+      const knownFingerprints = path.join(os.homedir(), ".config", "proxmox-backup", "fingerprints");
+      if (await fs.access(knownFingerprints).then(() => true, () => false)) {
+        await fs.mkdir(path.join(home, ".config", "proxmox-backup"), { recursive: true });
+        await fs.copyFile(knownFingerprints, path.join(home, ".config", "proxmox-backup", "fingerprints"));
+      }
+      // Only the handful of files created above: never a recursive chown.
+      const owned = [workDir, confPath, home, path.join(home, ".config"), path.join(home, ".config", "proxmox-backup"), path.join(home, ".config", "proxmox-backup", "fingerprints")];
+      for (const entry of owned) await fs.lchown(entry, idmap.uidBase, idmap.gidBase).catch(() => {});
+      snapshot = await backupToPbs(conn, [`pct.conf:${confPath}`, `root.pxar:${rootfs}`], { type: "ct", id: name }, {
+        wrap: usernsExecPrefix(idmap),
+        home,
+      });
+    } else {
+      snapshot = await backupToPbs(conn, [`pct.conf:${confPath}`, `root.pxar:${rootfs}`], { type: "ct", id: name });
+    }
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }

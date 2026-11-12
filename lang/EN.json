@@ -847,5 +847,12 @@
   "ctx.create": "Create a resource…",
   "ctx.settings": "Settings",
   "ctx.clipboardBlocked": "The browser blocked clipboard access — use Ctrl+C / Ctrl+V.",
-  "ctx.actionFailed": "Action failed: {{error}}"
+  "ctx.actionFailed": "Action failed: {{error}}",
+  "lxc.mode": "Mode",
+  "lxc.unprivileged": "Unprivileged",
+  "lxc.privileged": "Privileged",
+  "lxc.makeUnprivileged": "Convert to unprivileged",
+  "lxc.makeUnprivilegedRunning": "Stop the container to convert it",
+  "lxc.makeUnprivilegedTitle": "Convert to an unprivileged container",
+  "lxc.makeUnprivilegedDesc": "Container root becomes an unprivileged user on the host. The owner of every file in the container is shifted in place: take a snapshot first; it takes from a few seconds to a few minutes depending on the number of files. GPU/USB passthrough may need extra permissions once converted."
 }

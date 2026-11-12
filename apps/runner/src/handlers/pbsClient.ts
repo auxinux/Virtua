@@ -54,6 +54,10 @@ function toClientError(stderr: string, exitCode: number | null): PbsClientError 
 
 export interface RunOptions {
   timeoutMs?: number;
+  /** Command prefix the client runs under (e.g. lxc-usernsexec … --). */
+  wrap?: string[];
+  /** HOME for the client (its config/fingerprint cache). */
+  home?: string;
   /** Called every few seconds while the command runs (progress polling). */
   onTick?: () => void | Promise<void>;
 }
@@ -62,8 +66,11 @@ export function runPbsClient(conn: PbsConnection | null, args: string[], opts: R
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn(PBS_CLIENT, args, {
-        env: conn ? pbsEnv(conn) : { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      const env: NodeJS.ProcessEnv = conn ? pbsEnv(conn) : { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+      if (opts.home) env.HOME = opts.home;
+      const [cmd, ...cmdArgs] = opts.wrap?.length ? [...opts.wrap, PBS_CLIENT, ...args] : [PBS_CLIENT, ...args];
+      child = spawn(cmd, cmdArgs, {
+        env,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {

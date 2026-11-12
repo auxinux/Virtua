@@ -277,7 +277,7 @@ describe("parsePveCtConfig / buildPveLxcConfig", () => {
     const w = spec.warnings.join("\n");
     expect(w).toMatch(/mp0 \(\/srv\/data\) is restored inside/);
     expect(w).toMatch(/mp1 .*not in Proxmox backups/);
-    expect(w).toMatch(/privileged/);
+    expect(w).not.toMatch(/privileged/);
     expect(w).toMatch(/lxc\.cgroup2\.devices\.allow/);
 
     const cfg = buildPveLxcConfig(spec, {

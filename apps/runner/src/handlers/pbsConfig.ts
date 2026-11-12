@@ -586,9 +586,6 @@ export function parsePveCtConfig(text: string): PveCtSpec {
 
   const features = values.features ? parsePropertyString(values.features).props : {};
   const unprivileged = truthy(values.unprivileged);
-  if (unprivileged) {
-    warnings.push("This was an unprivileged container in Proxmox; Virtua runs it as a privileged container.");
-  }
   const rootfs = values.rootfs ? parsePropertyString(values.rootfs).props : {};
   const rootfsBytes = parseSizeBytes(rootfs.size);
 
@@ -818,6 +815,8 @@ export interface VirtuaCtInfo {
   memoryMb: number;
   swapMb: number;
   nesting: boolean;
+  /** pxar holds in-container ids (archived from inside the user namespace) */
+  unprivileged?: boolean;
   autostart: boolean;
   rootfsSizeGb: number;
   nics: Array<{ name?: string; link?: string; hwaddr?: string; ipv4?: string; ipv4Gateway?: string }>;
@@ -848,6 +847,7 @@ export function buildPveCtConf(info: VirtuaCtInfo): string {
     `rootfs: virtua:subvol-rootfs,size=${info.rootfsSizeGb}G`,
     `onboot: ${info.autostart ? 1 : 0}`,
   ];
+  if (info.unprivileged) lines.push("unprivileged: 1");
   if (info.nesting) lines.push("features: nesting=1");
   info.nics.forEach((nic, i) => {
     const ip = nic.ipv4 ? `ip=${nic.ipv4}${i === 0 && nic.ipv4Gateway ? `,gw=${nic.ipv4Gateway}` : ""}` : "ip=dhcp";

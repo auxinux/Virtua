@@ -446,16 +446,31 @@ async function getServiceStatuses() {
   return results;
 }
 
+/**
+ * Package names from `apt list --upgradable`. Only real entries count:
+ * `name/suite[,suite] version arch [upgradable from: x]`.
+ */
+export function parseAptUpgradable(stdout: string): string[] {
+  const names: string[] = [];
+  for (const raw of stdout.split("\n")) {
+    const m = /^([a-z0-9][a-z0-9+.-]*)\/\S+\s+\S+\s+\S+\s+\[upgradable from: [^\]]+\]\s*$/.exec(raw.trim());
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
+
 async function getUpdateStatus() {
   let upgradableCount = 0;
   let packages: string[] = [];
   try {
-    const { stdout } = await execFileAsync("bash", ["-lc", "apt list --upgradable 2>/dev/null || true"]);
-    const lines = stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("Listing..."));
-    packages = lines.map((line) => line.split("/")[0]).filter(Boolean);
+    // No login shell: `bash -l` sources /etc/profile, whose VirtuaOS banner
+    // landed in stdout and was counted as upgradable packages.
+    const { stdout } = await execFileAsync("apt", ["list", "--upgradable"], {
+      env: { ...process.env, LANG: "C", LC_ALL: "C" },
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 60_000,
+    });
+    packages = parseAptUpgradable(stdout);
     upgradableCount = packages.length;
   } catch {}
 

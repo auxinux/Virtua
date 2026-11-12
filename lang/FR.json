@@ -847,5 +847,12 @@
   "ctx.create": "Créer une ressource…",
   "ctx.settings": "Paramètres",
   "ctx.clipboardBlocked": "Le navigateur a bloqué l'accès au presse-papiers — utilise Ctrl+C / Ctrl+V.",
-  "ctx.actionFailed": "Action impossible : {{error}}"
+  "ctx.actionFailed": "Action impossible : {{error}}",
+  "lxc.mode": "Mode",
+  "lxc.unprivileged": "Non privilégié",
+  "lxc.privileged": "Privilégié",
+  "lxc.makeUnprivileged": "Convertir en non privilégié",
+  "lxc.makeUnprivilegedRunning": "Arrêtez le conteneur pour le convertir",
+  "lxc.makeUnprivilegedTitle": "Convertir en conteneur non privilégié",
+  "lxc.makeUnprivilegedDesc": "Le root du conteneur deviendra un utilisateur sans droits sur l'hôte. Les propriétaires de tous les fichiers du conteneur sont décalés sur place : prévoyez un instantané avant, l'opération prend de quelques secondes à quelques minutes selon le nombre de fichiers. Le passthrough GPU/USB peut demander des permissions supplémentaires une fois converti."
 }

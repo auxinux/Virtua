@@ -32,6 +32,8 @@ export interface LxcContainer {
     devPaths: string[];
   }>;
   autostart: boolean;
+  /** Runs in a user namespace (lxc.idmap). Default for containers made by 0.8.13+. */
+  unprivileged?: boolean;
   /** Redémarrage automatique après une panne (null = défaut global du nœud). */
   restartOnCrash?: boolean | null;
   userId?: number;
