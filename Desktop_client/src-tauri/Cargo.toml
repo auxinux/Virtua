@@ -1,6 +1,6 @@
 [package]
 name = "auxinux-virtua-desktop"
-version = "0.3.10"
+version = "0.4.0"
 description = "Client Desktop pour AuxiNux Virtua"
 authors = ["AuxiNux"]
 edition = "2021"
