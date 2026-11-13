@@ -62,7 +62,21 @@ export function nodeQemuArch(processArch: string = process.arch): "x86_64" | "aa
   return processArch === "arm64" ? "aarch64" : "x86_64";
 }
 
-/** Newest-looking local Windows 11 ISO big enough to be a real installer. */
+/**
+ * A released Windows build (`…24h2…`, `…25H2…`) rather than an Insider one
+ * (`…_26300_9457…`): Insider builds stop the unattended install at the
+ * out-of-box "OOBEZDP" error (the zero-day-patch step fails).
+ */
+export function isReleaseWindowsIso(filename: string): boolean {
+  return /(^|[^a-z0-9])\d{2}h\d([^0-9]|$)/i.test(filename);
+}
+
+/** Release before Insider, then the largest. */
+export function compareWindowsIsos(a: { filename: string; sizeBytes: number }, b: { filename: string; sizeBytes: number }) {
+  return Number(isReleaseWindowsIso(b.filename)) - Number(isReleaseWindowsIso(a.filename)) || b.sizeBytes - a.sizeBytes;
+}
+
+/** Best local Windows 11 ISO big enough to be a real installer (a release first). */
 export function pickLibraryWindowsIso<T extends { filename: string; sizeBytes: number }>(isos: T[], arm: boolean): T | undefined {
   return isos
     .filter((iso) => {
@@ -70,7 +84,7 @@ export function pickLibraryWindowsIso<T extends { filename: string; sizeBytes: n
       const windows11 = lower.endsWith(".iso") && (isWindows11Iso(lower) || (lower.includes("win") && lower.includes("11")));
       return windows11 && lower.includes("arm") === arm && iso.sizeBytes > WINDOWS_ISO_MIN_BYTES;
     })
-    .sort((a, b) => b.sizeBytes - a.sizeBytes)[0];
+    .sort(compareWindowsIsos)[0];
 }
 
 /** Windows 11 ISO names of a depot autoindex page. */
@@ -169,17 +183,24 @@ export function createQuickCreateService(deps: Omit<QuickCreateDeps, "requireAut
 
   async function windowsIso(taskId: string, update: (patch: Record<string, unknown>) => void) {
     const local = pickLibraryWindowsIso(await deps.listLibraryIsos(), arch === "aarch64");
-    if (local) return local.path;
+    // A released build in the library wins; an Insider one only if the depot
+    // has no release either (it would stop at OOBEZDP).
+    if (local && isReleaseWindowsIso(local.filename)) return local.path;
     update({ message: "Looking for a Windows 11 ISO on the AuxiNux depot" });
     const dirUrl = `${deps.depotBase().replace(/\/*$/, "/")}ISO/AMD64/`;
-    const names = parseWindowsIsoListing(await fetchText(dirUrl).catch((error) => {
+    let names: string[];
+    try {
+      names = parseWindowsIsoListing(await fetchText(dirUrl));
+    } catch (error) {
+      if (local) return local.path;
       throw new Error(`AuxiNux depot unreachable: ${error instanceof Error ? error.message : error}`);
-    }));
-    const sized = await Promise.all(names.map(async (name) => ({ name, size: await headContentLength(`${dirUrl}${encodeURIComponent(name)}`) ?? 0 })));
-    const best = sized.filter((entry) => entry.size > WINDOWS_ISO_MIN_BYTES).sort((a, b) => b.size - a.size)[0];
+    }
+    const sized = await Promise.all(names.map(async (name) => ({ filename: name, sizeBytes: await headContentLength(`${dirUrl}${encodeURIComponent(name)}`) ?? 0 })));
+    const best = sized.filter((entry) => entry.sizeBytes > WINDOWS_ISO_MIN_BYTES).sort(compareWindowsIsos)[0];
+    if (local && (!best || !isReleaseWindowsIso(best.filename))) return local.path;
     if (!best) throw new Error(`No Windows 11 ISO (over 3 GB) on the AuxiNux depot (${dirUrl}) nor in the ISO library`);
-    update({ message: `Downloading ${best.name}` });
-    return deps.downloadIso(taskId, `${dirUrl}${encodeURIComponent(best.name)}`, best.name, best.name);
+    update({ message: `Downloading ${best.filename}` });
+    return deps.downloadIso(taskId, `${dirUrl}${encodeURIComponent(best.filename)}`, best.filename, best.filename);
   }
 
   async function quickCreate(actor: ApiActor, body: unknown): Promise<ServiceResult<Record<string, unknown> & { id: string; name: string }>> {

@@ -352,12 +352,32 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
         .enumerate()
         .map(|(i, k)| format!("        <RunSynchronousCommand wcm:action=\"add\"><Order>{}</Order><Path>reg add HKLM\\SYSTEM\\Setup\\LabConfig /v {k} /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>\n", i + 1))
         .collect();
-    let first_logon: String = [
-        ("Mot de passe sans expiration", "net accounts /maxpwage:unlimited".to_string()),
+    // The guest tools bundle and the agent MSI exist only for x86/x64; the
+    // drivers themselves are on the disc for both. pnputil installs every
+    // `<driver>\w11\<arch>` package (network, serial, balloon, rng, gpu,
+    // input…) whatever the disc's letter — on ARM64 that is the only way, and
+    // the windowsPE DriverPaths alone did not leave them in the installed
+    // Windows (Device Manager full of unknown devices on a Mac).
+    let drivers = format!(
+        r"cmd /c for %d in (D E F G H I J) do @for /d %p in (%d:\*) do @if exist %p\w11\{driver_arch}\*.inf pnputil /add-driver %p\w11\{driver_arch}\*.inf /install"
+    );
+    let agent = if arch == "arm64" {
+        // No ARM64 build of the QEMU guest agent: the x64 one runs under
+        // Windows 11's x64 emulation, and is what tells Virtua the install is done.
+        (
+            "Agent invité QEMU (x64 émulé)",
+            r#"cmd /c for %d in (D E F G H I J) do @if exist %d:\guest-agent\qemu-ga-x86_64.msi start "" /wait msiexec /i %d:\guest-agent\qemu-ga-x86_64.msi /qn /norestart"#.to_string(),
+        )
+    } else {
         (
             "Outils invités VirtIO (agent, pilotes)",
-            r#"cmd /c for %d in (D E F G H I) do @if exist %d:\virtio-win-guest-tools.exe start "" /wait %d:\virtio-win-guest-tools.exe /install /quiet /norestart"#.to_string(),
-        ),
+            r#"cmd /c for %d in (D E F G H I J) do @if exist %d:\virtio-win-guest-tools.exe start "" /wait %d:\virtio-win-guest-tools.exe /install /quiet /norestart"#.to_string(),
+        )
+    };
+    let first_logon: String = [
+        ("Mot de passe sans expiration", "net accounts /maxpwage:unlimited".to_string()),
+        ("Pilotes VirtIO", drivers),
+        agent,
         ("Bureau à distance", r"reg add &quot;HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server&quot; /v fDenyTSConnections /t REG_DWORD /d 0 /f".to_string()),
         ("RemoteApp", r"reg add &quot;HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList&quot; /v fDisabledAllowList /t REG_DWORD /d 1 /f".to_string()),
         ("RemoteApp (stratégie)", r"reg add &quot;HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services&quot; /v fAllowUnlistedRemotePrograms /t REG_DWORD /d 1 /f".to_string()),
@@ -467,6 +487,22 @@ pub fn is_windows11_iso(name: &str) -> bool {
     (lower.starts_with("windows11") || lower.starts_with("win11")) && lower.ends_with(".iso")
 }
 
+/// A released Windows build (`…24h2…`, `…25H2…`) rather than an Insider one
+/// (`…_26300_9457…`): Insider builds stop the unattended install at the
+/// out-of-box "OOBEZDP" error (the zero-day-patch step fails).
+pub fn is_release_windows_iso(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let bytes = lower.as_bytes();
+    (0..bytes.len().saturating_sub(3)).any(|i| {
+        bytes[i].is_ascii_digit()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2] == b'h'
+            && bytes[i + 3].is_ascii_digit()
+            && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
+            && bytes.get(i + 4).is_none_or(|c| !c.is_ascii_digit())
+    })
+}
+
 /// Size announced by the server. reqwest's `content_length()` is the size of
 /// the *body*, which a HEAD response does not have: it reported 0 for every
 /// ISO of the depot, and quick create concluded there was none.
@@ -480,7 +516,7 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
     let config = read_storage_config()?;
     let wants_arm = arch == "arm64";
     let big_enough = |size: u64| size > 3 * 1024 * 1024 * 1024;
-    let mut local: Vec<(SystemTime, PathBuf)> = fs::read_dir(&config.iso_dir)
+    let mut local: Vec<(bool, SystemTime, PathBuf)> = fs::read_dir(&config.iso_dir)
         .map(|entries| entries.flatten().collect::<Vec<_>>())
         .unwrap_or_default()
         .into_iter()
@@ -490,22 +526,25 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
             let meta = entry.metadata().ok()?;
             let windows = name.ends_with(".iso") && guess_guest_os(Some(&name)) == "windows" && name.contains("11");
             let arm = name.contains("arm");
-            (windows && arm == wants_arm && big_enough(meta.len())).then(|| (meta.modified().unwrap_or(UNIX_EPOCH), path))
+            (windows && arm == wants_arm && big_enough(meta.len())).then(|| (is_release_windows_iso(&name), meta.modified().unwrap_or(UNIX_EPOCH), path))
         })
         .collect();
+    // A released build first, then the newest.
     local.sort();
-    if let Some((_, path)) = local.pop() {
-        return Ok(path);
+    let local = local.pop();
+    if let Some((true, _, path)) = &local {
+        return Ok(path.clone());
     }
+    // Only an Insider build here (or nothing): a released one on the depot
+    // is worth the download, otherwise keep what we have.
+    let fallback = local.map(|(_, _, path)| path);
     let base = repository_url("ISO", arch)?;
     let client = http_client(Duration::from_secs(60))?;
-    let listing = client
-        .get(&base)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.text())
-        .map_err(|e| format!("Dépôt AuxiNux inaccessible : {e}"))?;
-    let mut candidates: Vec<(u64, String)> = listing
+    let listing = match client.get(&base).send().and_then(|r| r.error_for_status()).and_then(|r| r.text()) {
+        Ok(listing) => listing,
+        Err(e) => return fallback.ok_or_else(|| format!("Dépôt AuxiNux inaccessible : {e}")),
+    };
+    let mut candidates: Vec<(bool, u64, String)> = listing
         .split("href=\"")
         .skip(1)
         .filter_map(|chunk| chunk.split('"').next())
@@ -513,11 +552,16 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
         .filter_map(|name| {
             let response = client.head(format!("{base}{name}")).send().ok()?;
             let size = header_length(&response)?;
-            big_enough(size).then(|| (size, name.to_string()))
+            big_enough(size).then(|| (is_release_windows_iso(name), size, name.to_string()))
         })
         .collect();
     candidates.sort();
-    let Some((size, name)) = candidates.pop() else {
+    if let Some(path) = fallback {
+        if !candidates.last().is_some_and(|(release, _, _)| *release) {
+            return Ok(path);
+        }
+    }
+    let Some((_, size, name)) = candidates.pop() else {
         return Err(if wants_arm {
             format!(
                 "Aucune ISO Windows 11 ARM64 sur le dépôt AuxiNux ({base}). Microsoft ne publie pas de lien direct : téléchargez-la sur microsoft.com/software-download/windows11arm64 et placez-la dans {}, ou déposez-la dans TEMPLATES/ISO/ARM du dépôt.",
@@ -913,6 +957,27 @@ mod tests {
         assert_eq!(xml.matches("<settings ").count(), xml.matches("</settings>").count());
         let arm = windows_answer_file("arm64", "en-US", "W");
         assert!(arm.contains(r"\w11\ARM64") && arm.contains(r#"processorArchitecture="arm64""#));
+    }
+
+    #[test]
+    fn released_windows_isos_win_over_insider_builds() {
+        assert!(is_release_windows_iso("Windows11-FR_CA-25h2.iso"));
+        assert!(is_release_windows_iso("Win11_24H2_French_x64.iso"));
+        assert!(!is_release_windows_iso("Windows11_Client_x64_fr-ca_26300_9457.iso"));
+        assert!(!is_release_windows_iso("Windows11_Client_arm64_en-us_26300_9457.iso"));
+        assert!(!is_release_windows_iso("win11-123h45.iso"));
+    }
+
+    #[test]
+    fn every_virtio_driver_is_installed_at_first_logon_for_its_architecture() {
+        let x64 = windows_answer_file("amd64", "fr-CA", "W");
+        assert!(x64.contains(r"pnputil /add-driver %p\w11\amd64\*.inf /install"));
+        assert!(x64.contains("virtio-win-guest-tools.exe"));
+        let arm = windows_answer_file("arm64", "en-US", "W");
+        assert!(arm.contains(r"pnputil /add-driver %p\w11\ARM64\*.inf /install"));
+        // The x64 tools bundle cannot install ARM64 drivers: the agent alone, emulated.
+        assert!(!arm.contains("virtio-win-guest-tools.exe"));
+        assert!(arm.contains(r"msiexec /i %d:\guest-agent\qemu-ga-x86_64.msi /qn"));
     }
 
     #[test]

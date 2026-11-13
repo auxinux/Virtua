@@ -5,7 +5,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { createHash } from "crypto";
-import { parseWindowsIsoListing, pickLibraryWindowsIso, registerQuickCreateRoutes, uniqueVmName, type QuickCreateDeps } from "./quickCreate.js";
+import { isReleaseWindowsIso, parseWindowsIsoListing, pickLibraryWindowsIso, registerQuickCreateRoutes, uniqueVmName, type QuickCreateDeps } from "./quickCreate.js";
 
 const GB = 1024 ** 3;
 
@@ -21,6 +21,19 @@ describe("quick create helpers", () => {
     expect(pickLibraryWindowsIso(isos, false)?.filename).toBe("Windows11-FR_CA-25h2.iso");
     expect(pickLibraryWindowsIso(isos, true)?.filename).toBe("Win11_Arm64.iso");
     expect(pickLibraryWindowsIso([isos[3]], false)).toBeUndefined();
+  });
+
+  it("prefers a released Windows build to a bigger Insider one", () => {
+    expect(isReleaseWindowsIso("Windows11-FR_CA-25h2.iso")).toBe(true);
+    expect(isReleaseWindowsIso("Win11_24H2_French_x64.iso")).toBe(true);
+    expect(isReleaseWindowsIso("Windows11_Client_x64_fr-ca_26300_9457.iso")).toBe(false);
+    const isos = [
+      { filename: "Windows11_Client_x64_fr-ca_26300_9457.iso", sizeBytes: 8.7 * GB },
+      { filename: "Windows11-FR_CA-25h2.iso", sizeBytes: 8.3 * GB },
+    ];
+    expect(pickLibraryWindowsIso(isos, false)?.filename).toBe("Windows11-FR_CA-25h2.iso");
+    // Only an Insider build: still used (ARM64 today).
+    expect(pickLibraryWindowsIso([{ filename: "Windows11_Client_arm64_en-us_26300_9457.iso", sizeBytes: 6 * GB }], true)?.filename).toContain("26300");
   });
 
   it("reads the depot listing and names VMs uniquely", () => {
