@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import { localVirtua } from "@/api/localVirtua";
 import { virtuaClient } from "@/api/virtuaClient";
+import { proxmoxClient } from "@/api/proxmoxClient";
 import type { VirtuaResource } from "@/types";
 import "@xterm/xterm/css/xterm.css";
 
@@ -57,9 +58,11 @@ export function TextConsole({ resource }: { resource: VirtuaResource }) {
 
     terminal.writeln(`Connexion a ${resource.kind.toUpperCase()} ${resource.displayName}...`);
 
-    const ticketPromise = resource.source === "local"
-      ? localVirtua.getConsoleTicket(resource.id, "text")
-      : virtuaClient.getConsoleTicket(resource.id, "text");
+    const ticketPromise = resource.source === "proxmox"
+      ? proxmoxClient.getConsoleTicket(resource, "text")
+      : resource.source === "local"
+        ? localVirtua.getConsoleTicket(resource.id, "text")
+        : virtuaClient.getConsoleTicket(resource.id, "text");
 
     void ticketPromise.then((ticket) => {
       if (disposed) return;

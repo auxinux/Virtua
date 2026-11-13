@@ -6,7 +6,7 @@ export type VirtuaRole = "ADMIN" | "USER";
 
 export type ConsoleMode = "text" | "graphical" | "spice";
 
-export type UsageMode = "local" | "cloud";
+export type UsageMode = "local" | "cloud" | "proxmox";
 
 export type PowerAction = "start" | "stop" | "restart" | "shutdown";
 
@@ -101,6 +101,8 @@ export interface VirtuaResource {
     status?: string;
   };
   consoleModes: ConsoleMode[];
+  /** Proxmox VE mode: the guest's id and type on the Proxmox server. */
+  proxmox?: { vmid: number; type: "qemu" | "lxc"; template: boolean; tags?: string };
   permissions: {
     canView: boolean;
     canConsole: boolean;

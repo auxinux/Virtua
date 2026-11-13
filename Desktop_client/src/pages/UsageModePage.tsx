@@ -1,4 +1,4 @@
-import { Cloud, HardDrive } from "lucide-react";
+import { Cloud, HardDrive, Server } from "lucide-react";
 import type { UsageMode } from "@/types";
 import { useLanguage } from "@/i18n";
 
@@ -12,7 +12,7 @@ export function UsageModePage({ allowLocal = true, onSelect }: { allowLocal?: bo
           <img src="/brand/auxinux-virtua-logo.svg" alt="AuxiNux Virtua - Desktop Client" className="h-auto w-72" draggable={false} />
         </div>
 
-        <div className={`grid gap-4 ${allowLocal ? "md:grid-cols-2" : "mx-auto max-w-md"}`}>
+        <div className={`grid gap-4 ${allowLocal ? "md:grid-cols-3" : "mx-auto max-w-2xl md:grid-cols-2"}`}>
           {allowLocal ? (
             <button
               type="button"
@@ -46,6 +46,23 @@ export function UsageModePage({ allowLocal = true, onSelect }: { allowLocal?: bo
             </p>
             <span className="mt-5 inline-flex h-9 items-center rounded border border-virtua-border px-4 text-sm text-virtua-text group-hover:border-virtua-accent">
               {t("mode.remote")}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onSelect("proxmox")}
+            className="group rounded border border-virtua-border bg-virtua-panel p-6 text-left transition-colors hover:border-virtua-accent hover:bg-virtua-panelHover"
+          >
+            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded bg-virtua-accentSoft text-virtua-accent">
+              <Server className="h-6 w-6" />
+            </div>
+            <h1 className="text-2xl font-semibold">{t("mode.proxmox")}</h1>
+            <p className="mt-2 text-sm leading-6 text-virtua-muted">
+              {t("mode.proxmox_desc")}
+            </p>
+            <span className="mt-5 inline-flex h-9 items-center rounded border border-virtua-border px-4 text-sm text-virtua-text group-hover:border-virtua-accent">
+              {t("mode.proxmox")}
             </span>
           </button>
         </div>

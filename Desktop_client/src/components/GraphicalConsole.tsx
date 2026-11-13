@@ -7,6 +7,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { localVirtua } from "@/api/localVirtua";
 import { setConsolePrefs, useConsolePrefs } from "@/consolePrefs";
 import { virtuaClient } from "@/api/virtuaClient";
+import { proxmoxClient } from "@/api/proxmoxClient";
 import { installSpiceAudioFallback, resumeSpiceAudio } from "./spiceAudioFallback";
 import type { ConsoleMode, DesktopConsoleTicketResponse, PowerAction, VirtuaResource } from "@/types";
 
@@ -21,6 +22,7 @@ type RfbInstance = RFB & {
 };
 
 function fetchConsoleTicket(resource: VirtuaResource, mode: ConsoleMode): Promise<DesktopConsoleTicketResponse> {
+  if (resource.source === "proxmox") return proxmoxClient.getConsoleTicket(resource, mode);
   return resource.source === "local"
     ? localVirtua.getConsoleTicket(resource.id, mode)
     : virtuaClient.getConsoleTicket(resource.id, mode);
@@ -167,7 +169,11 @@ function CloudGraphicalConsole({
 
     const mountVnc = (ticket: DesktopConsoleTicketResponse) => {
       if (!containerRef.current) return;
-      const rfb = new RFB(containerRef.current, ticket.url, { wsProtocols: ["binary"] }) as RfbInstance;
+      // Proxmox's VNC asks for the vncticket as password.
+      const rfb = new RFB(containerRef.current, ticket.url, {
+        wsProtocols: ["binary"],
+        ...(ticket.password ? { credentials: { password: ticket.password } } : {}),
+      }) as RfbInstance;
       rfb.viewOnly = false;
       rfb.clipViewport = true;
       rfb.scaleViewport = true;
@@ -261,8 +267,9 @@ function CloudGraphicalConsole({
       setStatusVisible(true);
 
       // SPICE first (needed for qxl / audio); silent fallback to VNC if the
-      // server hasn't enabled SPICE for this VM yet.
-      try {
+      // server hasn't enabled SPICE for this VM yet. Proxmox serves SPICE
+      // through its own proxy, not a websocket: VNC straight away.
+      if (resource.source !== "proxmox") try {
         const ticket = await fetchConsoleTicket(resource, "spice");
         if (disposed || !containerRef.current) return;
         mountSpice(ticket);

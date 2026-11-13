@@ -8,6 +8,7 @@ mod netprobe;
 mod firmware;
 use firmware::UefiFirmware;
 mod platform;
+mod proxmox;
 mod quickcreate;
 mod unified;
 mod wininstall;
@@ -4550,6 +4551,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            proxmox::pve_probe,
+            proxmox::pve_login,
+            proxmox::pve_restore,
+            proxmox::pve_logout,
+            proxmox::pve_api,
+            proxmox::pve_console,
             save_refresh_token,
             load_refresh_token,
             clear_refresh_token,

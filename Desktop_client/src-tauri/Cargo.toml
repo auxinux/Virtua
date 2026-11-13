@@ -21,7 +21,9 @@ getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net", "process"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+# Proxmox mode: pinned self-signed certificates (rustls 0.23, ring, as reqwest).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 

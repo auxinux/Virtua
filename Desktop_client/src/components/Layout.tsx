@@ -51,6 +51,15 @@ const localNavItems = [
   { to: "/settings", labelKey: "nav.local_settings", icon: Settings },
 ];
 
+const proxmoxNavItems = [
+  { to: "/", labelKey: "nav.console", icon: TerminalSquare },
+  { to: "/dashboard", labelKey: "nav.dashboard", icon: Gauge },
+  { to: "/inventory", labelKey: "nav.inventory", icon: Network },
+  { to: "/vms", labelKey: "nav.vm", icon: Monitor },
+  { to: "/lxc", labelKey: "nav.lxc", icon: Container },
+  { to: "/tasks", labelKey: "nav.tasks", icon: CheckCircle2 },
+];
+
 const kindIcon: Record<ResourceKind, typeof Monitor> = {
   vm: Monitor,
   lxc: Container,
@@ -180,12 +189,16 @@ export function Layout({
   // Console focus mode: every application bar gives way to the VM screen.
   const hideChrome = consolePrefs.focus && location.pathname.startsWith("/console/");
   const runningTasks = tasks.filter((task) => task.status === "running");
-  const navItems = usageMode === "local" ? localNavItems : cloudNavItems;
+  const navItems = usageMode === "local" ? localNavItems : usageMode === "proxmox" ? proxmoxNavItems : cloudNavItems;
   const syncLabel = connection?.lastSync ? `${t("layout.subtitle_local")} ${formatSyncTime(connection.lastSync, language)}` : "";
-  const headerTitle = usageMode === "local" ? t("layout.local_mode") : connection?.endpoint ?? t("layout.remote_mode");
+  const headerTitle = usageMode === "local"
+    ? t("layout.local_mode")
+    : usageMode === "proxmox"
+      ? `${connection?.name ?? "Proxmox VE"} · ${connection?.endpoint ?? ""}`
+      : connection?.endpoint ?? t("layout.remote_mode");
   const headerSubtitle = loadError
     ? loadError
-    : usageMode === "local"
+    : usageMode === "local" || usageMode === "proxmox"
       ? syncLabel
       : `${t("layout.subtitle_remote")}${syncLabel ? ` / ${syncLabel}` : ""}`;
 
@@ -293,7 +306,7 @@ export function Layout({
           {onSwitchMode ? (
             <button onClick={onSwitchMode} className="virtua-button !h-8 text-xs px-3 border-virtua-accentSoft text-virtua-accent" title="Changer Local/Cloud">
               <Repeat2 className="mr-1.5 h-3.5 w-3.5" />
-              {usageMode === "local" ? "Cloud" : "Local"}
+              {usageMode === "local" ? "Cloud" : usageMode === "proxmox" ? "Modes" : "Local"}
             </button>
           ) : null}
           <div className="hidden items-center gap-2 rounded border border-virtua-border bg-virtua-shade/15 px-3 py-1.5 text-xs lg:flex">

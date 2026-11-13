@@ -177,17 +177,17 @@ export const modeStore = {
    * box, a Virtua server is one click away. `unset` only after an explicit
    * "back to mode selection".
    */
-  get(): "unset" | "local" | "cloud" {
+  get(): "unset" | "local" | "cloud" | "proxmox" {
     try {
       const value = localStorage.getItem(modeKey);
-      if (value === "local" || value === "cloud" || value === "unset") return value;
+      if (value === "local" || value === "cloud" || value === "proxmox" || value === "unset") return value;
     } catch {
       /* Storage unavailable: fall through to the default. */
     }
     return "local";
   },
 
-  set(mode: "local" | "cloud") {
+  set(mode: "local" | "cloud" | "proxmox") {
     localStorage.setItem(modeKey, mode);
   },
 

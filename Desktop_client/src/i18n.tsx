@@ -104,6 +104,8 @@ const translations: Record<Language, Dictionary> = {
     "mode.local_desc": "Gérer les VM, LXC et conteneurs Docker de cet ordinateur. Recommandé.",
     "mode.remote": "Mode Client",
     "mode.remote_desc": "Se connecter à un serveur Virtua ou à un VDM (Cloud)",
+    "mode.proxmox": "Proxmox VE",
+    "mode.proxmox_desc": "Se connecter directement à un serveur Proxmox VE 9 : VM, conteneurs, consoles.",
     "mode.not_avail": "Non disponible sur cet appareil",
 
     // Resources / Inventory
@@ -222,6 +224,8 @@ const translations: Record<Language, Dictionary> = {
     "mode.local_desc": "Manage the VMs, LXC and Docker containers of this computer. Recommended.",
     "mode.remote": "Client Mode",
     "mode.remote_desc": "Connect to a Virtua server or a VDM (Cloud)",
+    "mode.proxmox": "Proxmox VE",
+    "mode.proxmox_desc": "Connect straight to a Proxmox VE 9 server: VMs, containers, consoles.",
     "mode.not_avail": "Not available on this device",
 
     // Resources / Inventory

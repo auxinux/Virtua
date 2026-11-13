@@ -5,6 +5,10 @@ import { Layout } from "@/components/Layout";
 import { localVirtua, modeStore, type EngineInstallPrompt } from "@/api/localVirtua";
 import { getRuntimePlatform } from "@/api/runtime";
 import { virtuaClient } from "@/api/virtuaClient";
+import { proxmoxClient } from "@/api/proxmoxClient";
+import { ProxmoxAuthPage } from "@/pages/ProxmoxAuthPage";
+import { ProxmoxResourcesPage } from "@/pages/ProxmoxResourcesPage";
+import { ProxmoxDetailPage } from "@/pages/ProxmoxDetailPage";
 import { AuthPage } from "@/pages/AuthPage";
 import { Dashboard } from "@/pages/Dashboard";
 import { ConsolePage } from "@/pages/ConsolePage";
@@ -123,6 +127,32 @@ export default function App() {
     }
   }
 
+  async function loadProxmoxData({ restore = true }: { restore?: boolean } = {}) {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      if (restore) {
+        const restored = await proxmoxClient.restore();
+        if (!restored) {
+          setAuthenticated(false);
+          return;
+        }
+      }
+      const [inventory, nextTasks] = await Promise.all([proxmoxClient.inventory(), proxmoxClient.listTasks().catch(() => [])]);
+      setUser(proxmoxClient.getUser());
+      setConnection(proxmoxClient.getConnection());
+      setNodes(inventory.nodes);
+      setResources(inventory.resources);
+      setTasks(nextTasks);
+      setAuthenticated(true);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Connexion Proxmox impossible");
+      setAuthenticated(false);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function loadLocalData() {
     setLoading(true);
     setLoadError(null);
@@ -183,6 +213,10 @@ export default function App() {
       void loadLocalData();
       return;
     }
+    if (usageMode === "proxmox") {
+      void loadProxmoxData();
+      return;
+    }
     void loadCloudData();
   }, [usageMode]);
 
@@ -209,6 +243,10 @@ export default function App() {
         setTasks(localVirtua.listTasks());
         return;
       }
+      if (usageMode === "proxmox") {
+        void proxmoxClient.listTasks().then(setTasks).catch(() => undefined);
+        return;
+      }
       void virtuaClient.listTasks().then(setTasks).catch(() => undefined);
     };
     window.addEventListener("virtua-tasks-changed", refreshTasks);
@@ -231,6 +269,15 @@ export default function App() {
         setResources(keepIfSame(nextResources));
         setTasks(keepIfSame(localVirtua.listTasks()));
         setConnection((current) => current ? { ...current, lastSync: new Date().toISOString() } : current);
+        return;
+      }
+      if (usageMode === "proxmox") {
+        const [inventory, nextTasks] = await Promise.all([proxmoxClient.inventory(), proxmoxClient.listTasks().catch(() => [])]);
+        setNodes(keepIfSame(inventory.nodes));
+        setResources(keepIfSame(inventory.resources));
+        setTasks(keepIfSame(nextTasks));
+        setConnection((current) => current ? { ...current, lastSync: new Date().toISOString() } : current);
+        failuresRef.current = 0;
         return;
       }
       const [nextResources, nextTasks] = await Promise.all([
@@ -295,6 +342,9 @@ export default function App() {
     if (usageMode === "cloud") {
       await virtuaClient.logout();
     }
+    if (usageMode === "proxmox") {
+      await proxmoxClient.logout().catch(() => undefined);
+    }
     setUser(null);
     setConnection(null);
     setNodes([]);
@@ -311,6 +361,10 @@ export default function App() {
   };
 
   const switchMode = () => {
+    if (usageMode === "proxmox") {
+      backToModeSelection();
+      return;
+    }
     const nextMode = usageMode === "local" ? "cloud" : "local";
     modeStore.set(nextMode);
     setAuthenticated(false);
@@ -342,6 +396,29 @@ export default function App() {
       <EngineSetup requiredOnly onReady={() => void loadLocalData()} />
       <button className="virtua-button" onClick={() => selectMode("cloud")}>Se connecter plutôt à un serveur Virtua (Cloud)</button>
     </div></div>;
+  }
+
+  if (!isAuthenticated && usageMode === "proxmox") {
+    return <ProxmoxAuthPage initialError={loadError} onBack={backToModeSelection} onAuthenticated={() => void loadProxmoxData({ restore: false })} />;
+  }
+
+  if (usageMode === "proxmox") {
+    const pveAction = (resourceId: string, action: Parameters<typeof proxmoxClient.runAction>[1]) => proxmoxClient.runAction(resourceId, action);
+    return (
+      <Layout connection={connection} nodes={nodes} resources={resources} tasks={tasks} user={user} onLogout={logout} onSwitchMode={switchMode} loadError={loadError} usageMode={usageMode}>
+        <Routes>
+          <Route path="/" element={<ConsolePage resources={resources} user={user} runResourceAction={pveAction} onChanged={() => refreshInventory()} />} />
+          <Route path="/console/:resourceId" element={<ConsolePage resources={resources} user={user} runResourceAction={pveAction} onChanged={() => refreshInventory()} />} />
+          <Route path="/dashboard" element={<Dashboard connection={connection} nodes={nodes} resources={resources} tasks={tasks} usageMode={usageMode} />} />
+          <Route path="/inventory" element={<ProxmoxResourcesPage kind="all" resources={resources} onChanged={() => refreshInventory()} />} />
+          <Route path="/vms" element={<ProxmoxResourcesPage kind="vm" resources={resources} onChanged={() => refreshInventory()} />} />
+          <Route path="/lxc" element={<ProxmoxResourcesPage kind="lxc" resources={resources} onChanged={() => refreshInventory()} />} />
+          <Route path="/resources/:resourceId" element={<ProxmoxDetailPage resources={resources} onChanged={() => refreshInventory()} />} />
+          <Route path="/tasks" element={<TasksPage tasks={tasks} onChanged={() => void proxmoxClient.listTasks().then(setTasks)} />} />
+          <Route path="*" element={<ProxmoxResourcesPage kind="all" resources={resources} onChanged={() => refreshInventory()} />} />
+        </Routes>
+      </Layout>
+    );
   }
 
   if (!isAuthenticated) {
