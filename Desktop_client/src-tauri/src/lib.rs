@@ -3686,24 +3686,45 @@ fn build_qemu_command(
 
     if let Some(dir) = &ports.unattend_dir {
         validate_qemu_path(dir, "autounattend")?;
-        // vvfat: QEMU presents the directory as a read-only FAT disk. Windows
-        // setup reads autounattend.xml from the root of any removable drive.
-        command
-            .arg("-drive")
-            .arg(format!(
-                "if=none,id=virtua-unattend,format=raw,readonly=on,file=fat:{}",
-                dir
-            ));
-        if vm.architecture == "arm64" {
-            command
-                .arg("-device")
-                .arg("usb-storage,drive=virtua-unattend,removable=on");
+        let user_floppy = vm.floppy_path.as_deref().map(str::trim).is_some_and(|p| !p.is_empty());
+        if vm.architecture != "arm64" && !user_floppy {
+            // x86: drive A:. A USB stick is a *disk* to Windows Setup: found by
+            // its inbox driver before the virtio disk (loaded later from the
+            // driver disc), it became Disk 0 — the disk the quick-create answer
+            // file wipes and installs to. Setup then failed on the read-only
+            // stick, asked where to install, and "Windows 11 installation
+            // failed" at the end of the copy. A floppy is never a Setup disk
+            // (the server's quick create always used one).
+            let drive = format!("format=raw,readonly=on,file=fat:floppy:{}", dir);
+            if vm.machine == "pc" {
+                command.arg("-drive").arg(format!("if=floppy,index=0,{drive}"));
+            } else {
+                command
+                    .arg("-drive")
+                    .arg(format!("if=none,id=virtua-unattend,{drive}"))
+                    .args(["-device", "isa-fdc,id=virtua-unattend-fdc", "-device", "floppy,drive=virtua-unattend,bus=virtua-unattend-fdc.0,unit=0"]);
+            }
         } else {
+            // ARM64 `virt` has no floppy, and an x86 VM may already use A:.
+            // vvfat: QEMU presents the directory as a read-only FAT disk. Windows
+            // setup reads autounattend.xml from the root of any removable drive.
             command
-                .arg("-device")
-                .arg("qemu-xhci,id=virtua-unattend-usb")
-                .arg("-device")
-                .arg("usb-storage,bus=virtua-unattend-usb.0,drive=virtua-unattend,removable=on");
+                .arg("-drive")
+                .arg(format!(
+                    "if=none,id=virtua-unattend,format=raw,readonly=on,file=fat:{}",
+                    dir
+                ));
+            if vm.architecture == "arm64" {
+                command
+                    .arg("-device")
+                    .arg("usb-storage,drive=virtua-unattend,removable=on");
+            } else {
+                command
+                    .arg("-device")
+                    .arg("qemu-xhci,id=virtua-unattend-usb")
+                    .arg("-device")
+                    .arg("usb-storage,bus=virtua-unattend-usb.0,drive=virtua-unattend,removable=on");
+            }
         }
     }
 
@@ -5149,7 +5170,26 @@ mod local_mode_tests {
             // No ARM firmware on the test host: check the x86 wiring instead.
             build_qemu_command("qemu", &sample_vm("amd64", "std"), &ports, &launch_plans("amd64", "std").remove(0)).unwrap()
         }));
-        assert!(args.iter().any(|a| a.ends_with("file=fat:/tmp/virtua-unattend") && a.contains("readonly=on")));
+        assert!(args.iter().any(|a| a.contains("file=fat:") && a.ends_with("/tmp/virtua-unattend") && a.contains("readonly=on")));
+    }
+
+    #[test]
+    fn the_x86_answer_file_is_a_floppy_never_a_setup_disk() {
+        let mut ports = sample_ports();
+        ports.unattend_dir = Some("/tmp/virtua-unattend".into());
+        let vm = sample_vm("amd64", "std");
+        let args = command_args(&build_qemu_command("qemu", &vm, &ports, &launch_plans("amd64", "std").remove(0)).unwrap());
+        assert!(args.iter().any(|a| a.contains("readonly=on,file=fat:floppy:/tmp/virtua-unattend")));
+        assert!(args.iter().any(|a| a == "floppy,drive=virtua-unattend,bus=virtua-unattend-fdc.0,unit=0"));
+        // No USB disk: Windows Setup counted it as Disk 0.
+        assert!(!args.iter().any(|a| a.contains("usb-storage") && a.contains("virtua-unattend")));
+        // The rest of the command is still built after it.
+        assert!(args.iter().any(|a| a.contains("org.qemu.guest_agent.0")));
+
+        // A VM that already uses drive A: keeps the USB stick.
+        let mut with_floppy = sample_vm("amd64", "std");
+        with_floppy.floppy_path = Some("/f/dos.img".into());
+        let args = command_args(&build_qemu_command("qemu", &with_floppy, &ports, &launch_plans("amd64", "std").remove(0)).unwrap_or_else(|e| panic!("{e}")));
         assert!(args.iter().any(|a| a.starts_with("usb-storage") && a.contains("drive=virtua-unattend")));
     }
 

@@ -4253,12 +4253,16 @@ function validateTimezone(value: unknown): string {
  * Windows install: without a key the firmware falls through to the empty
  * disk. Keys only for a few seconds, never on a later start (a later key
  * press would reinstall over the disk).
+ *
+ * F12, not Enter: on a fast node Setup is already copying files within these
+ * 25 s, and the focused button of that screen is "Cancel" — an Enter cancelled
+ * the install. F12 answers the firmware prompt and does nothing in Setup.
  */
 function pressBootKeys(name: string) {
   const until = Date.now() + 25_000;
   const tick = () => {
     if (Date.now() > until) return;
-    execFileAsync("virsh", ["send-key", name, "KEY_ENTER"], { timeout: 3000 }).catch(() => {}).finally(() => setTimeout(tick, 500));
+    execFileAsync("virsh", ["send-key", name, "KEY_F12"], { timeout: 3000 }).catch(() => {}).finally(() => setTimeout(tick, 500));
   };
   tick();
 }

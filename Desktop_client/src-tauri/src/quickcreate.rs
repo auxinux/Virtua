@@ -552,11 +552,18 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
 /// Answer "Press any key to boot from CD or DVD" on the very first start of a
 /// Windows install: without a key the firmware falls through to the empty
 /// disk and stops. Keys only for a few seconds, never on a later start.
+///
+/// F12, not Enter: on a fast machine Setup is already copying files within
+/// these 25 s, and the focused button of that screen is "Cancel" — an Enter
+/// cancelled the install. F12 answers the firmware prompt and does nothing in
+/// Setup.
+pub(crate) const BOOT_KEY: &str = "f12";
+
 fn press_boot_keys(qmp_port: u16) {
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
         while started.elapsed() < Duration::from_secs(25) {
-            let _ = qmp_send_key(qmp_port, "ret");
+            let _ = qmp_send_key(qmp_port, BOOT_KEY);
             std::thread::sleep(Duration::from_millis(500));
         }
     });
@@ -878,6 +885,11 @@ mod tests {
         ] {
             assert!(preseed.contains(line), "{line}");
         }
+    }
+
+    #[test]
+    fn the_boot_prompt_key_cannot_press_setups_cancel_button() {
+        assert_eq!(BOOT_KEY, "f12");
     }
 
     #[test]
