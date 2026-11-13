@@ -12,6 +12,16 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.14",
+      items: fr
+        ? [
+            "Création rapide Windows 11 : la touche envoyée pour « Press any key to boot from CD » est maintenant F12 au lieu d'Entrée. Sur un nœud rapide, l'installation copiait déjà ses fichiers pendant ces 25 secondes, et un Entrée appuyait sur « Annuler ».",
+          ]
+        : [
+            "Windows 11 quick create: the key sent for \"Press any key to boot from CD\" is now F12 instead of Enter. On a fast node Setup was already copying files during those 25 seconds, and an Enter pressed \"Cancel\".",
+          ],
+    },
+    {
       v: "0.8.13",
       items: fr
         ? [
