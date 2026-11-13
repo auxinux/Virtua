@@ -12,6 +12,16 @@ export default function AboutPage() {
 
   const releases: Array<{ v: string; items: string[] }> = [
     {
+      v: "0.8.15",
+      items: fr
+        ? [
+            "Création rapide Windows 11 : une ISO publiée (24H2, 25H2…) est choisie avant une build Insider, dans la bibliothèque puis sur le dépôt. La build Insider 26300 du dépôt bloquait l'installation automatique à l'étape « OOBEZDP ».",
+          ]
+        : [
+            "Windows 11 quick create: a released ISO (24H2, 25H2…) is picked before an Insider build, from the library then the depot. The depot's Insider build 26300 stopped the unattended install at the \"OOBEZDP\" step.",
+          ],
+    },
+    {
       v: "0.8.14",
       items: fr
         ? [
