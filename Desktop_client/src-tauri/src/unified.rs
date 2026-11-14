@@ -611,12 +611,57 @@ pub fn rdp_file(host: &str, port: u16, user: &str, app: Option<&UnifiedApp>) -> 
     lines.join("\r\n") + "\r\n"
 }
 
+/// FreeRDP that gives up at once (no XQuartz, refused login, RemoteApp not
+/// allowed…) used to leave the page on "opening…" with nothing on screen:
+/// wait a few seconds and report its own error lines.
+fn early_failure(mut child: std::process::Child, log: &std::path::Path, log_start: u64) -> Result<(), String> {
+    for _ in 0..40 {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                let text = fs::read(log).ok().map(|bytes| String::from_utf8_lossy(&bytes[(log_start as usize).min(bytes.len())..]).into_owned()).unwrap_or_default();
+                let reason = freerdp_error_lines(&text);
+                return Err(format!(
+                    "FreeRDP s'est arrêté ({}){}",
+                    status.code().map(|c| format!("code {c}")).unwrap_or_else(|| "signal".into()),
+                    if reason.is_empty() { String::new() } else { format!(" : {reason}") }
+                ));
+            }
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(_) => break,
+        }
+    }
+    // Still running after 8 s: the window is up (or connecting).
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// The ERROR lines of a FreeRDP log, without the timestamp/module prefix.
+pub fn freerdp_error_lines(log: &str) -> String {
+    log.lines()
+        .filter(|line| line.contains("ERROR") || line.contains("error") || line.contains("Error"))
+        .map(|line| line.rsplit_once("]: ").map(|(_, msg)| msg).unwrap_or(line).trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" — ")
+}
+
 fn spawn_client(client: &Client, vm: &LocalVm, host: &str, port: u16, user: &str, password: &str, app: Option<&UnifiedApp>) -> Result<(), String> {
     let log = local_state_dir()?.join("Logs").join(format!("{}-unified.log", safe_file_name(&vm.name)?));
     if let Some(parent) = log.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let log_file = fs::OpenOptions::new().create(true).append(true).open(&log).map_err(|e| e.to_string())?;
+    let log_start = fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     match client {
         Client::Mstsc(binary) => {
             let entry = keyring::Entry::new_with_target(&format!("TERMSRV/{host}"), KEYCHAIN_SERVICE, user).map_err(|e| e.to_string())?;
@@ -649,15 +694,11 @@ fn spawn_client(client: &Client, vm: &LocalVm, host: &str, port: u16, user: &str
                     .write_all((args.join("\n") + "\n").as_bytes())
                     .map_err(|e| format!("FreeRDP : {e}"))?;
                 drop(stdin);
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                early_failure(child, &log, log_start)?;
             } else {
                 command.args(&args).stdin(Stdio::null());
-                let mut child = command.spawn().map_err(|e| format!("Lancement de FreeRDP impossible : {e}"))?;
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                let child = command.spawn().map_err(|e| format!("Lancement de FreeRDP impossible : {e}"))?;
+                early_failure(child, &log, log_start)?;
             }
         }
     }
@@ -1230,6 +1271,13 @@ pub async fn local_unified_install_client(app: tauri::AppHandle) -> Result<Clien
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn freerdp_errors_are_reported_without_their_prefix() {
+        let log = "[12:00:01:123] [4242:4243] [ERROR][com.freerdp.core] - [freerdp_tcp_connect]: connect to 127.0.0.1:6301 failed\n[12:00:01:124] [4242:4243] [INFO][x] - ok\n[12:00:01:125] [4242:4243] [ERROR][com.freerdp.client.x11] - [xf_pre_connect]: failed to open display: :0\n";
+        assert_eq!(freerdp_error_lines(log), "connect to 127.0.0.1:6301 failed — failed to open display: :0");
+        assert_eq!(freerdp_error_lines("[INFO] all fine\n"), "");
+    }
+
     use super::*;
 
     #[test]
