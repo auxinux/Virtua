@@ -13,8 +13,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Commands understood by this agent (also announced in `hello`).
-pub const COMMANDS: &[&str] = &["hello", "ping", "network", "exec", "shutdown"];
+pub const COMMANDS: &[&str] = &["hello", "ping", "network", "exec", "shutdown", "clipboard-set", "clipboard-get", "display", "display-modes"];
 
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -102,6 +103,17 @@ fn exec(platform: &dyn Platform, args: &Value) -> Result<Value, String> {
     }))
 }
 
+/// The largest display mode that fits `width`×`height` (the console's
+/// size); the smallest one when none fits.
+pub fn pick_mode(modes: &[(u32, u32)], width: u32, height: u32) -> Option<(u32, u32)> {
+    modes
+        .iter()
+        .copied()
+        .filter(|&(w, h)| w <= width && h <= height)
+        .max_by_key(|&(w, h)| (w as u64) * (h as u64))
+        .or_else(|| modes.iter().copied().min_by_key(|&(w, h)| (w as u64) * (h as u64)))
+}
+
 /// Splits a byte stream into lines; keeps a partial line for later.
 #[derive(Default)]
 pub struct LineBuffer {
@@ -160,6 +172,16 @@ mod tests {
         assert_eq!(String::from_utf8(stdout).unwrap(), "powershell.exe -NoProfile");
         assert_eq!(out["ok"]["exitCode"], 0);
         assert!(answer(r#"{"id":5,"cmd":"exec","args":{}}"#)["error"].as_str().unwrap().contains("path"));
+    }
+
+    #[test]
+    fn the_display_takes_the_largest_mode_that_fits_the_console() {
+        let modes = [(800, 600), (1024, 768), (1280, 720), (1280, 800), (1920, 1080)];
+        assert_eq!(pick_mode(&modes, 1366, 820), Some((1280, 800)));
+        assert_eq!(pick_mode(&modes, 1920, 1200), Some((1920, 1080)));
+        assert_eq!(pick_mode(&modes, 1100, 700), Some((800, 600)));
+        assert_eq!(pick_mode(&modes, 300, 200), Some((800, 600)), "nothing fits: the smallest");
+        assert_eq!(pick_mode(&[], 800, 600), None);
     }
 
     #[test]

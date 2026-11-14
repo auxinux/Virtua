@@ -28,6 +28,8 @@ export interface UnifiedVm {
   virtuaAgent?: string | null;
   /** The Agent Virtua can be pushed through the QEMU guest agent. */
   canInstallAgent?: boolean;
+  /** Agent version embedded in this Virtua Desktop. */
+  bundledAgent?: string;
   rdpReady: boolean;
   needsRestart: boolean;
   apps: UnifiedApp[];

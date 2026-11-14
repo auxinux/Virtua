@@ -247,6 +247,22 @@ test("a Windows VM not yet unified walks through the prerequisites", async ({ pa
   await expect(page.getByRole("button", { name: "Activer le mode Unifié" })).toBeDisabled();
 });
 
+test("a local console shares the clipboard and sizes Windows to it", async ({ page }) => {
+  await localDesktop(page, { vms: [{ ...degradedVm, state: "running", pid: 42 }] });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/#/console/local-vm-1");
+  const calls = (cmd: string) => page.evaluate((c) => (window as any).testCalls.filter((x: any) => x.cmd === c).map((x: any) => x.args), cmd);
+  await expect.poll(() => calls("local_agent_focus")).toContainEqual({ id: "local-vm-1" });
+  await expect.poll(async () => (await calls("local_agent_display")).length, { timeout: 5000 }).toBeGreaterThan(0);
+  const [display] = await calls("local_agent_display");
+  expect(display.id).toBe("local-vm-1");
+  expect(display.width).toBeGreaterThanOrEqual(320);
+  expect(display.height).toBeGreaterThanOrEqual(240);
+  // Leaving the console stops the sharing.
+  await page.goto("/#/vms");
+  await expect.poll(() => calls("local_agent_focus")).toContainEqual({ id: null });
+});
+
 test("a running Windows VM without the Agent Virtua offers to install it", async ({ page }) => {
   await localDesktop(page, {
     unifiedVms: [{

@@ -4749,6 +4749,8 @@ pub fn run() {
             companion::local_lxc_logs,
             unified::local_unified_overview,
             unified::local_install_virtua_agent,
+            unified::local_agent_focus,
+            unified::local_agent_display,
             unified::local_unified_prepare,
             unified::local_unified_disable,
             unified::local_unified_refresh_apps,

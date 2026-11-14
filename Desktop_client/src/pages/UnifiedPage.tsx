@@ -130,9 +130,13 @@ function VmCard({ vm, clientReady, onChanged, report }: { vm: UnifiedVm; clientR
 
       {vm.canInstallAgent && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-virtua-accent/40 bg-virtua-accentSoft p-3 text-sm">
-          <span>Installez l’Agent Virtua dans cette VM : liaison native avec Windows (x64 et ARM64), plus rapide et plus fiable pour le mode Unifié.</span>
+          <span>
+            {vm.virtuaAgent
+              ? `Agent Virtua ${vm.virtuaAgent} dans cette VM : mettez-le à jour (${vm.bundledAgent ?? "nouvelle version"}) pour le presse-papiers partagé et la résolution qui suit la fenêtre.`
+              : "Installez l’Agent Virtua dans cette VM : liaison native avec Windows (x64 et ARM64), presse-papiers partagé, résolution qui suit la fenêtre."}
+          </span>
           <button className="virtua-button-primary" disabled={!!busy} onClick={() => void run("agent", () => unified.installAgent(vm.id), "Agent Virtua installé.")}>
-            Installer l’Agent Virtua
+            {vm.virtuaAgent ? "Mettre à jour l’Agent Virtua" : "Installer l’Agent Virtua"}
           </button>
         </div>
       )}

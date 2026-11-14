@@ -78,6 +78,53 @@ function CloudGraphicalConsole({
   const [protocol, setProtocol] = useState<"spice" | "vnc" | null>(null);
   const [audioAvailable, setAudioAvailable] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
+
+  // Agent Virtua (local VMs): the clipboard is shared with the VM whose
+  // console is shown, and Windows follows the console's size.
+  useEffect(() => {
+    if (resource.source !== "local") return;
+    const focus = () => void localVirtua.agentFocus(resource.id).catch(() => undefined);
+    focus();
+    window.addEventListener("focus", focus);
+    return () => {
+      window.removeEventListener("focus", focus);
+      void localVirtua.agentFocus(null).catch(() => undefined);
+    };
+  }, [resource.id, resource.source]);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (resource.source !== "local" || !element) return;
+    let timer = 0;
+    let last = "";
+    let retries = 0;
+    const apply = () => {
+      const width = Math.round(element.clientWidth);
+      const height = Math.round(element.clientHeight);
+      const key = `${width}x${height}`;
+      if (width < 320 || height < 240 || key === last) return;
+      last = key;
+      void localVirtua.agentDisplay(resource.id, width, height).then(
+        () => { retries = 0; },
+        () => {
+          // Windows still starting (no agent, no session yet): try again.
+          last = "";
+          if (retries++ < 24) timer = window.setTimeout(apply, 5000);
+        },
+      );
+    };
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      retries = 0;
+      // After the resize settles, not on every pixel.
+      timer = window.setTimeout(apply, 800);
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      window.clearTimeout(timer);
+    };
+  }, [resource.id, resource.source]);
   const [isRestarting, setRestarting] = useState(false);
   const [isAppFullscreen, setAppFullscreen] = useState(false);
   const [isWindowFullscreen, setWindowFullscreen] = useState(false);

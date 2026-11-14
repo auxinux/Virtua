@@ -1,6 +1,6 @@
 [package]
 name = "virtua-agent"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Agent Virtua: Windows guest service for AuxiNux Virtua Desktop"
 license = "MIT"
@@ -26,6 +26,15 @@ windows-sys = { version = "0.59", features = [
   "Win32_NetworkManagement_Ndis",
   "Win32_Networking_WinSock",
   "Win32_System_SystemInformation",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Environment",
+  "Win32_System_Pipes",
+  "Win32_Security_Authorization",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
 ] }
 
 [profile.release]

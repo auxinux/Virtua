@@ -25,6 +25,9 @@ pub fn agent_binary(architecture: &str) -> &'static [u8] {
     if architecture == "arm64" { AGENT_ARM64 } else { AGENT_X64 }
 }
 
+/// Version of the embedded agent binaries (Desktop_client/agent/Cargo.toml).
+pub const BUNDLED_VERSION: &str = "0.2.0";
+
 /// virtio-serial port name the agent opens in Windows.
 pub const PORT_NAME: &str = "org.auxinux.virtua.0";
 
@@ -129,9 +132,19 @@ fn run(port: u16, link: Arc<Link>) {
                 Err(_) => break,
             }
             let Ok(message) = serde_json::from_str::<Value>(line.trim()) else { continue };
-            if message.get("event").and_then(Value::as_str) == Some("hello") {
-                *link.hello.lock().unwrap_or_else(|e| e.into_inner()) = message.get("hello").cloned();
-                continue;
+            match message.get("event").and_then(Value::as_str) {
+                Some("hello") => {
+                    *link.hello.lock().unwrap_or_else(|e| e.into_inner()) = message.get("hello").cloned();
+                    continue;
+                }
+                Some("clipboard") => {
+                    if let Some(text) = message.get("text").and_then(Value::as_str) {
+                        clipboard::from_guest(port, text);
+                    }
+                    continue;
+                }
+                Some(_) => continue,
+                None => {}
             }
             let Some(id) = message.get("id").and_then(Value::as_u64) else { continue };
             if id == hello_id {
@@ -219,6 +232,69 @@ pub fn exec(port: u16, path: &str, args: &[String], timeout: Duration) -> Result
     Ok((reply.get("exitCode").and_then(Value::as_i64).unwrap_or(-1), decode("stdout"), decode("stderr")))
 }
 
+/// Shared clipboard, with the VM whose console is on screen only: the host
+/// clipboard is not handed to VMs in the background, and a background VM
+/// cannot set it.
+pub mod clipboard {
+    use super::*;
+
+    static FOCUS: Mutex<Option<u16>> = Mutex::new(None);
+    /// Last text either side put on the host clipboard.
+    static LAST: Mutex<Option<String>> = Mutex::new(None);
+
+    fn host() -> &'static Mutex<Option<arboard::Clipboard>> {
+        // Kept alive: on Linux the owner must stay to serve what it set.
+        static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+        CLIPBOARD.get_or_init(|| Mutex::new(arboard::Clipboard::new().ok()))
+    }
+
+    fn host_text() -> Option<String> {
+        host().lock().unwrap_or_else(|e| e.into_inner()).as_mut()?.get_text().ok()
+    }
+
+    /// The console of this agent port is shown (None: no console).
+    pub fn set_focus(port: Option<u16>) {
+        *FOCUS.lock().unwrap_or_else(|e| e.into_inner()) = port;
+        static WATCHER: OnceLock<()> = OnceLock::new();
+        WATCHER.get_or_init(|| {
+            std::thread::spawn(watch_host);
+        });
+        if let (Some(port), Some(text)) = (port, host_text()) {
+            push(port, text);
+        }
+    }
+
+    fn push(port: u16, text: String) {
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.clone());
+        if ready(port) {
+            let _ = request(port, "clipboard-set", json!({ "text": text }), Duration::from_secs(5));
+        }
+    }
+
+    fn watch_host() {
+        loop {
+            std::thread::sleep(Duration::from_millis(700));
+            let Some(port) = *FOCUS.lock().unwrap_or_else(|e| e.into_inner()) else { continue };
+            let Some(text) = host_text() else { continue };
+            let changed = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_deref() != Some(text.as_str());
+            if changed {
+                push(port, text);
+            }
+        }
+    }
+
+    /// Text copied in Windows: onto this computer's clipboard.
+    pub(super) fn from_guest(port: u16, text: &str) {
+        if *FOCUS.lock().unwrap_or_else(|e| e.into_inner()) != Some(port) {
+            return;
+        }
+        *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
+        if let Some(clipboard) = host().lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            let _ = clipboard.set_text(text.to_string());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +339,12 @@ mod tests {
     }
 
     #[test]
+    fn the_bundled_version_matches_the_agent_sources() {
+        let manifest = include_str!("../../agent/Cargo.toml");
+        assert!(manifest.contains(&format!("version = \"{BUNDLED_VERSION}\"")), "bump BUNDLED_VERSION with agent/Cargo.toml");
+    }
+
+    #[test]
     fn many_callers_share_one_connection() {
         let port = fake_agent();
         wait_ready(port);
@@ -292,5 +374,40 @@ mod tests {
         assert!(!ready(port));
         assert!(request(port, "ping", json!({}), Duration::from_millis(200)).unwrap_err().contains("absent"));
         forget(port);
+    }
+}
+
+/// Against a real Windows guest running the Agent Virtua:
+/// `VIRTUA_AGENT_PORT=6390 cargo test --lib agent::live -- --ignored --nocapture`
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn against_a_real_windows_guest() {
+        let port: u16 = std::env::var("VIRTUA_AGENT_PORT").expect("VIRTUA_AGENT_PORT").parse().unwrap();
+        for _ in 0..100 {
+            if ready(port) { break; }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let hello = hello(port).expect("hello");
+        println!("hello: {hello}");
+        let network = request(port, "network", json!({}), Duration::from_secs(5)).unwrap();
+        println!("ipv4: {:?}", first_ipv4(&network));
+        assert!(first_ipv4(&network).is_some());
+        let (code, out, _) = exec(port, r"C:\Windows\System32\cmd.exe", &["/c".into(), "echo agent-ok".into()], Duration::from_secs(30)).unwrap();
+        assert_eq!((code, String::from_utf8_lossy(&out).trim()), (0, "agent-ok"));
+        let text = "Presse-papiers Virtua ✓ é\nligne 2";
+        request(port, "clipboard-set", json!({ "text": text }), Duration::from_secs(5)).unwrap();
+        let back = request(port, "clipboard-get", json!({}), Duration::from_secs(5)).unwrap();
+        assert_eq!(back["text"], text);
+        let shown = request(port, "display", json!({ "width": 1440, "height": 920 }), Duration::from_secs(10)).unwrap();
+        println!("display: {shown}");
+        assert_eq!(shown, json!({ "width": 1440, "height": 900 }));
+        // Parallel callers on the one connection.
+        let callers: Vec<_> = (0..10).map(|_| std::thread::spawn(move || request(port, "ping", json!({}), Duration::from_secs(5)).is_ok())).collect();
+        assert!(callers.into_iter().all(|c| c.join().unwrap()));
+        println!("all good");
     }
 }

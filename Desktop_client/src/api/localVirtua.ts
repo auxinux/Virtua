@@ -198,6 +198,16 @@ export const modeStore = {
 };
 
 export const localVirtua = {
+  /** Agent Virtua: this VM's console is on screen (null: none) — shared clipboard. */
+  agentFocus(id: string | null) {
+    return invoke<void>("local_agent_focus", { id });
+  },
+
+  /** Agent Virtua: fit Windows' resolution to the console (largest mode that fits). */
+  agentDisplay(id: string, width: number, height: number) {
+    return invoke<{ width: number; height: number }>("local_agent_display", { id, width, height });
+  },
+
   async diagnostics() {
     return invoke<LocalQemuDiagnostics>("local_qemu_diagnostics");
   },

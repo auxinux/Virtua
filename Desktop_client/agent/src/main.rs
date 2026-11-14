@@ -4,8 +4,11 @@
 //!   virtua-agent uninstall  stop and remove the service
 //!   virtua-agent run        service entry point (used by the service manager)
 //!   virtua-agent console    serve the port in the foreground (tests)
+//!   virtua-agent session    user-session helper (started by the service)
 
 mod protocol;
+#[cfg(windows)]
+mod session;
 #[cfg(windows)]
 mod windows;
 
@@ -16,6 +19,8 @@ fn main() {
         "install" => windows::install().map(|_| println!("Agent Virtua {} installé et démarré.", protocol::VERSION)),
         "uninstall" => windows::uninstall().map(|_| println!("Agent Virtua retiré.")),
         "run" => windows::run_service(),
+        // Started by the service in the user's session (clipboard, display).
+        "session" => session::run_helper(),
         "console" => {
             windows::run_console();
             Ok(())

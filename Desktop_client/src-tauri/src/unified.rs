@@ -678,8 +678,11 @@ pub struct UnifiedVm {
     pub agent: bool,
     /// Agent Virtua version running in the guest, if any.
     pub virtua_agent: Option<String>,
-    /// Running, without the Agent Virtua, but with the QEMU agent to push it.
+    /// Running, without the Agent Virtua (or an older one), with the QEMU
+    /// agent to push it.
     pub can_install_agent: bool,
+    /// Agent version embedded in this Virtua Desktop.
+    pub bundled_agent: String,
     pub rdp_ready: bool,
     pub needs_restart: bool,
     pub apps: Vec<UnifiedApp>,
@@ -718,9 +721,15 @@ pub fn overview() -> Result<UnifiedOverview, String> {
                 agent: vm.guest_agent_running,
                 virtua_agent: vm.agent_port.filter(|p| crate::agent::ready(*p)).and(vm.virtua_agent.clone()),
                 can_install_agent: running
-                    && vm.agent_port.is_some_and(|p| !crate::agent::ready(p))
+                    && vm.agent_port.is_some_and(|p| {
+                        crate::agent::hello(p)
+                            .and_then(|h| h.get("version").and_then(|v| v.as_str()).map(str::to_string))
+                            .as_deref()
+                            != Some(crate::agent::BUNDLED_VERSION)
+                    })
                     && vm.qga_port.is_some()
                     && vm.guest_agent_running,
+                bundled_agent: crate::agent::BUNDLED_VERSION.to_string(),
             }
         })
         .collect();
@@ -764,9 +773,11 @@ pub fn install_agent(vm_id: &str) -> Result<(), String> {
     written?;
     let install = format!("& '{target}' install; exit $LASTEXITCODE");
     guest_powershell(GuestChannel::Qga(port), &install, Duration::from_secs(60))?;
-    // The agent says hello on its own port within a few seconds.
-    for _ in 0..40 {
-        if crate::agent::ready(vm.agent_port.unwrap_or(0)) {
+    // The (new) agent says hello on its own port within a few seconds.
+    for _ in 0..80 {
+        let version = crate::agent::hello(vm.agent_port.unwrap_or(0))
+            .and_then(|h| h.get("version").and_then(|v| v.as_str()).map(str::to_string));
+        if version.as_deref() == Some(crate::agent::BUNDLED_VERSION) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -1139,6 +1150,32 @@ pub async fn local_unified_overview() -> Result<UnifiedOverview, String> {
 #[tauri::command]
 pub async fn local_unified_prepare(id: String, username: String, password: String) -> Result<(), String> {
     blocking(move || prepare(&id, &username, &password)).await
+}
+
+/// The console of this VM is shown (`None`: no console): its clipboard is
+/// shared with this computer's.
+#[tauri::command]
+pub async fn local_agent_focus(id: Option<String>) -> Result<(), String> {
+    blocking(move || {
+        let port = match id {
+            Some(id) => find_vm(&id)?.agent_port,
+            None => None,
+        };
+        crate::agent::clipboard::set_focus(port);
+        Ok(())
+    })
+    .await
+}
+
+/// The console is `width`×`height`: Windows takes the largest mode that fits.
+#[tauri::command]
+pub async fn local_agent_display(id: String, width: u32, height: u32) -> Result<serde_json::Value, String> {
+    blocking(move || {
+        let vm = find_vm(&id)?;
+        let port = vm.agent_port.filter(|p| crate::agent::ready(*p)).ok_or("Agent Virtua absent")?;
+        crate::agent::request(port, "display", serde_json::json!({ "width": width, "height": height }), Duration::from_secs(10))
+    })
+    .await
 }
 
 #[tauri::command]

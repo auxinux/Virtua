@@ -34,7 +34,7 @@ const DISPLAY_NAME: &str = "Agent Virtua";
 const PORT_PATH: &str = r"\\.\Global\org.auxinux.virtua.0";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
@@ -42,7 +42,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// An overlapped handle: one thread reads while others write.
 pub struct Port {
-    handle: HANDLE,
+    pub(crate) handle: HANDLE,
     write_lock: Mutex<()>,
 }
 
@@ -51,6 +51,11 @@ unsafe impl Send for Port {}
 unsafe impl Sync for Port {}
 
 impl Port {
+    /// Wrap an overlapped handle (the port, or a named pipe).
+    pub(crate) fn from_handle(handle: HANDLE) -> Port {
+        Port { handle, write_lock: Mutex::new(()) }
+    }
+
     fn open() -> Option<Port> {
         let path = wide(PORT_PATH);
         let handle = unsafe {
@@ -60,7 +65,7 @@ impl Port {
     }
 
     /// One overlapped transfer, waited for. `write` picks WriteFile.
-    fn transfer(&self, buffer: *mut u8, len: u32, write: bool) -> Result<u32, u32> {
+    pub(crate) fn transfer(&self, buffer: *mut u8, len: u32, write: bool) -> Result<u32, u32> {
         unsafe {
             let event = CreateEventW(std::ptr::null(), 1, 0, std::ptr::null());
             if event.is_null() {
@@ -86,11 +91,11 @@ impl Port {
         }
     }
 
-    fn read(&self, buffer: &mut [u8]) -> Result<usize, u32> {
+    pub(crate) fn read(&self, buffer: &mut [u8]) -> Result<usize, u32> {
         self.transfer(buffer.as_mut_ptr(), buffer.len() as u32, false).map(|n| n as usize)
     }
 
-    fn write_all(&self, data: &[u8]) -> Result<(), u32> {
+    pub(crate) fn write_all(&self, data: &[u8]) -> Result<(), u32> {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut offset = 0;
         while offset < data.len() {
@@ -104,7 +109,7 @@ impl Port {
         Ok(())
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         unsafe {
             CancelIoEx(self.handle, std::ptr::null());
         }
@@ -121,8 +126,23 @@ impl Drop for Port {
 
 /// Serve the port until `stop`: reopen it whenever it goes away (the VM
 /// started without the port, the Desktop restarted QEMU…).
-pub fn serve(stop: &AtomicBool, current: &Mutex<Option<Arc<Port>>>) {
+pub fn serve(stop: &Arc<AtomicBool>, current: &Arc<Mutex<Option<Arc<Port>>>>) {
     let platform: Arc<WindowsPlatform> = Arc::new(WindowsPlatform::new());
+    // Clipboard and display live in the user's session: a helper there,
+    // reached through the hub; its replies and events go straight to the host.
+    let hub = crate::session::SessionHub::new();
+    {
+        let current = current.clone();
+        hub.start(
+            Arc::new(move |line: String| {
+                let port = current.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(port) = port {
+                    let _ = port.write_all(line.as_bytes());
+                }
+            }),
+            stop.clone(),
+        );
+    }
     while !stop.load(Ordering::SeqCst) {
         let Some(port) = Port::open() else {
             std::thread::sleep(Duration::from_secs(3));
@@ -156,6 +176,13 @@ pub fn serve(stop: &AtomicBool, current: &Mutex<Option<Arc<Port>>>) {
                     failures = 0;
                     for line in lines.push(&buffer[..n]) {
                         let Some(request) = protocol::parse(&line) else { continue };
+                        if crate::session::SESSION_COMMANDS.contains(&request.cmd.as_str()) {
+                            let forward = format!("{}\n", json!({ "id": request.id, "cmd": request.cmd, "args": request.args }));
+                            if let Err(error) = hub.forward(&forward) {
+                                let _ = port.write_all(format!("{}\n", json!({ "id": request.id, "error": error })).as_bytes());
+                            }
+                            continue;
+                        }
                         let (port, platform) = (port.clone(), platform.clone());
                         // Each request on its own thread: a long `exec` never
                         // holds up a `ping`.
@@ -373,8 +400,8 @@ fn service_main(_arguments: Vec<OsString>) {
 
 /// Foreground mode, for a test from a console.
 pub fn run_console() {
-    let stop = AtomicBool::new(false);
-    let current = Mutex::new(None);
+    let stop = Arc::new(AtomicBool::new(false));
+    let current: Arc<Mutex<Option<Arc<Port>>>> = Arc::new(Mutex::new(None));
     println!("Agent Virtua {} : {PORT_PATH}", protocol::VERSION);
     serve(&stop, &current);
 }
