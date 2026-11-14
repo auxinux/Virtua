@@ -611,6 +611,57 @@ pub fn rdp_file(host: &str, port: u16, user: &str, app: Option<&UnifiedApp>) -> 
     lines.join("\r\n") + "\r\n"
 }
 
+/// XQuartz's display for FreeRDP on macOS. An app opened from the Dock does
+/// not inherit DISPLAY, and XQuartz does not listen on ":0": it serves a
+/// launchd socket (/private/tmp/com.apple.launchd.*/org.xquartz:0) that
+/// starts it on first use. FreeRDP used to get ":0" and stop with "failed
+/// to open display: :0".
+fn macos_x_display() -> Result<String, String> {
+    if let Some(display) = env::var("DISPLAY").ok().filter(|d| !d.trim().is_empty()) {
+        return Ok(display);
+    }
+    if let Ok(output) = Command::new("launchctl").args(["getenv", "DISPLAY"]).output() {
+        let display = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !display.is_empty() {
+            return Ok(display);
+        }
+    }
+    let find_socket = || -> Option<String> {
+        let entries = fs::read_dir("/private/tmp").ok()?;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("com.apple.launchd.") {
+                continue;
+            }
+            for name in ["org.xquartz:0", "org.macosforge.xquartz:0"] {
+                let socket = entry.path().join(name);
+                if socket.exists() {
+                    return Some(socket.to_string_lossy().into_owned());
+                }
+            }
+        }
+        None
+    };
+    if let Some(socket) = find_socket() {
+        return Ok(socket);
+    }
+    // Not registered with launchd (XQuartz installed but never started in
+    // this session): start it and wait for its display.
+    let started = Command::new("open").args(["-a", "XQuartz"]).status().map(|s| s.success()).unwrap_or(false);
+    if !started {
+        return Err("XQuartz est nécessaire pour afficher les applications Windows sur Mac : brew install --cask xquartz, puis fermez et rouvrez votre session macOS.".into());
+    }
+    for _ in 0..50 {
+        if let Some(socket) = find_socket() {
+            return Ok(socket);
+        }
+        if std::path::Path::new("/tmp/.X11-unix/X0").exists() {
+            return Ok(":0".into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err("XQuartz ne démarre pas : ouvrez XQuartz une fois (Applications ▸ Utilitaires), puis réessayez.".into())
+}
+
 /// FreeRDP that gives up at once (no XQuartz, refused login, RemoteApp not
 /// allowed…) used to leave the page on "opening…" with nothing on screen:
 /// wait a few seconds and report its own error lines.
@@ -681,9 +732,8 @@ fn spawn_client(client: &Client, vm: &LocalVm, host: &str, port: u16, user: &str
         Client::FreeRdp3(binary) | Client::FreeRdp2(binary) => {
             let args = freerdp_arguments(client, host, port, user, password, app);
             let mut command = Command::new(binary);
-            if cfg!(target_os = "macos") && env::var_os("DISPLAY").is_none() {
-                // XQuartz starts on demand through its launchd socket.
-                command.env("DISPLAY", ":0");
+            if cfg!(target_os = "macos") {
+                command.env("DISPLAY", macos_x_display()?);
             }
             command.stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?)).stderr(Stdio::from(log_file));
             if matches!(client, Client::FreeRdp3(_)) {
