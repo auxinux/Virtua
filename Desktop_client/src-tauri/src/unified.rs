@@ -83,8 +83,9 @@ fn powershell_encoded(script: &str) -> String {
 /// large answers (the app list carries icons). `qga_execute` stays for the
 /// cheap periodic probes.
 fn qga_call(port: u16, request: &serde_json::Value, timeout: Duration) -> Result<serde_json::Value, String> {
-    let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(800))
+    // One client at a time on the agent's socket (see crate::qga_lock).
+    let _guard = crate::qga_lock(port, Duration::from_secs(30)).ok_or("Agent invité occupé : réessayez dans un instant.")?;
+    let mut stream = crate::qga_connect(port, Duration::from_millis(800))
         .map_err(|err| format!("Agent invité injoignable : {err}"))?;
     stream.set_read_timeout(Some(Duration::from_millis(250))).map_err(|e| e.to_string())?;
     stream.set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| e.to_string())?;

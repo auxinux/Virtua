@@ -790,6 +790,7 @@ pub fn finish_if_done(vm: &mut LocalVm, process_exited: bool) -> InstallOutcome 
             vm.autoinstall = None;
             vm.iso_path = None;
             vm.driver_iso_path = None;
+            windows_arm_display_after_install(vm);
             InstallOutcome::MakeBase(auto.os.clone())
         }
         "windows11" if auto.make_base && vm.guest_agent_running => {
@@ -810,12 +811,23 @@ pub fn finish_if_done(vm: &mut LocalVm, process_exited: bool) -> InstallOutcome 
             vm.autoinstall = None;
             vm.iso_path = None;
             vm.driver_iso_path = None;
+            windows_arm_display_after_install(vm);
             InstallOutcome::Nothing
         }
         _ => return InstallOutcome::Nothing,
     };
     vm.updated_at = now_string();
     outcome
+}
+
+/// Windows on ARM installs on ramfb (the firmware's virtio-gpu screen is
+/// blit-only, which Windows setup cannot draw on). Once the first logon has
+/// installed viogpudo, virtio-gpu gives a resizable display — from the next
+/// start (checked on an Apple Silicon Mac).
+fn windows_arm_display_after_install(vm: &mut LocalVm) {
+    if vm.architecture == "arm64" && vm.gpu_model == "std" {
+        vm.gpu_model = "virtio".to_string();
+    }
 }
 
 #[tauri::command]
@@ -1033,6 +1045,21 @@ mod tests {
         assert!(wbase.autoinstall.as_ref().unwrap().agent_seen_at.is_some());
         wbase.autoinstall.as_mut().unwrap().shutdown_requested = true;
         assert_eq!(finish_if_done(&mut wbase, true), InstallOutcome::MakeBase("windows11".into()));
+    }
+
+    #[test]
+    fn windows_on_arm_moves_to_virtio_gpu_once_installed() {
+        let mut arm = crate::local_mode_tests::sample_vm("arm64", "std");
+        arm.guest_agent_running = true;
+        arm.autoinstall = Some(AutoInstall { os: "windows11".into(), ..Default::default() });
+        assert_eq!(finish_if_done(&mut arm, false), InstallOutcome::Nothing);
+        assert_eq!(arm.gpu_model, "virtio");
+        // x86 keeps what it has.
+        let mut x86 = crate::local_mode_tests::sample_vm("amd64", "std");
+        x86.guest_agent_running = true;
+        x86.autoinstall = Some(AutoInstall { os: "windows11".into(), ..Default::default() });
+        finish_if_done(&mut x86, false);
+        assert_eq!(x86.gpu_model, "std");
     }
 }
 

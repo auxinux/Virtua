@@ -980,9 +980,68 @@ fn qmp_execute(port: u16, execute: &str) -> Result<(), String> {
 /// The guest agent is reached over a loopback TCP chardev rather than a Unix
 /// socket: QEMU on Windows cannot serve `socket,path=…`, so the previous
 /// implementation silently disabled the agent (and therefore guest IPs) there.
-fn qga_execute(port: u16, execute: &str) -> Result<serde_json::Value, String> {
+// ── One guest-agent client at a time ───────────────────────────────────────
+// QEMU's chardev socket serves one client and listens with a backlog of 1.
+// The periodic probes (state, IP) and the Unified mode used to connect on
+// their own: on macOS a connection beyond the backlog is reset outright
+// ("Connection reset by peer", os error 54) — Unified mode then failed with
+// "Agent invité injoignable". Every agent exchange now takes the port's lock.
+
+fn qga_port_lock(port: u16) -> &'static Mutex<()> {
+    static LOCKS: std::sync::OnceLock<Mutex<std::collections::HashMap<u16, &'static Mutex<()>>>> = std::sync::OnceLock::new();
+    let mut locks = LOCKS.get_or_init(|| Mutex::new(std::collections::HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    *locks.entry(port).or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+}
+
+/// The port's lock, waiting at most `wait` for whoever holds it.
+pub(crate) fn qga_lock(port: u16, wait: Duration) -> Option<std::sync::MutexGuard<'static, ()>> {
+    let lock = qga_port_lock(port);
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+    }
+}
+
+/// Connect to the agent's chardev, retrying a reset / refused connection
+/// (another client of the single-client socket, or QEMU still starting).
+pub(crate) fn qga_connect(port: u16, timeout: Duration) -> std::io::Result<TcpStream> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(600))
+    let mut attempt = 0;
+    loop {
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if attempt < 6
+                    && matches!(
+                        err.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionAborted
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn qga_execute(port: u16, execute: &str) -> Result<serde_json::Value, String> {
+    let _guard = qga_lock(port, Duration::from_secs(5)).ok_or("Agent invité occupé")?;
+    qga_execute_locked(port, execute)
+}
+
+/// `qga_execute` for a caller already holding the port's lock.
+fn qga_execute_locked(port: u16, execute: &str) -> Result<serde_json::Value, String> {
+    let mut stream = qga_connect(port, Duration::from_millis(600))
         .map_err(|err| format!("Connexion QEMU guest agent impossible: {}", err))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(650)))
@@ -1035,7 +1094,7 @@ fn qga_execute(port: u16, execute: &str) -> Result<serde_json::Value, String> {
 }
 
 fn qga_guest_ip(port: u16) -> Option<String> {
-    let response = qga_execute(port, "guest-network-get-interfaces").ok()?;
+    let response = qga_execute_locked(port, "guest-network-get-interfaces").ok()?;
     let interfaces = response.get("return")?.as_array()?;
     for interface in interfaces {
         let name = interface
@@ -1069,7 +1128,7 @@ fn qga_guest_ip(port: u16) -> Option<String> {
 }
 
 fn qga_is_running(port: u16) -> bool {
-    qga_execute(port, "guest-ping").is_ok()
+    qga_execute_locked(port, "guest-ping").is_ok()
 }
 
 fn clear_vm_guest_agent_state(vm: &mut LocalVm) {
@@ -1184,7 +1243,10 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
                     .qga_last_probe_at
                     .map(|last| now.saturating_sub(last) >= 10)
                     .unwrap_or(true);
-                if should_probe {
+                // Agent busy (Unified mode talking to it): keep the last
+                // state and probe on a later refresh.
+                let guard = if should_probe { qga_lock(port, Duration::from_millis(300)) } else { None };
+                if let Some(_guard) = guard {
                     vm.guest_agent_running = qga_is_running(port);
                     vm.guest_ip = if vm.guest_agent_running {
                         qga_guest_ip(port)
@@ -1192,6 +1254,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
                         None
                     };
                     vm.qga_last_probe_at = Some(now);
+                    drop(_guard);
                     // Windows bases ask for a clean shutdown here.
                     let _ = quickcreate::finish_if_done(vm, false);
                     changed = true;
@@ -4992,6 +5055,19 @@ mod local_mode_tests {
             .position(|a| a.starts_with("hda-duplex"))
             .expect("codec");
         assert!(hda < codec, "the codec needs its bus declared first");
+    }
+
+    #[test]
+    fn guest_agent_clients_take_turns_on_its_port() {
+        let first = qga_lock(6299, Duration::from_millis(10)).expect("free lock");
+        // Held: a probe gives up after its short wait.
+        assert!(qga_lock(6299, Duration::from_millis(50)).is_none());
+        // Another port is independent.
+        assert!(qga_lock(6298, Duration::from_millis(10)).is_some());
+        let waiter = std::thread::spawn(|| qga_lock(6299, Duration::from_secs(2)).is_some());
+        std::thread::sleep(Duration::from_millis(100));
+        drop(first);
+        assert!(waiter.join().unwrap(), "a waiting client gets the port once it is free");
     }
 
     #[test]
