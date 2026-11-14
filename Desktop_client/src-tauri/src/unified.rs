@@ -149,13 +149,42 @@ fn read_reply(
 
 const POWERSHELL: &str = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
+/// Where guest commands go: the Agent Virtua when it runs (native, one
+/// shared connection), else the QEMU guest agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestChannel {
+    Agent(u16),
+    Qga(u16),
+}
+
 /// Run a PowerShell script in the guest (as SYSTEM) and return its stdout.
-fn guest_powershell(port: u16, script: &str, timeout: Duration) -> Result<String, String> {
+fn guest_powershell(channel: GuestChannel, script: &str, timeout: Duration) -> Result<String, String> {
+    let args: Vec<String> = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(std::iter::once(powershell_encoded(script)))
+        .collect();
+    let port = match channel {
+        GuestChannel::Qga(port) => port,
+        GuestChannel::Agent(port) => {
+            let (code, stdout, stderr) = crate::agent::exec(port, POWERSHELL, &args, timeout)?;
+            let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim_start_matches('\u{feff}').trim().to_string();
+            let stdout = text(&stdout);
+            if code != 0 {
+                let stderr = text(&stderr);
+                return Err(format!(
+                    "PowerShell (Windows) a échoué ({code}) : {}",
+                    stderr.lines().next().unwrap_or(&stdout).chars().take(300).collect::<String>()
+                ));
+            }
+            return Ok(stdout);
+        }
+    };
     let request = serde_json::json!({
         "execute": "guest-exec",
         "arguments": {
             "path": POWERSHELL,
-            "arg": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", powershell_encoded(script)],
+            "arg": args,
             "capture-output": true,
         }
     });
@@ -349,11 +378,14 @@ fn update_vm(vm_id: &str, change: impl FnOnce(&mut LocalVm)) -> Result<LocalVm, 
     Ok(updated)
 }
 
-fn running_agent_port(vm: &LocalVm) -> Result<u16, String> {
+fn running_agent_port(vm: &LocalVm) -> Result<GuestChannel, String> {
     if vm.state != "running" {
         return Err(format!("Démarrez « {} » : Windows doit être lancé pour cette étape.", vm.name));
     }
-    vm.qga_port.ok_or_else(|| "Agent invité indisponible : redémarrez la VM.".to_string())
+    if let Some(port) = vm.agent_port.filter(|port| crate::agent::ready(*port)) {
+        return Ok(GuestChannel::Agent(port));
+    }
+    vm.qga_port.map(GuestChannel::Qga).ok_or_else(|| "Agent invité indisponible : redémarrez la VM.".to_string())
 }
 
 // ── Credentials ─────────────────────────────────────────────────────────────
@@ -644,6 +676,10 @@ pub struct UnifiedVm {
     pub enabled: bool,
     pub user: Option<String>,
     pub agent: bool,
+    /// Agent Virtua version running in the guest, if any.
+    pub virtua_agent: Option<String>,
+    /// Running, without the Agent Virtua, but with the QEMU agent to push it.
+    pub can_install_agent: bool,
     pub rdp_ready: bool,
     pub needs_restart: bool,
     pub apps: Vec<UnifiedApp>,
@@ -680,10 +716,62 @@ pub fn overview() -> Result<UnifiedOverview, String> {
                 enabled: vm.unified,
                 user: vm.unified_user,
                 agent: vm.guest_agent_running,
+                virtua_agent: vm.agent_port.filter(|p| crate::agent::ready(*p)).and(vm.virtua_agent.clone()),
+                can_install_agent: running
+                    && vm.agent_port.is_some_and(|p| !crate::agent::ready(p))
+                    && vm.qga_port.is_some()
+                    && vm.guest_agent_running,
             }
         })
         .collect();
     Ok(UnifiedOverview { client: client_status(), vms: windows })
+}
+
+/// Put the Agent Virtua into a running Windows VM that has the QEMU guest
+/// agent (VMs made before the Agent Virtua): copy the guest-arch binary
+/// with guest-file-*, then `virtua-agent.exe install` (service, autostart).
+/// The VM's QEMU must have the agent's port, i.e. have started with Virtua
+/// Desktop 0.5.0 or later.
+pub fn install_agent(vm_id: &str) -> Result<(), String> {
+    use base64::Engine;
+    let vm = find_vm(vm_id)?;
+    if vm.guest_os != "windows" {
+        return Err("L'Agent Virtua est pour les VM Windows.".into());
+    }
+    if vm.state != "running" {
+        return Err(format!("Démarrez « {} » d'abord.", vm.name));
+    }
+    if vm.agent_port.is_none() {
+        return Err("Redémarrez la VM une fois (arrêt puis démarrage) : elle n'a pas encore le port de l'Agent Virtua.".into());
+    }
+    let port = vm.qga_port.ok_or("Agent invité QEMU indisponible : redémarrez la VM.")?;
+    let target = r"C:\Windows\Temp\virtua-agent.exe";
+    let handle = qga_call(port, &serde_json::json!({ "execute": "guest-file-open", "arguments": { "path": target, "mode": "wb" } }), Duration::from_secs(10))?
+        .as_i64()
+        .ok_or("L'agent QEMU n'a pas ouvert le fichier")?;
+    let binary = crate::agent::agent_binary(&vm.architecture);
+    let written = (|| {
+        for chunk in binary.chunks(48 * 1024) {
+            qga_call(
+                port,
+                &serde_json::json!({ "execute": "guest-file-write", "arguments": { "handle": handle, "buf-b64": base64::engine::general_purpose::STANDARD.encode(chunk) } }),
+                Duration::from_secs(20),
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
+    let _ = qga_call(port, &serde_json::json!({ "execute": "guest-file-close", "arguments": { "handle": handle } }), Duration::from_secs(10));
+    written?;
+    let install = format!("& '{target}' install; exit $LASTEXITCODE");
+    guest_powershell(GuestChannel::Qga(port), &install, Duration::from_secs(60))?;
+    // The agent says hello on its own port within a few seconds.
+    for _ in 0..40 {
+        if crate::agent::ready(vm.agent_port.unwrap_or(0)) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err("Agent Virtua installé, mais il ne répond pas encore : redémarrez la VM.".into())
 }
 
 pub fn prepare(vm_id: &str, username: &str, password: &str) -> Result<(), String> {
@@ -1051,6 +1139,11 @@ pub async fn local_unified_overview() -> Result<UnifiedOverview, String> {
 #[tauri::command]
 pub async fn local_unified_prepare(id: String, username: String, password: String) -> Result<(), String> {
     blocking(move || prepare(&id, &username, &password)).await
+}
+
+#[tauri::command]
+pub async fn local_install_virtua_agent(id: String) -> Result<(), String> {
+    blocking(move || install_agent(&id)).await
 }
 
 #[tauri::command]

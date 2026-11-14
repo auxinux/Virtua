@@ -32,7 +32,7 @@ function SetupForm({ vm, busy, onSubmit }: { vm: UnifiedVm; busy: boolean; onSub
       <ol className="space-y-2">
         <Step done={running}>Windows est démarré dans la VM.</Step>
         <Step done={vm.agent}>
-          QEMU Guest Agent actif dans Windows — installez <em>virtio-win-guest-tools</em> depuis le disque de pilotes VirtIO.
+          Un agent actif dans Windows : l’Agent Virtua (installé par la création rapide, ou le bouton « Installer l’Agent Virtua »), sinon le QEMU Guest Agent de <em>virtio-win-guest-tools</em>.
         </Step>
         <Step done={false}>
           Windows 11 Professionnel, Entreprise ou Éducation (l’édition Famille n’a pas de Bureau à distance) et un compte avec mot de passe.
@@ -99,6 +99,7 @@ function VmCard({ vm, clientReady, onChanged, report }: { vm: UnifiedVm; clientR
             {vm.architecture.toUpperCase()} · {running ? "en marche" : "arrêtée"}
             {vm.enabled ? ` · mode Unifié actif (${vm.user ?? "?"})` : ""}
             {vm.enabled && running ? (vm.rdpReady ? " · Windows prêt" : " · Windows démarre…") : ""}
+            {running && vm.virtuaAgent ? ` · Agent Virtua ${vm.virtuaAgent}` : ""}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -126,6 +127,15 @@ function VmCard({ vm, clientReady, onChanged, report }: { vm: UnifiedVm; clientR
           )}
         </div>
       </div>
+
+      {vm.canInstallAgent && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded border border-virtua-accent/40 bg-virtua-accentSoft p-3 text-sm">
+          <span>Installez l’Agent Virtua dans cette VM : liaison native avec Windows (x64 et ARM64), plus rapide et plus fiable pour le mode Unifié.</span>
+          <button className="virtua-button-primary" disabled={!!busy} onClick={() => void run("agent", () => unified.installAgent(vm.id), "Agent Virtua installé.")}>
+            Installer l’Agent Virtua
+          </button>
+        </div>
+      )}
 
       {vm.needsRestart && (
         <p className="rounded border border-virtua-yellow/40 bg-virtua-yellow/10 p-3 text-sm text-virtua-yellow">

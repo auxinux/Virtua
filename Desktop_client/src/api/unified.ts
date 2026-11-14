@@ -24,6 +24,10 @@ export interface UnifiedVm {
   enabled: boolean;
   user?: string | null;
   agent: boolean;
+  /** Agent Virtua version running in the guest. */
+  virtuaAgent?: string | null;
+  /** The Agent Virtua can be pushed through the QEMU guest agent. */
+  canInstallAgent?: boolean;
   rdpReady: boolean;
   needsRestart: boolean;
   apps: UnifiedApp[];
@@ -44,4 +48,5 @@ export const unified = {
   launch: (id: string, appId?: string) => invoke<void>("local_unified_launch", { id, appId: appId ?? null }),
   integrate: (id: string, enabled: boolean) => invoke<number>("local_unified_integrate", { id, enabled }),
   installClient: () => invoke<UnifiedClientStatus>("local_unified_install_client"),
+  installAgent: (id: string) => invoke<void>("local_install_virtua_agent", { id }),
 };

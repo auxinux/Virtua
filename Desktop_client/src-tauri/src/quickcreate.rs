@@ -389,6 +389,11 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
     let first_logon: String = [
         ("Mot de passe sans expiration", "net accounts /maxpwage:unlimited".to_string()),
         ("Pilotes VirtIO", drivers),
+        // Native x64/ARM64 service, next to the answer file (floppy A: or USB).
+        (
+            "Agent Virtua",
+            r"cmd /c for %d in (A B D E F G H I J) do @if exist %d:\virtua-agent.exe %d:\virtua-agent.exe install".to_string(),
+        ),
         agent,
         ("Bureau à distance", r"reg add &quot;HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server&quot; /v fDenyTSConnections /t REG_DWORD /d 0 /f".to_string()),
         ("RemoteApp", r"reg add &quot;HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Terminal Server\TSAppAllowList&quot; /v fDisabledAllowList /t REG_DWORD /d 1 /f".to_string()),
@@ -796,7 +801,10 @@ pub fn finish_if_done(vm: &mut LocalVm, process_exited: bool) -> InstallOutcome 
         "windows11" if auto.make_base && vm.guest_agent_running => {
             let seen = *auto.agent_seen_at.get_or_insert(now);
             if !auto.shutdown_requested && now.saturating_sub(seen) >= 120 {
-                if let Some(port) = vm.qga_port {
+                if let Some(port) = vm.agent_port.filter(|p| crate::agent::ready(*p)) {
+                    let _ = crate::agent::request(port, "shutdown", serde_json::json!({}), std::time::Duration::from_secs(5));
+                    auto.shutdown_requested = true;
+                } else if let Some(port) = vm.qga_port {
                     // guest-shutdown never answers: the agent goes down with Windows.
                     let _ = qga_execute(port, "guest-shutdown");
                     auto.shutdown_requested = true;
@@ -1003,6 +1011,9 @@ mod tests {
         // The x64 tools bundle cannot install ARM64 drivers: the agent alone, emulated.
         assert!(!arm.contains("virtio-win-guest-tools.exe"));
         assert!(arm.contains(r"msiexec /i %d:\guest-agent\qemu-ga-x86_64.msi /qn"));
+        for xml in [&x64, &arm] {
+            assert!(xml.contains(r"%d:\virtua-agent.exe install"));
+        }
     }
 
     #[test]

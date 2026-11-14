@@ -240,11 +240,25 @@ test("a Windows VM not yet unified walks through the prerequisites", async ({ pa
     }],
   });
   await page.goto("/#/unified");
-  await expect(page.getByText(/virtio-win-guest-tools/)).toBeVisible();
+  await expect(page.getByText(/Agent Virtua/).first()).toBeVisible();
   await page.getByPlaceholder(/Compte Windows/).fill("alex");
   await page.getByPlaceholder("Mot de passe Windows").fill("secret");
   // No guest agent yet: nothing could be configured inside Windows.
   await expect(page.getByRole("button", { name: "Activer le mode Unifié" })).toBeDisabled();
+});
+
+test("a running Windows VM without the Agent Virtua offers to install it", async ({ page }) => {
+  await localDesktop(page, {
+    unifiedVms: [{
+      id: "win-1", name: "Windows 11", state: "running", architecture: "arm64", enabled: true, user: "alex",
+      agent: true, virtuaAgent: null, canInstallAgent: true, rdpReady: true, needsRestart: false, integrated: false, apps: [],
+    }],
+  });
+  await page.goto("/#/unified");
+  await page.getByRole("button", { name: "Installer l’Agent Virtua" }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_install_virtua_agent").map((c: any) => c.args)))
+    .toEqual([{ id: "win-1" }]);
 });
 
 test("the theme follows AuxiNux Shell and survives a backend without appearance", async ({ page }) => {

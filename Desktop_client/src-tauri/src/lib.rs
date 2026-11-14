@@ -1,3 +1,4 @@
+mod agent;
 mod appearance;
 mod companion;
 mod disposable;
@@ -324,6 +325,12 @@ struct LocalVm {
     qmp_port: Option<u16>,
     #[serde(default)]
     qga_port: Option<u16>,
+    /// Loopback port of the Agent Virtua's virtio-serial channel.
+    #[serde(default)]
+    agent_port: Option<u16>,
+    /// Version of the Agent Virtua last seen in the guest.
+    #[serde(default)]
+    virtua_agent: Option<String>,
     #[serde(default)]
     guest_ip: Option<String>,
     #[serde(default)]
@@ -1132,6 +1139,9 @@ fn qga_is_running(port: u16) -> bool {
 }
 
 fn clear_vm_guest_agent_state(vm: &mut LocalVm) {
+    if let Some(port) = vm.agent_port.take() {
+        agent::forget(port);
+    }
     vm.qga_port = None;
     vm.guest_ip = None;
     vm.guest_agent_running = false;
@@ -1237,6 +1247,25 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
             vm.state = "running".to_string();
             changed = true;
         }
+        // Agent Virtua first: one shared connection, never busy.
+        let agent_hello = vm.agent_port.and_then(agent::hello);
+        if let (Some(port), Some(hello)) = (vm.agent_port, agent_hello) {
+            let should_probe = vm.qga_last_probe_at.map(|last| now.saturating_sub(last) >= 10).unwrap_or(true);
+            let version = hello.get("version").and_then(|v| v.as_str()).map(str::to_string);
+            if vm.virtua_agent != version || !vm.guest_agent_running {
+                vm.virtua_agent = version;
+                vm.guest_agent_running = true;
+                changed = true;
+            }
+            if should_probe {
+                if let Ok(network) = agent::request(port, "network", serde_json::json!({}), Duration::from_secs(5)) {
+                    vm.guest_ip = agent::first_ipv4(&network);
+                }
+                vm.qga_last_probe_at = Some(now);
+                let _ = quickcreate::finish_if_done(vm, false);
+                changed = true;
+            }
+        } else {
         match vm.qga_port {
             Some(port) => {
                 let should_probe = vm
@@ -1265,6 +1294,7 @@ fn refresh_vm_states(mut vms: Vec<LocalVm>) -> Result<Vec<LocalVm>, String> {
                 vm.guest_ip = None;
                 vm.qga_last_probe_at = None;
             }
+        }
         }
     }
     // Debian quick create: the installer powered the VM off; it now boots
@@ -2409,6 +2439,8 @@ fn import_template_archive(
         spice_password: None,
         qmp_port: None,
         qga_port: None,
+        agent_port: None,
+        virtua_agent: None,
         guest_ip: None,
         guest_agent_running: false,
         qga_last_probe_at: None,
@@ -2919,6 +2951,8 @@ fn local_create_vm_blocking(payload: LocalCreateVmPayload) -> Result<LocalVm, St
         spice_password: None,
         qmp_port: None,
         qga_port: None,
+        agent_port: None,
+        virtua_agent: None,
         guest_ip: None,
         guest_agent_running: false,
         qga_last_probe_at: None,
@@ -3639,6 +3673,7 @@ struct LaunchPorts {
     spice_password: String,
     qmp_port: u16,
     qga_port: u16,
+    agent_port: u16,
     /// UEFI firmware and the VM's variable store, prepared before launch.
     /// `None` on x86 means SeaBIOS; on ARM64, `-bios` with the QEMU firmware.
     uefi: Option<UefiFirmware>,
@@ -3843,6 +3878,15 @@ fn build_qemu_command(
             "-device",
             "virtserialport,chardev=qga0,name=org.qemu.guest_agent.0",
         ]);
+    // Agent Virtua: its own port, one persistent client (src/agent.rs).
+    command
+        .arg("-chardev")
+        .arg(format!(
+            "socket,host=127.0.0.1,port={},server=on,wait=off,id=virtua-agent",
+            ports.agent_port
+        ))
+        .arg("-device")
+        .arg(format!("virtserialport,chardev=virtua-agent,name={}", agent::PORT_NAME));
 
     match plan.spice {
         SpiceMode::Secret => {
@@ -4044,6 +4088,12 @@ fn prepare_windows_unattend(vm: &LocalVm) -> Option<String> {
         None => windows_unattend_xml(&vm.architecture),
     };
     fs::write(dir.join("autounattend.xml"), xml).ok()?;
+    if quick.is_some() {
+        // Installed at first logon (quickcreate::windows_answer_file).
+        fs::write(dir.join("virtua-agent.exe"), agent::agent_binary(&vm.architecture)).ok()?;
+    } else {
+        let _ = fs::remove_file(dir.join("virtua-agent.exe"));
+    }
     Some(dir.to_string_lossy().to_string())
 }
 
@@ -4203,12 +4253,15 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         .ok_or_else(|| "Aucun port SPICE local disponible".to_string())?;
     let qga_port = find_free_port_excluding(6201, 6299, &reserved(|vm| vm.qga_port))
         .ok_or_else(|| "Aucun port agent invite disponible".to_string())?;
+    let agent_port = find_free_port_excluding(6301, 6399, &reserved(|vm| vm.agent_port))
+        .ok_or_else(|| "Aucun port Agent Virtua disponible".to_string())?;
     let mut ports = LaunchPorts {
         vnc_display: vnc_port - 5900,
         spice_port,
         spice_password: random_token(),
         qmp_port,
         qga_port,
+        agent_port,
         uefi: prepare_uefi(vm)?,
         tpm_socket: None,
         tpm_device: tpm_device_model(
@@ -4382,6 +4435,7 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
                 vm.spice_password = spice_enabled.then(|| ports.spice_password.clone());
                 vm.qmp_port = Some(qmp_port);
                 vm.qga_port = Some(qga_port);
+                vm.agent_port = Some(agent_port);
                 vm.rdp_port = ports.rdp_forward.as_ref().map(|(_, port)| *port);
                 vm.guest_ip = None;
                 vm.guest_agent_running = false;
@@ -4694,6 +4748,7 @@ pub fn run() {
             companion::local_stop_lxc_vm,
             companion::local_lxc_logs,
             unified::local_unified_overview,
+            unified::local_install_virtua_agent,
             unified::local_unified_prepare,
             unified::local_unified_disable,
             unified::local_unified_refresh_apps,
@@ -5450,6 +5505,8 @@ mod local_mode_tests {
             spice_password: None,
             qmp_port: None,
             qga_port: None,
+            agent_port: None,
+            virtua_agent: None,
             guest_ip: None,
             guest_agent_running: false,
             qga_last_probe_at: None,
@@ -5478,6 +5535,7 @@ mod local_mode_tests {
             spice_password: "secret".into(),
             qmp_port: 6001,
             qga_port: 6201,
+            agent_port: 6301,
             uefi: None,
             tpm_socket: None,
             tpm_device: tpm_device_model("amd64", false, true),
