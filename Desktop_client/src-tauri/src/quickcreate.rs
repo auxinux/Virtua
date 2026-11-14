@@ -358,9 +358,21 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
     // input…) whatever the disc's letter — on ARM64 that is the only way, and
     // the windowsPE DriverPaths alone did not leave them in the installed
     // Windows (Device Manager full of unknown devices on a Mac).
-    let drivers = format!(
-        r"cmd /c for %d in (D E F G H I J) do @for /d %p in (%d:\*) do @if exist %p\w11\{driver_arch}\*.inf pnputil /add-driver %p\w11\{driver_arch}\*.inf /install"
-    );
+    //
+    // ARM64: the whole virtio-win disc, every subfolder — what Device
+    // Manager's "search automatically" on the disc does, and what got every
+    // device a driver on a Mac where the w11\ARM64 folders alone left some
+    // unknown. Packages of another architecture are refused by pnputil. The
+    // disc is told apart from the Windows one by its licence file. x64 keeps
+    // the w11 folders (older-OS packages exist for amd64 there).
+    // Output goes to C:\Windows\Temp\virtua-drivers.log.
+    let drivers = if arch == "arm64" {
+        r"cmd /c for %d in (D E F G H I J) do @if exist %d:\virtio-win_license.txt pnputil /add-driver %d:\*.inf /subdirs /install >> C:\Windows\Temp\virtua-drivers.log 2>&1".to_string()
+    } else {
+        format!(
+            r"cmd /c for %d in (D E F G H I J) do @for /d %p in (%d:\*) do @if exist %p\w11\{driver_arch}\*.inf pnputil /add-driver %p\w11\{driver_arch}\*.inf /install >> C:\Windows\Temp\virtua-drivers.log 2>&1"
+        )
+    };
     let agent = if arch == "arm64" {
         // No ARM64 build of the QEMU guest agent: the x64 one runs under
         // Windows 11's x64 emulation, and is what tells Virtua the install is done.
@@ -950,7 +962,7 @@ mod tests {
         for line in xml.lines().filter(|l| l.contains("<CommandLine>")) {
             let inner = line.split("<CommandLine>").nth(1).unwrap().split("</CommandLine>").next().unwrap();
             assert!(!inner.contains('<') && !inner.contains('>'), "{inner}");
-            assert!(!inner.replace("&quot;", "").replace("&amp;", "").contains('&'), "{inner}");
+            assert!(!inner.replace("&quot;", "").replace("&amp;", "").replace("&gt;", "").replace("&lt;", "").contains('&'), "{inner}");
         }
         // Every element opened is closed (cheap structural check).
         assert_eq!(xml.matches("<component ").count(), xml.matches("</component>").count());
@@ -974,7 +986,8 @@ mod tests {
         assert!(x64.contains(r"pnputil /add-driver %p\w11\amd64\*.inf /install"));
         assert!(x64.contains("virtio-win-guest-tools.exe"));
         let arm = windows_answer_file("arm64", "en-US", "W");
-        assert!(arm.contains(r"pnputil /add-driver %p\w11\ARM64\*.inf /install"));
+        assert!(arm.contains(r"if exist %d:\virtio-win_license.txt pnputil /add-driver %d:\*.inf /subdirs /install"));
+        assert!(arm.contains(r"virtua-drivers.log"));
         // The x64 tools bundle cannot install ARM64 drivers: the agent alone, emulated.
         assert!(!arm.contains("virtio-win-guest-tools.exe"));
         assert!(arm.contains(r"msiexec /i %d:\guest-agent\qemu-ga-x86_64.msi /qn"));
