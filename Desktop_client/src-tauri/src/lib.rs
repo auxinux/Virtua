@@ -4253,7 +4253,10 @@ fn start_local_vm(vm: &mut LocalVm, others: &[LocalVm]) -> Result<(), String> {
         .ok_or_else(|| "Aucun port SPICE local disponible".to_string())?;
     let qga_port = find_free_port_excluding(6201, 6299, &reserved(|vm| vm.qga_port))
         .ok_or_else(|| "Aucun port agent invite disponible".to_string())?;
-    let agent_port = find_free_port_excluding(6301, 6399, &reserved(|vm| vm.agent_port))
+    // Not 6301-6399: that is the Unified mode's RDP forward (both used to
+    // pick 6301, and QEMU then refused the second: "Could not set up host
+    // forwarding rule 'tcp:127.0.0.1:6301-:3389'").
+    let agent_port = find_free_port_excluding(6401, 6499, &reserved(|vm| vm.agent_port))
         .ok_or_else(|| "Aucun port Agent Virtua disponible".to_string())?;
     let mut ports = LaunchPorts {
         vnc_display: vnc_port - 5900,
@@ -5115,6 +5118,20 @@ mod local_mode_tests {
     }
 
     #[test]
+    fn launch_port_ranges_never_overlap() {
+        // vnc, spice, qmp, qga, Agent Virtua, RDP forward (see prepare_launch_ports).
+        let ranges = [(5901, 5999), (5701, 5799), (6001, 6099), (6201, 6299), (6401, 6499), (6301, 6399)];
+        for (i, a) in ranges.iter().enumerate() {
+            for b in &ranges[i + 1..] {
+                assert!(a.1 < b.0 || b.1 < a.0, "{a:?} overlaps {b:?}");
+            }
+        }
+        let source = include_str!("lib.rs");
+        assert!(source.contains("find_free_port_excluding(6401, 6499, &reserved(|vm| vm.agent_port))"));
+        assert!(source.contains("find_free_port_excluding(6301, 6399, &reserved(|vm| vm.rdp_port))"));
+    }
+
+    #[test]
     fn guest_agent_clients_take_turns_on_its_port() {
         let first = qga_lock(6299, Duration::from_millis(10)).expect("free lock");
         // Held: a probe gives up after its short wait.
@@ -5537,7 +5554,7 @@ mod local_mode_tests {
             spice_password: "secret".into(),
             qmp_port: 6001,
             qga_port: 6201,
-            agent_port: 6301,
+            agent_port: 6401,
             uefi: None,
             tpm_socket: None,
             tpm_device: tpm_device_model("amd64", false, true),
