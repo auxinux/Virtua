@@ -3430,7 +3430,12 @@ enum SpiceMode {
 struct LaunchPlan {
     accelerator: String,
     spice: SpiceMode,
+    /// Sound through SPICE (the console plays it).
     audio: bool,
+    /// Sound straight to this computer's speakers (CoreAudio, PulseAudio /
+    /// PipeWire, DirectSound) when SPICE is not there — Homebrew's QEMU on a
+    /// Mac has no SPICE, and its VMs used to get no sound card at all.
+    host_audio: bool,
     usb_tablet: bool,
     gpu_model: String,
     /// ARM64 only: UEFI firmware on pflash with a per-VM variable store, so
@@ -3441,6 +3446,18 @@ struct LaunchPlan {
     /// older QEMU that rejects one option never costs the VM a feature.
     tuned: bool,
     note: Option<&'static str>,
+}
+
+/// QEMU audio backend for this computer's own speakers.
+fn host_audio_backend() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "coreaudio"
+    } else if cfg!(target_os = "windows") {
+        "dsound"
+    } else {
+        // PulseAudio protocol: PulseAudio itself or PipeWire's pulse server.
+        "pa"
+    }
 }
 
 /// The degradation ladder, most capable first. A failed attempt costs almost
@@ -3454,6 +3471,7 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
         accelerator: preferred.clone(),
         spice: SpiceMode::Secret,
         audio: true,
+        host_audio: false,
         usb_tablet: true,
         gpu_model: gpu_model.to_string(),
         uefi_vars: arm64,
@@ -3482,7 +3500,14 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
         LaunchPlan {
             spice: SpiceMode::Off,
             audio: false,
-            note: Some("SPICE indisponible sur cette installation de QEMU (console VNC utilisee)"),
+            host_audio: true,
+            note: Some("SPICE indisponible sur cette installation de QEMU (console VNC utilisee, son par l'ordinateur)"),
+            ..base.clone()
+        },
+        LaunchPlan {
+            spice: SpiceMode::Off,
+            audio: false,
+            note: Some("SPICE et son indisponibles sur cette installation de QEMU (console VNC utilisee)"),
             ..base.clone()
         },
         LaunchPlan {
@@ -3495,6 +3520,7 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
         LaunchPlan {
             spice: SpiceMode::Off,
             audio: false,
+            host_audio: false,
             usb_tablet: false,
             gpu_model: "std".to_string(),
             uefi_vars: false,
@@ -3509,6 +3535,7 @@ fn launch_plans(architecture: &str, gpu_model: &str) -> Vec<LaunchPlan> {
             accelerator: fallback,
             spice: SpiceMode::Off,
             audio: false,
+            host_audio: false,
             usb_tablet: true,
             gpu_model: "std".to_string(),
             uefi_vars: arm64,
@@ -3773,16 +3800,20 @@ fn build_qemu_command(
         }
         SpiceMode::Off => {}
     }
-    if plan.audio {
-        // `hda-duplex` is a codec: without its `intel-hda` controller QEMU
-        // refuses to start with "No 'HDA bus' bus found".
-        command
-            .arg("-audiodev")
-            .arg("spice,id=audioSpice")
-            .arg("-device")
-            .arg("intel-hda")
-            .arg("-device")
-            .arg("hda-duplex,audiodev=audioSpice");
+    if plan.audio || plan.host_audio {
+        let backend = if plan.audio { "spice" } else { host_audio_backend() };
+        command.arg("-audiodev").arg(format!("{backend},id=virtua-audio"));
+        if vm.architecture == "arm64" {
+            // Windows on ARM has an inbox USB Audio class driver; HD Audio
+            // is not a given there. `virt` always has its xHCI bus (above).
+            command.args(["-device", "usb-audio,audiodev=virtua-audio"]);
+        } else {
+            // `hda-duplex` is a codec: without its `intel-hda` controller QEMU
+            // refuses to start with "No 'HDA bus' bus found".
+            command
+                .args(["-device", "intel-hda"])
+                .args(["-device", "hda-duplex,audiodev=virtua-audio"]);
+        }
     }
 
     if let Some(path) = &ports.serial_log {
@@ -4964,6 +4995,30 @@ mod local_mode_tests {
     }
 
     #[test]
+    fn without_spice_the_sound_goes_to_this_computer() {
+        let mut ports = sample_ports();
+        ports.uefi = Some(UefiFirmware {
+            code: "/fw/aarch64-code.fd".into(),
+            vars: "/disks/vm-vars.fd".into(),
+            secure_boot: false,
+            smm: false,
+        });
+        let plans = launch_plans("arm64", "virtio");
+        let host = plans.iter().find(|p| p.spice == SpiceMode::Off && p.host_audio).expect("a SPICE-less plan with sound");
+        // Tried before the plan that gives sound up.
+        let silent = plans.iter().position(|p| p.spice == SpiceMode::Off && !p.host_audio && !p.audio).unwrap();
+        assert!(plans.iter().position(|p| p == host).unwrap() < silent);
+        let arm = command_args(&build_qemu_command("qemu", &sample_vm("arm64", "virtio"), &ports, host).unwrap());
+        assert!(arm.iter().any(|a| a == &format!("{},id=virtua-audio", host_audio_backend())));
+        assert!(arm.iter().any(|a| a == "usb-audio,audiodev=virtua-audio"));
+        assert!(!arm.iter().any(|a| a == "intel-hda"));
+        assert!(!arm.iter().any(|a| a == "-spice"));
+        let x86_plan = launch_plans("amd64", "virtio").into_iter().find(|p| p.spice == SpiceMode::Off && p.host_audio).unwrap();
+        let x86 = command_args(&build_qemu_command("qemu", &sample_vm("amd64", "virtio"), &ports, &x86_plan).unwrap());
+        assert!(x86.iter().any(|a| a == "hda-duplex,audiodev=virtua-audio"));
+    }
+
+    #[test]
     fn a_spice_less_plan_emits_no_spice_option() {
         let vm = sample_vm("amd64", "virtio");
         let ports = sample_ports();
@@ -4971,6 +5026,7 @@ mod local_mode_tests {
             accelerator: "tcg".into(),
             spice: SpiceMode::Off,
             audio: false,
+            host_audio: false,
             usb_tablet: false,
             gpu_model: "std".into(),
             uefi_vars: false,
