@@ -10,6 +10,7 @@ mod firmware;
 use firmware::UefiFirmware;
 mod platform;
 mod proxmox;
+mod msdownload;
 mod quickcreate;
 mod unified;
 mod wininstall;

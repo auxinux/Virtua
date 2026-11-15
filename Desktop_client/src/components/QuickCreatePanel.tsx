@@ -3,6 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import { Loader2, Rocket } from "lucide-react";
 
 type QuickOs = "windows11" | "debian13";
+export type WindowsLanguage = "fr-CA" | "en-CA";
+
+const windowsLanguages: Array<{ code: WindowsLanguage; label: string }> = [
+  { code: "fr-CA", label: "Français (Canada)" },
+  { code: "en-CA", label: "English (Canada)" },
+];
 
 const offers: Array<{ os: QuickOs; title: string; specs: string; detail: string }> = [
   {
@@ -47,13 +53,16 @@ export function QuickCreatePanel({
   onCreated,
   remote = false,
 }: {
-  quickCreate: (os: QuickOs, name?: string) => Promise<{ id: string }>;
+  quickCreate: (os: QuickOs, name?: string, language?: WindowsLanguage) => Promise<{ id: string }>;
   onCreated: (resourceId: string) => void;
   /** Cloud: the server downloads and installs, nothing runs on this computer. */
   remote?: boolean;
 }) {
   const [busy, setBusy] = useState<QuickOs | null>(null);
   const [names, setNames] = useState<Record<QuickOs, string>>({ windows11: "Windows 11", debian13: "Debian 13" });
+  const [language, setLanguage] = useState<WindowsLanguage>(() =>
+    typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? "en-CA" : "fr-CA",
+  );
   const [progress, setProgress] = useState<Progress | null>(null);
   const [download, setDownload] = useState<Download | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +87,7 @@ export function QuickCreatePanel({
     setProgress({ step: 1, total: 4, message: "Préparation…" });
     setDownload(null);
     try {
-      const resource = await quickCreate(os, names[os].trim() || undefined);
+      const resource = await quickCreate(os, names[os].trim() || undefined, os === "windows11" && !remote ? language : undefined);
       onCreated(resource.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -102,6 +111,27 @@ export function QuickCreatePanel({
               <p className="text-xs text-virtua-muted">{offer.specs}</p>
             </div>
             <p className="text-xs text-virtua-muted">{offer.detail}</p>
+            {offer.os === "windows11" && !remote ? (
+              <label className="flex items-center gap-2 text-xs text-virtua-muted">
+                Langue
+                <select
+                  aria-label="Langue de Windows 11"
+                  className="virtua-input min-w-0 flex-1"
+                  value={language}
+                  disabled={busy !== null}
+                  onChange={(event) => setLanguage(event.target.value as WindowsLanguage)}
+                >
+                  {windowsLanguages.map((choice) => (
+                    <option key={choice.code} value={choice.code}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {offer.os === "windows11" && !remote ? (
+              <p className="text-xs text-virtua-muted">ISO officielle téléchargée chez Microsoft, empreinte vérifiée.</p>
+            ) : null}
             <div className="flex gap-2">
               <input
                 aria-label={`Nom de la VM ${offer.title}`}

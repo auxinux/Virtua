@@ -4,8 +4,9 @@
 //!   always the current point release, checked against Debian's SHA256SUMS),
 //!   booted directly by QEMU with a preseed file appended to its initrd. The
 //!   installer powers the VM off when done; Virtua then boots it from disk.
-//! - **Windows 11**: the ISO of the AuxiNux depot (amd64) or one already in
-//!   the ISO library (ARM64: Microsoft gives no direct link), the VirtIO driver
+//! - **Windows 11**: in French (Canada) or English (Canada), the official ISO
+//!   downloaded from Microsoft (msdownload.rs) or one of that language already
+//!   in the ISO library, its SHA-256 checked against Microsoft's page, the VirtIO driver
 //!   disc, and a complete answer file (disk layout, Pro edition, local account,
 //!   no OOBE, VirtIO drivers during setup, guest tools and RDP/RemoteApp at
 //!   first logon so the Unified mode works right away).
@@ -324,8 +325,30 @@ pub fn windows_language(iso_name: &str) -> &'static str {
 fn input_locale(language: &str) -> &'static str {
     match language {
         "fr-CA" => "0c0c:00001009",
+        // English (Canada), US keyboard: what an English Canadian PC ships with.
+        "en-CA" => "1009:00000409",
         "fr-FR" => "040c:0000040c",
         _ => "0409:00000409",
+    }
+}
+
+/// Language pack of the interface: Microsoft has no en-CA ISO, an English
+/// Canadian Windows is the en-US one with Canadian formats (UserLocale,
+/// SystemLocale) and keyboard. Setup refuses a UILanguage the ISO lacks.
+pub fn windows_ui_language(language: &str) -> &str {
+    if language == "en-CA" { "en-US" } else { language }
+}
+
+/// The ISO name says this language (Microsoft's …_fr-ca_… / …_en-us_…,
+/// Win11_25H2_French_Canadian…, depot naming).
+pub fn iso_has_language(iso_name: &str, language: msdownload::WindowsLanguage) -> bool {
+    let guessed = windows_language(iso_name);
+    match language {
+        msdownload::WindowsLanguage::FrCa => guessed == "fr-CA",
+        msdownload::WindowsLanguage::EnCa => guessed == "en-US" && {
+            let lower = iso_name.to_lowercase().replace('-', "_");
+            lower.contains("en_us") || lower.contains("english")
+        },
     }
 }
 
@@ -413,9 +436,10 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
     })
     .collect();
     let input = input_locale(language);
+    let ui = windows_ui_language(language);
     let international = |name: &str| {
         format!(
-            "    <component name=\"{name}\" {attrs}>\n      <InputLocale>{input}</InputLocale>\n      <SystemLocale>{language}</SystemLocale>\n      <UILanguage>{language}</UILanguage>\n      <UserLocale>{language}</UserLocale>\n"
+            "    <component name=\"{name}\" {attrs}>\n      <InputLocale>{input}</InputLocale>\n      <SystemLocale>{language}</SystemLocale>\n      <UILanguage>{ui}</UILanguage>\n      <UserLocale>{language}</UserLocale>\n"
         )
     };
     let password = format!("<Password><Value>{PASSWORD}</Value><PlainText>true</PlainText></Password>");
@@ -423,7 +447,7 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
         r#"<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <settings pass="windowsPE">
-{intl_pe}      <SetupUILanguage><UILanguage>{language}</UILanguage></SetupUILanguage>
+{intl_pe}      <SetupUILanguage><UILanguage>{ui}</UILanguage></SetupUILanguage>
     </component>
     <component name="Microsoft-Windows-PnpCustomizationsWinPE" {attrs}>
       <DriverPaths>
@@ -498,7 +522,9 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
     )
 }
 
-/// `Windows11*.iso` / `Win11*.iso` of the depot listing.
+/// `Windows11*.iso` / `Win11*.iso` of the depot listing (no longer read by
+/// the quick create; kept for the naming tests).
+#[cfg(test)]
 pub fn is_windows11_iso(name: &str) -> bool {
     let lower = name.to_lowercase();
     (lower.starts_with("windows11") || lower.starts_with("win11")) && lower.ends_with(".iso")
@@ -527,9 +553,12 @@ pub fn header_length(response: &reqwest::blocking::Response) -> Option<u64> {
     response.headers().get(reqwest::header::CONTENT_LENGTH)?.to_str().ok()?.trim().parse().ok()
 }
 
-/// Windows 11 installer: one already in the ISO library, else the AuxiNux
-/// depot's (amd64). Microsoft offers no stable direct link to its ISOs.
-fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
+/// Windows 11 installer in this language: one already in the ISO library
+/// (a released build first, then the newest), else the official ISO of the
+/// day, downloaded from Microsoft and checked against the SHA-256 Microsoft
+/// publishes. Nothing comes from our servers: Microsoft allows downloading
+/// its ISO, not redistributing it.
+fn windows_iso(app: &tauri::AppHandle, arch: &str, language: msdownload::WindowsLanguage) -> Result<PathBuf, String> {
     let config = read_storage_config()?;
     let wants_arm = arch == "arm64";
     let big_enough = |size: u64| size > 3 * 1024 * 1024 * 1024;
@@ -542,54 +571,35 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
             let name = path.file_name()?.to_string_lossy().to_lowercase();
             let meta = entry.metadata().ok()?;
             let windows = name.ends_with(".iso") && guess_guest_os(Some(&name)) == "windows" && name.contains("11");
-            let arm = name.contains("arm");
-            (windows && arm == wants_arm && big_enough(meta.len())).then(|| (is_release_windows_iso(&name), meta.modified().unwrap_or(UNIX_EPOCH), path))
+            let arm = name.contains("arm") || name.contains("a64");
+            (windows && arm == wants_arm && iso_has_language(&name, language) && big_enough(meta.len()))
+                .then(|| (is_release_windows_iso(&name), meta.modified().unwrap_or(UNIX_EPOCH), path))
         })
         .collect();
-    // A released build first, then the newest.
     local.sort();
-    let local = local.pop();
-    if let Some((true, _, path)) = &local {
-        return Ok(path.clone());
+    if let Some((_, _, path)) = local.pop() {
+        return Ok(path);
     }
-    // Only an Insider build here (or nothing): a released one on the depot
-    // is worth the download, otherwise keep what we have.
-    let fallback = local.map(|(_, _, path)| path);
-    let base = repository_url("ISO", arch)?;
-    let client = http_client(Duration::from_secs(60))?;
-    let listing = match client.get(&base).send().and_then(|r| r.error_for_status()).and_then(|r| r.text()) {
-        Ok(listing) => listing,
-        Err(e) => return fallback.ok_or_else(|| format!("Dépôt AuxiNux inaccessible : {e}")),
+
+    let manual = |reason: String| {
+        format!(
+            "{reason}\nTéléchargez l’ISO vous-même sur {} (langue : {}), placez-la dans {} et relancez la création rapide.",
+            msdownload::manual_page_url(arch, language),
+            match language {
+                msdownload::WindowsLanguage::FrCa => "Français canadien",
+                msdownload::WindowsLanguage::EnCa => "Anglais",
+            },
+            config.iso_dir
+        )
     };
-    let mut candidates: Vec<(bool, u64, String)> = listing
-        .split("href=\"")
-        .skip(1)
-        .filter_map(|chunk| chunk.split('"').next())
-        .filter(|name| is_windows11_iso(name) && !name.contains('/'))
-        .filter_map(|name| {
-            let response = client.head(format!("{base}{name}")).send().ok()?;
-            let size = header_length(&response)?;
-            big_enough(size).then(|| (is_release_windows_iso(name), size, name.to_string()))
-        })
-        .collect();
-    candidates.sort();
-    if let Some(path) = fallback {
-        if !candidates.last().is_some_and(|(release, _, _)| *release) {
-            return Ok(path);
-        }
-    }
-    let Some((_, size, name)) = candidates.pop() else {
-        return Err(if wants_arm {
-            format!(
-                "Aucune ISO Windows 11 ARM64 sur le dépôt AuxiNux ({base}). Microsoft ne publie pas de lien direct : téléchargez-la sur microsoft.com/software-download/windows11arm64 et placez-la dans {}, ou déposez-la dans TEMPLATES/ISO/ARM du dépôt.",
-                config.iso_dir
-            )
-        } else {
-            format!("Aucune ISO Windows 11 (plus de 3 Go) sur le dépôt AuxiNux ({base}).")
-        });
-    };
-    let name = html_unescape(&name);
-    let destination = PathBuf::from(&config.iso_dir).join(safe_download_name(&name)?);
+    progress(app, 2, "Demande de l’ISO Windows 11 officielle à Microsoft…");
+    let iso = msdownload::find_iso(arch, language).map_err(manual)?;
+    let destination = PathBuf::from(&config.iso_dir).join(safe_download_name(&iso.file_name)?);
+    let size = http_client(Duration::from_secs(30))
+        .ok()
+        .and_then(|client| client.head(&iso.url).send().ok())
+        .and_then(|response| header_length(&response))
+        .unwrap_or(8 * 1024 * 1024 * 1024);
     let free = sysinfo::Disks::new_with_refreshed_list()
         .iter()
         .filter(|d| Path::new(&config.iso_dir).starts_with(d.mount_point()))
@@ -606,7 +616,16 @@ fn windows_iso(app: &tauri::AppHandle, arch: &str) -> Result<PathBuf, String> {
             ));
         }
     }
-    download_file_with_progress(app, "windows11-iso", &name, &format!("{base}{name}"), &destination)?;
+    progress(app, 2, format!("Téléchargement de Windows 11 depuis Microsoft ({})…", iso.file_name));
+    download_file_with_progress(app, "windows11-iso", &iso.file_name, &iso.url, &destination)
+        .map_err(|e| manual(format!("Téléchargement interrompu : {e}")))?;
+    if let Some(expected) = &iso.sha256 {
+        progress(app, 2, "Vérification de l’empreinte SHA-256 publiée par Microsoft…");
+        if &sha256_file(&destination)? != expected {
+            let _ = fs::remove_file(&destination);
+            return Err(manual("L’ISO téléchargée ne correspond pas à l’empreinte publiée par Microsoft ; elle a été supprimée.".into()));
+        }
+    }
     Ok(destination)
 }
 
@@ -654,19 +673,26 @@ fn unique_name(wanted: &str, vms: &[LocalVm]) -> String {
     (2..).map(|i| format!("{wanted} ({i})")).find(|n| !taken(n)).unwrap_or_else(|| wanted.to_string())
 }
 
-pub fn quick_create(app: &tauri::AppHandle, os: &str, name: Option<String>) -> Result<LocalVm, String> {
-    quick_create_with(app, os, name, false)
+pub fn quick_create(app: &tauri::AppHandle, os: &str, name: Option<String>, language: Option<String>) -> Result<LocalVm, String> {
+    quick_create_with(app, os, name, language, false)
 }
 
 /// Quick create of a disposable base: same unattended install, generalized
 /// (Debian), then kept as a base by the inventory refresh.
 pub fn quick_create_base(app: &tauri::AppHandle, os: &str) -> Result<LocalVm, String> {
     let label = profile(os)?.label;
-    quick_create_with(app, os, Some(format!("Base jetable {label} (préparation)")), true)
+    quick_create_with(app, os, Some(format!("Base jetable {label} (préparation)")), None, true)
 }
 
-fn quick_create_with(app: &tauri::AppHandle, os: &str, name: Option<String>, make_base: bool) -> Result<LocalVm, String> {
+fn quick_create_with(
+    app: &tauri::AppHandle,
+    os: &str,
+    name: Option<String>,
+    language: Option<String>,
+    make_base: bool,
+) -> Result<LocalVm, String> {
     let profile = profile(os)?;
+    let language = msdownload::WindowsLanguage::parse(language.as_deref())?;
     progress(app, 1, "Vérification de QEMU…");
     let diagnostics = qemu_diagnostics_blocking()?;
     if !diagnostics.ready {
@@ -726,14 +752,14 @@ fn quick_create_with(app: &tauri::AppHandle, os: &str, name: Option<String>, mak
         }
     } else {
         progress(app, 2, "Préparation de l’ISO Windows 11 et des pilotes VirtIO…");
-        let iso = windows_iso(app, &arch)?;
+        let iso = windows_iso(app, &arch, language)?;
         let config = read_storage_config()?;
         let drivers = PathBuf::from(&config.iso_dir).join(VIRTIO_WIN_NAME);
         if !drivers.is_file() {
             let url = virtio_win_url(&arch);
             download_file_with_progress(app, VIRTIO_WIN_NAME, VIRTIO_WIN_NAME, url, &drivers)?;
         }
-        let language = windows_language(&iso.file_name().unwrap_or_default().to_string_lossy()).to_string();
+        let language = language.code().to_string();
         payload.iso_path = Some(iso.to_string_lossy().to_string());
         payload.driver_iso_path = Some(drivers.to_string_lossy().to_string());
         AutoInstall { os: profile.os.into(), language: Some(language), make_base, ..Default::default() }
@@ -839,8 +865,13 @@ fn windows_arm_display_after_install(vm: &mut LocalVm) {
 }
 
 #[tauri::command]
-pub async fn local_quick_create(app: tauri::AppHandle, os: String, name: Option<String>) -> Result<LocalVm, String> {
-    tauri::async_runtime::spawn_blocking(move || quick_create(&app, &os, name))
+pub async fn local_quick_create(
+    app: tauri::AppHandle,
+    os: String,
+    name: Option<String>,
+    language: Option<String>,
+) -> Result<LocalVm, String> {
+    tauri::async_runtime::spawn_blocking(move || quick_create(&app, &os, name, language))
         .await
         .map_err(|e| e.to_string())?
 }

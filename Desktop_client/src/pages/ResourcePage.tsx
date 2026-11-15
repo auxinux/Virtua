@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { cpuOptions, diskBusLabels, labelled, legacyNetworkOptions, machineOptions, networkLabels, periodCpus } from "@/hardwareOptions";
-import { QuickCreatePanel } from "@/components/QuickCreatePanel";
+import { QuickCreatePanel, type WindowsLanguage } from "@/components/QuickCreatePanel";
 import { Boxes, Container, Loader2, Monitor, Plus, Play, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -134,7 +134,7 @@ function CreateResourceDialog({
   hostArch?: string | null;
   listCreateOptions?: (type: ResourceKind) => Promise<DesktopCreateOptionsResponse>;
   createResource?: (payload: CreateResourcePayload) => Promise<unknown>;
-  quickCreate?: (os: "windows11" | "debian13", name?: string) => Promise<{ id: string }>;
+  quickCreate?: (os: "windows11" | "debian13", name?: string, language?: WindowsLanguage) => Promise<{ id: string }>;
   onClose: () => void;
   onCreated?: () => void;
 }) {
@@ -686,7 +686,7 @@ export function ResourcePage({
   hostArch?: string | null;
   listCreateOptions?: (type: ResourceKind) => Promise<DesktopCreateOptionsResponse>;
   createResource?: (payload: CreateResourcePayload) => Promise<unknown>;
-  quickCreate?: (os: "windows11" | "debian13", name?: string) => Promise<{ id: string }>;
+  quickCreate?: (os: "windows11" | "debian13", name?: string, language?: WindowsLanguage) => Promise<{ id: string }>;
   runResourceAction?: (resourceId: string, action: PowerAction) => Promise<unknown>;
   onChanged?: () => void | Promise<void>;
 }) {

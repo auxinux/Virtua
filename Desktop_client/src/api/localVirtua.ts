@@ -395,11 +395,11 @@ export const localVirtua = {
    * Quick create: downloads the installer, creates an optimally configured VM
    * and starts its unattended installation (account virtua / virtua).
    */
-  async quickCreate(os: "windows11" | "debian13", name?: string) {
+  async quickCreate(os: "windows11" | "debian13", name?: string, language?: "fr-CA" | "en-CA") {
     const label = os === "windows11" ? "Windows 11" : "Debian 13";
     const taskId = pushTask({ label: `Création rapide ${label}`, target: name || label, status: "running", progress: 10 });
     try {
-      const vm = await invoke<LocalVm>("local_quick_create", { os, name: name || null });
+      const vm = await invoke<LocalVm>("local_quick_create", { os, name: name || null, language: language || null });
       updateTask(taskId, { status: "completed", progress: 100 });
       return mapLocalVm(vm);
     } catch (error) {
