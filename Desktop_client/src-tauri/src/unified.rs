@@ -778,6 +778,8 @@ pub struct UnifiedVm {
     pub needs_restart: bool,
     pub apps: Vec<UnifiedApp>,
     pub integrated: bool,
+    /// Launcher desktop ids, app id -> `virtua-….desktop` (AuxiNux Shell).
+    pub launchers: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -803,6 +805,7 @@ pub fn overview() -> Result<UnifiedOverview, String> {
                 needs_restart: running && target.is_none(),
                 integrated: launchers::installed(&vm.id),
                 apps: read_cached_apps(&vm.id),
+                launchers: read_cached_apps(&vm.id).iter().map(|a| (a.id.clone(), launchers::desktop_id(&vm.id, &a.id))).collect(),
                 id: vm.id,
                 name: vm.name,
                 state: vm.state,
@@ -965,6 +968,50 @@ pub fn launch(vm_id: &str, app_id: Option<&str>) -> Result<(), String> {
     spawn_client(&client, &vm, &host, port, &user, &password, app.as_ref())
 }
 
+/// `--unified-list`: the Unified overview as JSON on stdout (AuxiNux Shell's
+/// Applications Windows). Exit code 1 and the error on stderr if unreadable.
+pub fn list_cli() -> i32 {
+    match overview().and_then(|o| serde_json::to_string(&o).map_err(|e| e.to_string())) {
+        Ok(json) => {
+            println!("{json}");
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
+/// `--unified-integrate <vm> on|off`: the launchers of the VM's apps in the
+/// host's menu (AuxiNux Shell pins one of them). Prints how many were written.
+pub fn integrate_cli(args: &[String]) -> i32 {
+    let vm = args.first().map(String::as_str).unwrap_or_default();
+    let on = args.get(1).map(String::as_str) != Some("off");
+    let result = if on {
+        find_vm(vm).and_then(|v| {
+            let apps = read_cached_apps(vm);
+            if apps.is_empty() {
+                Err("Aucune application connue : actualisez d’abord la liste (Windows démarré).".into())
+            } else {
+                launchers::install(&v, &apps)
+            }
+        })
+    } else {
+        launchers::remove(vm).map(|_| 0)
+    };
+    match result {
+        Ok(count) => {
+            println!("{count}");
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
 /// Entry point of `--unified-launch <vm> [app]`, used by the host launchers.
 /// Returns the process exit code; errors are shown in a native dialog since
 /// there is no window to show them in.
@@ -1042,6 +1089,11 @@ pub mod launchers {
 
     fn marker(vm_id: &str) -> Result<PathBuf, String> {
         Ok(vm_dir(vm_id)?.join("launchers.json"))
+    }
+
+    /// Desktop entry id of an app's launcher (AuxiNux Shell pins it).
+    pub fn desktop_id(vm_id: &str, app_id: &str) -> String {
+        format!("virtua-{}-{}.desktop", slug(vm_id), app_id)
     }
 
     pub fn installed(vm_id: &str) -> bool {
@@ -1172,7 +1224,7 @@ pub mod launchers {
                     link
                 }
                 _ => {
-                    let file = root.join(format!("virtua-{}-{}.desktop", slug(&vm.id), app.id));
+                    let file = root.join(desktop_id(&vm.id, &app.id));
                     let entry = format!(
                         "[Desktop Entry]\nType=Application\nName={name}\nComment=Windows · {vm} (Virtua Desktop)\nExec={exe} --unified-launch {vmid} {appid}\n{icon}StartupWMClass=virtua-{appid}\nCategories=Virtua;\nTerminal=false\nX-Virtua-VM={vmid}\n",
                         name = app.name.replace(['\n', '\r'], " "),

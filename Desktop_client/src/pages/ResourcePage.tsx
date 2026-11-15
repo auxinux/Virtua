@@ -4,7 +4,7 @@ import { QuickCreatePanel, type WindowsLanguage } from "@/components/QuickCreate
 import { Boxes, Container, Loader2, Monitor, Plus, Play, RotateCcw, Square, Terminal } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useSearchParams, Link, useNavigate } from "react-router-dom";
 import { virtuaClient, type CreateResourcePayload } from "@/api/virtuaClient";
 import { guessGuestOs } from "@/api/localVirtua";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -125,9 +125,11 @@ function CreateResourceDialog({
   listCreateOptions = defaultListCreateOptions,
   createResource = defaultCreateResource,
   quickCreate,
+  initialLanguage,
   onClose,
   onCreated,
 }: {
+  initialLanguage?: WindowsLanguage;
   defaultKind: ResourceKind;
   resources: VirtuaResource[];
   usageMode?: UsageMode;
@@ -378,6 +380,7 @@ function CreateResourceDialog({
         {quickCreate && form.type === "vm" && (usageMode === "local" || options.features?.quickCreate) ? (
           <QuickCreatePanel
             quickCreate={quickCreate}
+            initialLanguage={initialLanguage}
             remote={usageMode !== "local"}
             onCreated={(resourceId) => {
               onCreated?.();
@@ -696,6 +699,9 @@ export function ResourcePage({
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  // ?create=windows11&lang=fr-CA (AuxiNux Shell, --quick-create-windows).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [quickLanguage, setQuickLanguage] = useState<WindowsLanguage | undefined>(undefined);
   const [showStopChoice, setShowStopChoice] = useState(false);
   const selectedResource = visibleResources.find((resource) => resource.id === selectedId) ?? visibleResources[0];
   // The server declares creation rights per kind in /api/desktop/me; falling
@@ -712,6 +718,13 @@ export function ResourcePage({
   const canStart = Boolean(selectedResource && canPower && isStopped(selectedResource.state));
   const canStop = Boolean(selectedResource && canPower && isRunning(selectedResource.state));
   const canRestart = canStop;
+  useEffect(() => {
+    if (searchParams.get("create") !== "windows11" || !canCreate) return;
+    const lang = searchParams.get("lang");
+    setQuickLanguage(lang === "en-CA" || lang === "fr-CA" ? lang : undefined);
+    setShowCreate(true);
+    setSearchParams({}, { replace: true });
+  }, [searchParams, canCreate, setSearchParams]);
 
   const runAction = async (action: PowerAction) => {
     if (!selectedResource) return;
@@ -818,6 +831,7 @@ export function ResourcePage({
 
       {canCreate && showCreate ? (
         <CreateResourceDialog
+          initialLanguage={quickLanguage}
           defaultKind={kind === "all" ? "vm" : kind}
           resources={resources}
           usageMode={usageMode}

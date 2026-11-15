@@ -52,7 +52,10 @@ export function QuickCreatePanel({
   quickCreate,
   onCreated,
   remote = false,
+  initialLanguage,
 }: {
+  /** Language chosen beforehand (AuxiNux Shell, --quick-create-windows). */
+  initialLanguage?: WindowsLanguage;
   quickCreate: (os: QuickOs, name?: string, language?: WindowsLanguage) => Promise<{ id: string }>;
   onCreated: (resourceId: string) => void;
   /** Cloud: the server downloads and installs, nothing runs on this computer. */
@@ -61,7 +64,7 @@ export function QuickCreatePanel({
   const [busy, setBusy] = useState<QuickOs | null>(null);
   const [names, setNames] = useState<Record<QuickOs, string>>({ windows11: "Windows 11", debian13: "Debian 13" });
   const [language, setLanguage] = useState<WindowsLanguage>(() =>
-    typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? "en-CA" : "fr-CA",
+    initialLanguage ?? (typeof navigator !== "undefined" && navigator.language?.toLowerCase().startsWith("en") ? "en-CA" : "fr-CA"),
   );
   const [progress, setProgress] = useState<Progress | null>(null);
   const [download, setDownload] = useState<Download | null>(null);

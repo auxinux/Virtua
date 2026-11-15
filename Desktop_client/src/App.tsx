@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes, useNavigate } from "react-router-dom";
+import { invoke } from "@tauri-apps/api/core";
 import { EngineSetup } from "@/components/EngineSetup";
 import { Layout } from "@/components/Layout";
 import { localVirtua, modeStore, type EngineInstallPrompt } from "@/api/localVirtua";
@@ -68,6 +69,26 @@ function keepIfSame<T>(next: T) {
 
 export default function App() {
   const [usageMode, setUsageMode] = useState<"unset" | UsageMode>(() => modeStore.get());
+  const navigate = useNavigate();
+  // Route asked on the command line (AuxiNux Shell: « Installer Windows 11 »
+  // -> --quick-create-windows): local mode, then that page.
+  const [launchRoute, setLaunchRoute] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<string | null>("take_launch_request")
+      .then((route) => {
+        if (!route) return;
+        modeStore.set("local");
+        setUsageMode("local");
+        setLaunchRoute(route);
+      })
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (launchRoute && usageMode === "local") {
+      navigate(launchRoute);
+      setLaunchRoute(null);
+    }
+  }, [launchRoute, usageMode, navigate]);
   const [user, setUser] = useState<VirtuaUser | null>(null);
   const [connection, setConnection] = useState<VirtuaConnection | null>(null);
   const [nodes, setNodes] = useState<VirtuaNode[]>([]);

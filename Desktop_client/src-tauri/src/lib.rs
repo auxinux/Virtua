@@ -4676,12 +4676,43 @@ fn install_crash_log() {
     }));
 }
 
+/// Route the window opens on, asked on the command line (taken once).
+static LAUNCH_REQUEST: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_launch_request(route: String) {
+    if let Ok(mut request) = LAUNCH_REQUEST.lock() {
+        *request = Some(route);
+    }
+}
+
+#[tauri::command]
+fn take_launch_request() -> Option<String> {
+    LAUNCH_REQUEST.lock().ok().and_then(|mut request| request.take())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Host launchers of the Unified mode: open one Windows app, no window.
     let args: Vec<String> = env::args().collect();
     if let Some(position) = args.iter().position(|arg| arg == "--unified-launch") {
         std::process::exit(unified::cli(&args[position + 1..]));
+    }
+    // AuxiNux Shell (Applications Windows) reads the Unified mode from here:
+    // Windows VMs, state, readiness and their apps (icons in base64), as JSON.
+    if args.iter().any(|arg| arg == "--unified-list") {
+        std::process::exit(unified::list_cli());
+    }
+    if let Some(position) = args.iter().position(|arg| arg == "--unified-integrate") {
+        std::process::exit(unified::integrate_cli(&args[position + 1..]));
+    }
+    // « Installer Windows 11 » of AuxiNux Shell: open on the quick create,
+    // language already chosen (the window then shows the progress as usual).
+    if let Some(position) = args.iter().position(|arg| arg == "--quick-create-windows") {
+        let language = args.get(position + 1).map(String::as_str).filter(|a| !a.starts_with("--"));
+        match msdownload::WindowsLanguage::parse(language) {
+            Ok(language) => set_launch_request(format!("/vms?create=windows11&lang={}", language.code())),
+            Err(error) => log_line(&format!("--quick-create-windows: {error}")),
+        }
     }
     install_crash_log();
     log_line(&format!(
@@ -4703,6 +4734,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            take_launch_request,
             proxmox::pve_probe,
             proxmox::pve_login,
             proxmox::pve_restore,
