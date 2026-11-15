@@ -504,6 +504,11 @@ pub fn windows_answer_file(architecture: &str, language: &str, computer_name: &s
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
         <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
         <ProtectYourPC>3</ProtectYourPC>
+        <!-- No out-of-box experience at all: Windows 11 26300 (26H2) stops on
+             its cloud pages (OOBEZDP, OOBESETTINGSSELECTOR) when one of them
+             times out in a VM; the account and auto logon above still apply. -->
+        <SkipMachineOOBE>true</SkipMachineOOBE>
+        <SkipUserOOBE>true</SkipUserOOBE>
       </OOBE>
       <UserAccounts>
         <LocalAccounts>
@@ -1002,6 +1007,12 @@ mod tests {
     #[test]
     fn the_windows_answer_file_is_complete_and_well_formed() {
         let xml = windows_answer_file("amd64", "fr-CA", "WIN11");
+        // Windows 11 26H2 (26300) stops on its cloud OOBE pages in a VM
+        // (OOBEZDP, OOBESETTINGSSELECTOR) unless the OOBE is skipped.
+        assert!(xml.contains("<SkipMachineOOBE>true</SkipMachineOOBE>") && xml.contains("<SkipUserOOBE>true</SkipUserOOBE>"));
+        let en = windows_answer_file("amd64", "en-CA", "WIN11");
+        assert!(en.contains("<UILanguage>en-US</UILanguage>") && en.contains("<UserLocale>en-CA</UserLocale>"));
+        assert!(en.contains("<InputLocale>1009:00000409</InputLocale>"));
         assert!(xml.contains("<UILanguage>fr-CA</UILanguage>"));
         assert!(xml.contains("<InputLocale>0c0c:00001009</InputLocale>"));
         assert!(xml.contains(r"<Path>E:\viostor\w11\amd64</Path>"));
