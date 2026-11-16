@@ -21,6 +21,22 @@ type RfbInstance = RFB & {
   focus: (options?: FocusOptions) => void;
 };
 
+/**
+ * spice-html5 removes its canvases from `document.getElementById(screen_id)`
+ * when it stops. Once React has taken the console out of the page (leaving
+ * the console, switching VM or protocol) that element is gone, `stop()`
+ * throws "null is not an object (…removeChild)" and the whole page fell
+ * into the error screen. The connection is closed either way.
+ */
+function stopSpice(conn: SpiceMainConn | null) {
+  if (!conn) return;
+  try {
+    conn.stop();
+  } catch {
+    // Its DOM is already gone: nothing left to tear down.
+  }
+}
+
 function fetchConsoleTicket(resource: VirtuaResource, mode: ConsoleMode): Promise<DesktopConsoleTicketResponse> {
   if (resource.source === "proxmox") return proxmoxClient.getConsoleTicket(resource, mode);
   return resource.source === "local"
@@ -148,7 +164,7 @@ function CloudGraphicalConsole({
   const disconnectConsole = () => {
     rfbRef.current?.disconnect();
     rfbRef.current = null;
-    spiceRef.current?.stop();
+    stopSpice(spiceRef.current);
     spiceRef.current = null;
     setConnected(false);
     setProtocol(null);
@@ -285,7 +301,7 @@ function CloudGraphicalConsole({
     };
 
     const fallbackToVnc = async () => {
-      spiceRef.current?.stop();
+      stopSpice(spiceRef.current);
       spiceRef.current = null;
       resizeObserver?.disconnect();
       resizeObserver = null;
