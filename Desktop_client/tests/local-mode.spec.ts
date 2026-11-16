@@ -302,7 +302,7 @@ test("quick create installs Debian 13 in one click and opens its console", async
   await page.getByRole("button", { name: "Créer et installer" }).nth(1).click();
   await expect
     .poll(() => page.evaluate(() => (window as any).testCalls.filter((c: any) => c.cmd === "local_quick_create").map((c: any) => c.args)))
-    .toEqual([{ os: "debian13", name: "Mon Debian" }]);
+    .toEqual([{ os: "debian13", name: "Mon Debian", language: null }]);
   await expect(page).toHaveURL(/#\/console\/local-vm-quick$/);
 });
 
