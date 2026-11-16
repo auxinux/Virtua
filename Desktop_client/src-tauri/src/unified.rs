@@ -394,15 +394,75 @@ fn password_entry(vm_id: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, &format!("unified-{}", safe_file_name(vm_id)?)).map_err(|e| e.to_string())
 }
 
-/// Store the Windows password of a VM (quick create knows it already).
+/// Fallback when the system keyring cannot keep the password. On Linux the
+/// keyring crate writes keyutils (emptied at reboot, expiring) plus the Secret
+/// Service; without a Secret Service daemon (AuxiNux OS ships none) the
+/// password vanished at the first reboot and every launch asked to prepare
+/// the Unified mode again. The file is private to the user (0600), like the
+/// VM's own disk.
+fn secret_file(vm_id: &str) -> Result<PathBuf, String> {
+    Ok(vm_dir(vm_id)?.join("unified.secret"))
+}
+
+fn write_secret_file(vm_id: &str, password: &str) -> Result<(), String> {
+    let path = secret_file(vm_id)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(password.as_bytes()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Store the Windows password of a VM (quick create knows it already): the
+/// keyring when it really keeps it, else the private file.
 pub fn remember_password(vm_id: &str, password: &str) -> Result<(), String> {
-    password_entry(vm_id)?.set_password(password).map_err(|e| format!("Trousseau indisponible : {e}"))
+    let kept = password_entry(vm_id)
+        .and_then(|entry| entry.set_password(password).map_err(|e| e.to_string()).map(|_| entry))
+        .map(|entry| entry.get_password().ok().as_deref() == Some(password))
+        .unwrap_or(false);
+    // keyutils reads back fine until the next reboot: keep the file anyway
+    // on Linux, where the durable half (Secret Service) may be missing.
+    if !kept || cfg!(target_os = "linux") {
+        write_secret_file(vm_id, password)?;
+    } else {
+        let _ = fs::remove_file(secret_file(vm_id)?);
+    }
+    Ok(())
 }
 
 fn load_password(vm_id: &str) -> Result<String, String> {
-    password_entry(vm_id)?
-        .get_password()
-        .map_err(|_| "Mot de passe Windows introuvable dans le trousseau : refaites la préparation du mode Unifié.".to_string())
+    if let Ok(password) = password_entry(vm_id).and_then(|entry| entry.get_password().map_err(|e| e.to_string())) {
+        return Ok(password);
+    }
+    if let Ok(password) = fs::read_to_string(secret_file(vm_id)?) {
+        if !password.is_empty() {
+            return Ok(password);
+        }
+    }
+    Err("Mot de passe Windows introuvable : refaites la préparation du mode Unifié.".to_string())
+}
+
+/// The password of a Unified VM: stored, or the quick-create account's
+/// (virtua / virtua) for VMs made before it was kept reliably.
+fn password_for(vm: &LocalVm, user: &str) -> Result<String, String> {
+    load_password(&vm.id).or_else(|error| {
+        if user == quickcreate::USER {
+            let _ = remember_password(&vm.id, quickcreate::PASSWORD);
+            Ok(quickcreate::PASSWORD.to_string())
+        } else {
+            Err(error)
+        }
+    })
 }
 
 // ── Host client ─────────────────────────────────────────────────────────────
@@ -897,7 +957,7 @@ pub fn prepare(vm_id: &str, username: &str, password: &str) -> Result<(), String
         }
         return Err(format!("Windows a refusé la préparation : {raw}"));
     }
-    password_entry(vm_id)?.set_password(password).map_err(|e| format!("Trousseau indisponible : {e}"))?;
+    remember_password(vm_id, password)?;
     update_vm(vm_id, |vm| {
         vm.unified = true;
         vm.unified_user = Some(username.to_string());
@@ -911,6 +971,9 @@ pub fn disable(vm_id: &str) -> Result<(), String> {
     let _ = launchers::remove(vm_id);
     if let Ok(entry) = password_entry(vm_id) {
         let _ = entry.delete_credential();
+    }
+    if let Ok(path) = secret_file(vm_id) {
+        let _ = fs::remove_file(path);
     }
     update_vm(vm_id, |vm| {
         vm.unified = false;
@@ -940,7 +1003,7 @@ pub fn launch(vm_id: &str, app_id: Option<&str>) -> Result<(), String> {
         return Err(format!("Le mode Unifié n’est pas activé pour « {} ».", vm.name));
     }
     let user = vm.unified_user.clone().ok_or("Compte Windows non configuré")?;
-    let password = load_password(vm_id)?;
+    let password = password_for(&vm, &user)?;
     let app = match app_id {
         Some(id) => Some(
             read_cached_apps(vm_id)
@@ -1373,6 +1436,35 @@ pub async fn local_unified_install_client(app: tauri::AppHandle) -> Result<Clien
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_windows_password_survives_a_keyring_that_forgets_it() {
+        let home = std::env::temp_dir().join(format!("virtua-secret-{}", std::process::id()));
+        std::env::set_var("XDG_DATA_HOME", &home);
+        let vm = "secret-test-vm";
+        remember_password(vm, "S3cret!").unwrap();
+        // What a reboot does to keyutils without a Secret Service.
+        if let Ok(entry) = password_entry(vm) {
+            let _ = entry.delete_credential();
+        }
+        assert_eq!(load_password(vm).unwrap(), "S3cret!");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(secret_file(vm).unwrap()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        disable_secret_for_test(vm);
+        assert!(load_password(vm).is_err());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    fn disable_secret_for_test(vm: &str) {
+        if let Ok(entry) = password_entry(vm) {
+            let _ = entry.delete_credential();
+        }
+        let _ = fs::remove_file(secret_file(vm).unwrap());
+    }
+
     #[test]
     fn freerdp_errors_are_reported_without_their_prefix() {
         let log = "[12:00:01:123] [4242:4243] [ERROR][com.freerdp.core] - [freerdp_tcp_connect]: connect to 127.0.0.1:6301 failed\n[12:00:01:124] [4242:4243] [INFO][x] - ok\n[12:00:01:125] [4242:4243] [ERROR][com.freerdp.client.x11] - [xf_pre_connect]: failed to open display: :0\n";
